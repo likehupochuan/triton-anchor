@@ -107,26 +107,7 @@ def _require_pass(module, pass_name, pm, **kwargs):
     return True
 
 
-def make_ttir(mod, metadata: dict, hw: Optional[HWCapability] = None):
-    """Convenience function: build pipeline + run it on a module.
 
-    This mirrors the signature of triton_race's ``_make_ttir(mod, metadata, options)``.
-
-    Args:
-        mod: An MLIR module (``ir.Module``).
-        metadata: Compilation metadata dict (mutated in-place).
-        hw: Optional ``HWCapability``.
-
-    Returns:
-        The optimized MLIR module (same object, mutated in-place).
-    """
-    from triton._C.libtriton import ir
-
-    pm = ir.pass_manager(mod.context)
-    pm.enable_debug()
-    build_ttir_pipeline(pm, hw=hw)
-    pm.run(mod)
-    return mod
 
 
 def inject_hw_attributes(mod, hw: HWCapability, metadata: dict):
