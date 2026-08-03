@@ -85,3 +85,37 @@ class TestHWCapability:
                 ptr_model="structured",
                 # Missing matrix_cap!
             )
+
+    @pytest.mark.parametrize(
+        ("paradigm", "required_cap", "incompatible_cap"),
+        [
+            (
+                ComputeParadigm.AME_MATRIX,
+                {"matrix_cap": MatrixCapability()},
+                {"tensor_cap": TensorCapability()},
+            ),
+            (
+                ComputeParadigm.TENSOR_PROCESSOR,
+                {"tensor_cap": TensorCapability()},
+                {"gpgpu_cap": GPGPUCapability()},
+            ),
+            (
+                ComputeParadigm.GPGPU,
+                {"gpgpu_cap": GPGPUCapability()},
+                {"matrix_cap": MatrixCapability()},
+            ),
+        ],
+    )
+    def test_validation_rejects_mixed_paradigm_capabilities(
+        self, paradigm, required_cap, incompatible_cap
+    ):
+        with pytest.raises(ValueError, match="incompatible capabilities"):
+            HWCapability(
+                name="mixed-capabilities",
+                arch_family="test",
+                compute_paradigm=paradigm,
+                anchor_ir_track=AnchorIRTrack.LINALG,
+                ptr_model="structured",
+                **required_cap,
+                **incompatible_cap,
+            )

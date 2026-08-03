@@ -232,6 +232,23 @@ class HWCapability:
             if self.gpgpu_cap is None:
                 raise ValueError(f"GPGPU paradigm requires gpgpu_cap (hw: {self.name})")
 
+        expected_cap = {
+            ComputeParadigm.AME_MATRIX: "matrix_cap",
+            ComputeParadigm.TENSOR_PROCESSOR: "tensor_cap",
+            ComputeParadigm.GPGPU: "gpgpu_cap",
+        }[self.compute_paradigm]
+        incompatible_caps = [
+            cap_name
+            for cap_name in ("matrix_cap", "tensor_cap", "gpgpu_cap")
+            if cap_name != expected_cap and getattr(self, cap_name) is not None
+        ]
+        if incompatible_caps:
+            raise ValueError(
+                f"{self.compute_paradigm.name} paradigm only supports {expected_cap}; "
+                f"incompatible capabilities: {', '.join(incompatible_caps)} "
+                f"(hw: {self.name})"
+            )
+
     def __post_init__(self):
         """Validate capability fields and resolve AnchorIRTrack.
 
