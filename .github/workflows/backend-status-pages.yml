@@ -42,10 +42,10 @@ jobs:
         if: ${{ github.event_name != 'pull_request' }}
         env:
           GITEE_RESULTS_OWNER: ${{ vars.GITEE_RESULTS_OWNER || vars.GITEE_OWNER || 'likehupochuan' }}
-          GITEE_RESULTS_REPO: ${{ vars.GITEE_RESULTS_REPO || 'triton-anchor-local-ci-results' }}
+          GITEE_RESULTS_REPO: ${{ vars.GITEE_RESULTS_REPO || 'try-result' }}
           GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
           GITEE_RESULTS_BRANCH: ${{ vars.GITEE_RESULTS_BRANCH || 'local-ci-results' }}
-          GITEE_RESULTS_WEB_URL: ${{ vars.GITEE_RESULTS_WEB_URL || 'https://gitee.com/likehupochuan/triton-anchor-local-ci-results' }}
+          GITEE_RESULTS_WEB_URL: ${{ vars.GITEE_RESULTS_WEB_URL || 'https://gitee.com/likehupochuan/try-result' }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           DASHBOARD_SOURCE_BRANCH: ${{ vars.DASHBOARD_SOURCE_BRANCH || 'ci/push/jiwang-delivery-ci' }}
           DASHBOARD_FULL_TEST_SOURCE_BRANCH: ${{ vars.DASHBOARD_FULL_TEST_SOURCE_BRANCH || 'ci/full/main' }}
