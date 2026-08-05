@@ -231,7 +231,8 @@ class AnchorIRValidator:
             if stripped.startswith("//") or stripped.startswith("#"):
                 continue
 
-            for match in self._OP_PATTERN.finditer(line):
+            code = line.split("//", 1)[0]
+            for match in self._OP_PATTERN.finditer(code):
                 dialect = match.group(1)
                 op_name = f"{dialect}.{match.group(2)}"
 

@@ -107,3 +107,15 @@ class TestAnchorIRValidator:
         }
         """
         assert v.is_valid(ir_with_comments)
+
+    def test_inline_comments_ignored(self):
+        v = AnchorIRValidator()
+        ir_with_inline_comment = """
+        module {
+          func.func @kernel() {
+            %value = arith.constant 0 : i32 // tt.load must be ignored
+            return
+          }
+        }
+        """
+        assert v.is_valid(ir_with_inline_comment)
