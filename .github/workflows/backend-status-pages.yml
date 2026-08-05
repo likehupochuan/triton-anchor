@@ -3,7 +3,7 @@ run-name: ${{ inputs.run_title || github.event.pull_request.title || github.even
 
 on:
   push:
-    branches: [jiwang-delivery-ci, main, feat/backend-status-pages]
+    branches: [main, jiwang-delivery-ci]
     paths:
       - "dashboard/**"
       - "scripts/dashboard/**"
@@ -11,6 +11,7 @@ on:
       - "python/triton_anchor/tests/test_dashboard_*.py"
       - ".github/workflows/backend-status-pages.yml"
   pull_request:
+    branches: [main, jiwang-delivery-ci]
     paths:
       - "dashboard/**"
       - "scripts/dashboard/**"

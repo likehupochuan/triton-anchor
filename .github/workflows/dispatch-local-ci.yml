@@ -6,6 +6,9 @@ on:
       - main
       - jiwang-delivery-ci
   pull_request_target:
+    branches:
+      - main
+      - jiwang-delivery-ci
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
