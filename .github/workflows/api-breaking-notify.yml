@@ -1,4 +1,5 @@
 name: Public API Breaking Change Notification
+run-name: ${{ github.event.workflow_run.display_title }}
 
 on:
   workflow_run:

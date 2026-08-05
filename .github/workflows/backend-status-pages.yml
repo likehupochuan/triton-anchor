@@ -1,4 +1,5 @@
 name: Backend Status Pages
+run-name: ${{ inputs.run_title || github.event.pull_request.title || github.event.head_commit.message }}
 
 on:
   push:
@@ -17,6 +18,12 @@ on:
       - "python/triton_anchor/tests/test_dashboard_*.py"
       - ".github/workflows/backend-status-pages.yml"
   workflow_dispatch:
+    inputs:
+      run_title:
+        description: "Source commit or PR title shown as the workflow run name"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read

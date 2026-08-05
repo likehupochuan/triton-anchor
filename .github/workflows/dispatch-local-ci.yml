@@ -212,6 +212,7 @@ jobs:
           TASK_REF: ${{ steps.meta.outputs.task_ref }}
           STARTED_AT: ${{ steps.meta.outputs.started_at }}
           STATUS_CONTEXT: ${{ steps.meta.outputs.context }}
+          RUN_TITLE: ${{ github.event.pull_request.title || github.event.head_commit.message || inputs.source_branch || github.ref_name }}
         run: |
           gh workflow run receive-local-ci-result.yml \
             --repo "${GITHUB_REPOSITORY}" \
@@ -222,7 +223,8 @@ jobs:
             -f context="${STATUS_CONTEXT}" \
             -f attempt="1" \
             -f started_at="${STARTED_AT}" \
-            -f wait_seconds="${RECEIVER_WAIT_SECONDS}"
+            -f wait_seconds="${RECEIVER_WAIT_SECONDS}" \
+            -f run_title="${RUN_TITLE}"
 
       - name: Mark dispatch failure
         if: ${{ failure() && steps.meta.outputs.sha != '' }}

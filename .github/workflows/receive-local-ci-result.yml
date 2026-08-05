@@ -1,4 +1,5 @@
 name: Receive Local CI Result
+run-name: ${{ inputs.run_title || format('{0} @ {1}', inputs.source_branch, inputs.sha) }}
 
 on:
   workflow_dispatch:
@@ -34,6 +35,11 @@ on:
         required: true
         default: "20400"
         type: string
+      run_title:
+        description: Source commit or PR title shown as the workflow run name
+        required: false
+        default: ""
+        type: string
 
 permissions:
   actions: write
@@ -62,6 +68,7 @@ jobs:
       ATTEMPT: ${{ inputs.attempt }}
       STARTED_AT: ${{ inputs.started_at }}
       WAIT_SECONDS: ${{ inputs.wait_seconds }}
+      RUN_TITLE: ${{ inputs.run_title }}
       MAX_ATTEMPTS: ${{ vars.LOCAL_CI_RECEIVER_MAX_ATTEMPTS || '6' }}
       POLL_INTERVAL_SECONDS: ${{ vars.LOCAL_CI_BRIDGE_POLL_INTERVAL_SECONDS || '60' }}
       RECEIVER_REF: ${{ vars.LOCAL_CI_RECEIVER_REF || github.event.repository.default_branch }}
@@ -131,7 +138,8 @@ jobs:
                   -f context="${CONTEXT}" \
                   -f attempt="${next_attempt}" \
                   -f started_at="${STARTED_AT}" \
-                  -f wait_seconds="${WAIT_SECONDS}"; then
+                  -f wait_seconds="${WAIT_SECONDS}" \
+                  -f run_title="${RUN_TITLE}"; then
                   gh api --method POST "repos/${REPO}/statuses/${SHA}" \
                     -f state=pending \
                     -f context="${CONTEXT}" \
@@ -169,7 +177,8 @@ jobs:
           fi
           gh workflow run backend-status-pages.yml \
             --repo "${REPO}" \
-            --ref "${RECEIVER_REF}"
+            --ref "${RECEIVER_REF}" \
+            -f run_title="${RUN_TITLE}"
 
   stage-results:
     name: Local CI / ${{ matrix.name }}
