@@ -145,11 +145,13 @@ class DSLExtensionRegistry:
 
         # Match all "namespace.op_name" patterns
         pattern = re.compile(r'"?(\w+)\.\w[\w.]*"?')
-        found = set()
-        for match in pattern.finditer(kernel_ir):
-            dialect = match.group(1)
-            if dialect in cls._plugins:
-                found.add(dialect)
+        found: Set[str] = set()
+        for line in kernel_ir.splitlines():
+            code = line.split("//", 1)[0]
+            for match in pattern.finditer(code):
+                dialect = match.group(1)
+                if dialect in cls._plugins:
+                    found.add(dialect)
         return found
 
     @classmethod
