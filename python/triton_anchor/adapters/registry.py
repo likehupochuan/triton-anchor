@@ -107,9 +107,10 @@ class AdapterRegistry:
             adapter = cls._adapters.get(hw.preferred_adapter)
             if adapter:
                 return adapter
+            available = sorted(cls._adapters)
             raise AdapterNotFoundError(
                 f"Preferred adapter '{hw.preferred_adapter}' not found. "
-                f"Available: {list(cls._adapters.keys())}"
+                f"Available: {available}"
             )
 
         # 2. Automatic selection by ptr_model
@@ -140,7 +141,9 @@ class AdapterRegistry:
     def list_adapters(cls) -> Dict[str, str]:
         """List all registered adapters: {name: class_name}."""
         cls.discover()
-        return {name: type(adapter).__name__ for name, adapter in cls._adapters.items()}
+        return {
+            name: type(cls._adapters[name]).__name__ for name in sorted(cls._adapters)
+        }
 
     @classmethod
     def reset(cls) -> None:
