@@ -376,6 +376,20 @@ hw = HWCapability(
 )
 ```
 
+Capability objects validate their configuration when they are created:
+
+- `name`, `arch_family`, and an optional `preferred_adapter` must be non-empty.
+- `ptr_model` must be `structured`, `axis_info`, `hybrid`, or `gpu`.
+- AME, tensor processor, and GPGPU paradigms accept only their matching
+  `matrix_cap`, `tensor_cap`, and `gpgpu_cap` descriptors.
+- Core, warp, tile, and cluster counts must be positive. Memory sizes may be
+  zero but cannot be negative, and `supported_dtypes` cannot be empty.
+- `compute_paradigm` accepts enum members and their string values, such as
+  `"tensor"`.
+
+Invalid configuration fails during backend initialization with a field-specific
+`ValueError` or `TypeError`.
+
 **验证 AnchorIR 合规性**
 
 ```python
