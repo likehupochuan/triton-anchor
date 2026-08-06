@@ -72,10 +72,10 @@ jobs:
       MAX_ATTEMPTS: ${{ vars.LOCAL_CI_RECEIVER_MAX_ATTEMPTS || '6' }}
       POLL_INTERVAL_SECONDS: ${{ vars.LOCAL_CI_BRIDGE_POLL_INTERVAL_SECONDS || '60' }}
       RECEIVER_REF: ${{ vars.LOCAL_CI_RECEIVER_REF || github.event.repository.default_branch }}
-      GITEE_RESULTS_OWNER: ${{ vars.GITEE_RESULTS_OWNER || vars.GITEE_OWNER || 'likehupochuan' }}
-      GITEE_RESULTS_REPO: ${{ vars.GITEE_RESULTS_REPO || 'try-result' }}
+      GITEE_RESULTS_OWNER: ${{ vars.GITEE_RESULTS_OWNER || vars.GITEE_OWNER || 'race-org' }}
+      GITEE_RESULTS_REPO: ${{ vars.GITEE_RESULTS_REPO || 'triton-anchor-local-ci-results' }}
       GITEE_RESULTS_BRANCH: ${{ vars.GITEE_RESULTS_BRANCH || 'local-ci-results' }}
-      GITEE_RESULTS_WEB_URL: ${{ vars.GITEE_RESULTS_WEB_URL || 'https://gitee.com/likehupochuan/try-result' }}
+      GITEE_RESULTS_WEB_URL: ${{ vars.GITEE_RESULTS_WEB_URL || 'https://gitee.com/race-org/triton-anchor-local-ci-results' }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
 
     steps:
@@ -167,7 +167,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          DASHBOARD_MAIN_TASK_REF: ${{ vars.DASHBOARD_SOURCE_BRANCH || 'ci/push/jiwang-delivery-ci' }}
+          DASHBOARD_MAIN_TASK_REF: ${{ vars.DASHBOARD_SOURCE_BRANCH || 'ci/push/main' }}
           DASHBOARD_FULL_TEST_TASK_REF: ${{ vars.DASHBOARD_FULL_TEST_SOURCE_BRANCH || 'ci/full/main' }}
         run: |
           if [[ "${TASK_REF}" != "${DASHBOARD_MAIN_TASK_REF}" \

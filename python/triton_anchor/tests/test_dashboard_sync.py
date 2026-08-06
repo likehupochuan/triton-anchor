@@ -19,7 +19,7 @@ def write_json(path: Path, value: object) -> None:
 
 
 def write_run(root: Path, sha: str, run_id: str, status: int) -> Path:
-    run = root / "runs" / "ci_push" / "ci_push_jiwang-delivery-ci" / sha / run_id
+    run = root / "runs" / "ci_push" / "ci_push_main" / sha / run_id
     run.mkdir(parents=True)
     (run / "delivery-summary.txt").write_text(
         "\n".join(
@@ -27,7 +27,7 @@ def write_run(root: Path, sha: str, run_id: str, status: int) -> Path:
                 "schema: triton-anchor-local-ci/v2",
                 f"status: {status}",
                 f"target_sha: {sha}",
-                "branch: ci/push/jiwang-delivery-ci",
+                "branch: ci/push/main",
                 "backend_profile: sophgo-cmodel",
                 "compile_time_status: pass",
                 "pass_profile_status: pass",
@@ -122,8 +122,8 @@ class DashboardSyncTest(unittest.TestCase):
             "runs/ci_full/ci_full_release-candidate",
         )
         self.assertEqual(
-            SYNC.result_task_dir("ci/push/jiwang-delivery-ci").as_posix(),
-            "runs/ci_push/ci_push_jiwang-delivery-ci",
+            SYNC.result_task_dir("ci/push/main").as_posix(),
+            "runs/ci_push/ci_push_main",
         )
         self.assertEqual(
             SYNC.result_task_dir("ci/pr-9/feat/backend-status-pages").as_posix(),
@@ -230,7 +230,7 @@ class DashboardSyncTest(unittest.TestCase):
             self.assertEqual(backend["backends"][0]["state"], "failure")
             self.assertEqual(backend["backends"][0]["sha"], failed_sha)
             self.assertIn(
-                "/runs/ci_push/ci_push_jiwang-delivery-ci/",
+                "/runs/ci_push/ci_push_main/",
                 backend["backends"][0]["result_url"],
             )
             self.assertEqual(performance["sha"], metric_sha)

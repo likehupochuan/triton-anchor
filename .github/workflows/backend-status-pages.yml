@@ -3,7 +3,7 @@ run-name: ${{ inputs.run_title || github.event.pull_request.title || github.even
 
 on:
   push:
-    branches: [main, jiwang-delivery-ci]
+    branches: [main]
     paths:
       - "dashboard/**"
       - "scripts/dashboard/**"
@@ -11,7 +11,7 @@ on:
       - "python/triton_anchor/tests/test_dashboard_*.py"
       - ".github/workflows/backend-status-pages.yml"
   pull_request:
-    branches: [main, jiwang-delivery-ci]
+    branches: [main]
     paths:
       - "dashboard/**"
       - "scripts/dashboard/**"
@@ -49,13 +49,14 @@ jobs:
       - name: Fetch live Gitee CI results
         if: ${{ github.event_name != 'pull_request' }}
         env:
-          GITEE_RESULTS_OWNER: ${{ vars.GITEE_RESULTS_OWNER || vars.GITEE_OWNER || 'likehupochuan' }}
-          GITEE_RESULTS_REPO: ${{ vars.GITEE_RESULTS_REPO || 'try-result' }}
+          GITEE_RESULTS_OWNER: ${{ vars.GITEE_RESULTS_OWNER || vars.GITEE_OWNER || 'race-org' }}
+          GITEE_RESULTS_REPO: ${{ vars.GITEE_RESULTS_REPO || 'triton-anchor-local-ci-results' }}
           GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
           GITEE_RESULTS_BRANCH: ${{ vars.GITEE_RESULTS_BRANCH || 'local-ci-results' }}
-          GITEE_RESULTS_WEB_URL: ${{ vars.GITEE_RESULTS_WEB_URL || 'https://gitee.com/likehupochuan/try-result' }}
+          GITEE_RESULTS_WEB_URL: ${{ vars.GITEE_RESULTS_WEB_URL || 'https://gitee.com/race-org/triton-anchor-local-ci-results' }}
+          GITEE_USERNAME: ${{ vars.GITEE_USERNAME || 'likehupochuan' }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-          DASHBOARD_SOURCE_BRANCH: ${{ vars.DASHBOARD_SOURCE_BRANCH || 'ci/push/jiwang-delivery-ci' }}
+          DASHBOARD_SOURCE_BRANCH: ${{ vars.DASHBOARD_SOURCE_BRANCH || 'ci/push/main' }}
           DASHBOARD_FULL_TEST_SOURCE_BRANCH: ${{ vars.DASHBOARD_FULL_TEST_SOURCE_BRANCH || 'ci/full/main' }}
           BACKEND_PROFILE: ${{ vars.LOCAL_CI_BACKEND_PROFILE || 'sophgo-cmodel' }}
         run: |
@@ -69,7 +70,7 @@ jobs:
           cat > "${askpass}" <<'SH'
           #!/usr/bin/env sh
           case "$1" in
-            *Username*) printf '%s\n' "${GITEE_RESULTS_OWNER}" ;;
+            *Username*) printf '%s\n' "${GITEE_USERNAME}" ;;
             *) printf '%s\n' "${GITEE_TOKEN}" ;;
           esac
           SH

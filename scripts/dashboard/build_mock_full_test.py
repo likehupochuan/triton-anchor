@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-csv", type=Path, required=True)
     parser.add_argument("--run-id", default="mock-full-20260724-3d4c5863")
     parser.add_argument("--sha", default=DEFAULT_DEMO_SHA)
-    parser.add_argument("--branch", default="ci/full/jiwang-delivery-ci")
+    parser.add_argument("--branch", default="ci/full/main")
     parser.add_argument("--started-at", default="2026-07-24T11:24:10Z")
     parser.add_argument("--finished-at", default="")
     return parser.parse_args()

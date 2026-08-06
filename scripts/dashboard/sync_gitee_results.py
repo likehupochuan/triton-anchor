@@ -20,11 +20,11 @@ sys.path.insert(0, str(LOCAL_CI_SCRIPT_DIR))
 from result_paths import result_run_dir, result_task_dir  # noqa: E402
 
 
-DEFAULT_SOURCE_BRANCH = "ci/push/jiwang-delivery-ci"
+DEFAULT_SOURCE_BRANCH = "ci/push/main"
 DEFAULT_FULL_TEST_SOURCE_BRANCH = "ci/full/main"
 DEFAULT_PROFILE = "sophgo-cmodel"
 DEFAULT_RESULTS_WEB_URL = (
-    "https://gitee.com/likehupochuan/triton-anchor-local-ci-results"
+    "https://gitee.com/race-org/triton-anchor-local-ci-results"
 )
 RUN_ID_RE = re.compile(r"^(\d{8}T\d{6}Z)-")
 
