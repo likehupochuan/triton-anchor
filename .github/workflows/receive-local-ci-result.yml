@@ -1,0 +1,236 @@
+name: Receive Local CI Result
+run-name: ${{ inputs.run_title || format('{0} @ {1}', inputs.source_branch, inputs.sha) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit SHA being tested
+        required: true
+        type: string
+      source_branch:
+        description: Original GitHub source branch
+        required: true
+        type: string
+      task_ref:
+        description: Gitee task branch containing the exact commit
+        required: true
+        type: string
+      context:
+        description: GitHub commit status context to update
+        required: false
+        default: ""
+        type: string
+      attempt:
+        description: Receiver continuation attempt
+        required: true
+        default: "1"
+        type: string
+      started_at:
+        description: Initial dispatch time in UTC
+        required: true
+        type: string
+      wait_seconds:
+        description: Polling window for this receiver attempt
+        required: true
+        default: "20400"
+        type: string
+      run_title:
+        description: Source commit or PR title shown as the workflow run name
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+  statuses: write
+
+concurrency:
+  group: receive-local-ci-${{ inputs.task_ref }}
+  cancel-in-progress: ${{ inputs.attempt == '1' }}
+
+jobs:
+  receive:
+    name: Wait for local CI result
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs:
+      result_ready: ${{ steps.bridge.outputs.result_ready }}
+      overall_status: ${{ steps.bridge.outputs.overall_status }}
+      target_url: ${{ steps.bridge.outputs.target_url }}
+      stage_results: ${{ steps.bridge.outputs.stage_results }}
+    env:
+      CONTEXT: ${{ inputs.context || vars.LOCAL_CI_CONTEXT || 'local-ci/sophgo-cmodel' }}
+      SHA: ${{ inputs.sha }}
+      SOURCE_BRANCH: ${{ inputs.source_branch }}
+      TASK_REF: ${{ inputs.task_ref }}
+      ATTEMPT: ${{ inputs.attempt }}
+      STARTED_AT: ${{ inputs.started_at }}
+      WAIT_SECONDS: ${{ inputs.wait_seconds }}
+      RUN_TITLE: ${{ inputs.run_title }}
+      MAX_ATTEMPTS: ${{ vars.LOCAL_CI_RECEIVER_MAX_ATTEMPTS || '6' }}
+      POLL_INTERVAL_SECONDS: ${{ vars.LOCAL_CI_BRIDGE_POLL_INTERVAL_SECONDS || '60' }}
+      RECEIVER_REF: ${{ vars.LOCAL_CI_RECEIVER_REF || github.event.repository.default_branch }}
+      GITEE_RESULTS_OWNER: ${{ vars.GITEE_RESULTS_OWNER || vars.GITEE_OWNER || 'race-org' }}
+      GITEE_RESULTS_REPO: ${{ vars.GITEE_RESULTS_REPO || 'triton-anchor-local-ci-results' }}
+      GITEE_RESULTS_BRANCH: ${{ vars.GITEE_RESULTS_BRANCH || 'local-ci-results' }}
+      GITEE_RESULTS_WEB_URL: ${{ vars.GITEE_RESULTS_WEB_URL || 'https://gitee.com/race-org/triton-anchor-local-ci-results' }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check bridge script
+        run: python -m py_compile scripts/local_ci/bridge_gitee_to_github_status.py
+
+      - name: Wait for Gitee local CI result
+        id: bridge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "result_ready=false" >> "${GITHUB_OUTPUT}"
+          set +e
+          python scripts/local_ci/bridge_gitee_to_github_status.py \
+            --mode single \
+            --gitee-owner "${GITEE_RESULTS_OWNER}" \
+            --gitee-repo "${GITEE_RESULTS_REPO}" \
+            --gitee-results-branch "${GITEE_RESULTS_BRANCH}" \
+            --gitee-web-url "${GITEE_RESULTS_WEB_URL}" \
+            --source-branch "${SOURCE_BRANCH}" \
+            --task-ref "${TASK_REF}" \
+            --sha "${SHA}" \
+            --context "${CONTEXT}" \
+            --timeout-seconds "${WAIT_SECONDS}" \
+            --poll-interval-seconds "${POLL_INTERVAL_SECONDS}" \
+            --require-result \
+            --exit-with-result
+          bridge_status=$?
+          set -e
+
+          case "${bridge_status}" in
+            0)
+              echo "result_ready=true" >> "${GITHUB_OUTPUT}"
+              exit 0
+              ;;
+            10)
+              # The bridge published the failure details; stage jobs report them below.
+              echo "result_ready=true" >> "${GITHUB_OUTPUT}"
+              exit 0
+              ;;
+            3)
+              if [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then
+                next_attempt=$((ATTEMPT + 1))
+                if gh workflow run receive-local-ci-result.yml \
+                  --repo "${REPO}" \
+                  --ref "${RECEIVER_REF}" \
+                  -f sha="${SHA}" \
+                  -f source_branch="${SOURCE_BRANCH}" \
+                  -f task_ref="${TASK_REF}" \
+                  -f context="${CONTEXT}" \
+                  -f attempt="${next_attempt}" \
+                  -f started_at="${STARTED_AT}" \
+                  -f wait_seconds="${WAIT_SECONDS}" \
+                  -f run_title="${RUN_TITLE}"; then
+                  gh api --method POST "repos/${REPO}/statuses/${SHA}" \
+                    -f state=pending \
+                    -f context="${CONTEXT}" \
+                    -f description="local CI still running; receiver ${next_attempt}/${MAX_ATTEMPTS}"
+                  exit 0
+                fi
+                description="failed to continue local CI result receiver"
+              else
+                description="local CI result not received after ${MAX_ATTEMPTS} receiver attempts"
+              fi
+              ;;
+            *)
+              description="local CI result receiver failed"
+              ;;
+          esac
+
+          gh api --method POST "repos/${REPO}/statuses/${SHA}" \
+            -f state=error \
+            -f context="${CONTEXT}" \
+            -f description="${description}"
+          exit 1
+
+      - name: Refresh backend status Pages
+        if: ${{ always() && steps.bridge.outputs.result_ready == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DASHBOARD_MAIN_TASK_REF: ${{ vars.DASHBOARD_SOURCE_BRANCH || 'ci/push/main' }}
+          DASHBOARD_FULL_TEST_TASK_REF: ${{ vars.DASHBOARD_FULL_TEST_SOURCE_BRANCH || 'ci/full/main' }}
+        run: |
+          if [[ "${TASK_REF}" != "${DASHBOARD_MAIN_TASK_REF}" \
+            && "${TASK_REF}" != "${DASHBOARD_FULL_TEST_TASK_REF}" ]]; then
+            echo "Skip Pages refresh for non-dashboard task: ${TASK_REF}"
+            exit 0
+          fi
+          gh workflow run backend-status-pages.yml \
+            --repo "${REPO}" \
+            --ref "${RECEIVER_REF}" \
+            -f run_title="${RUN_TITLE}"
+
+  stage-results:
+    name: Local CI / ${{ matrix.name }}
+    needs: receive
+    if: ${{ always() && needs.receive.outputs.result_ready == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - key: overall
+            name: Overall
+          - key: frontend_smoke
+            name: Frontend smoke
+          - key: backend_smoke_jit
+            name: Backend smoke and JIT
+          - key: flaggems
+            name: FlagGems
+          - key: compile_time
+            name: Compile-time performance
+          - key: pass_profile
+            name: Pass profiling
+          - key: ir_serialization
+            name: IR serialization
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report ${{ matrix.name }}
+        env:
+          STAGE_KEY: ${{ matrix.key }}
+          STAGE_NAME: ${{ matrix.name }}
+          STAGE_RESULTS: ${{ needs.receive.outputs.stage_results }}
+          TARGET_URL: ${{ needs.receive.outputs.target_url }}
+        run: |
+          status="$(python3 -c 'import json, os; print(json.loads(os.environ["STAGE_RESULTS"]).get(os.environ["STAGE_KEY"], "not_reported"))')"
+          {
+            echo "### ${STAGE_NAME}"
+            echo
+            echo "- Status: \`${status}\`"
+            if [ -n "${TARGET_URL}" ]; then
+              echo "- [Gitee artifacts](${TARGET_URL})"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          case "${status}" in
+            pass|success|warning)
+              exit 0
+              ;;
+            disabled|not_run|skipped|not_reported|"")
+              echo "${STAGE_NAME} was not run."
+              exit 0
+              ;;
+            *)
+              echo "${STAGE_NAME} failed with status: ${status}" >&2
+              exit 1
+              ;;
+          esac
