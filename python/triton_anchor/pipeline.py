@@ -13,13 +13,13 @@ The pipeline also supports conditional passes controlled by ``HWCapability``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from .hw_capability import HWCapability
 
 
-def build_ttir_pipeline(pm, hw: Optional[HWCapability] = None):
+def build_ttir_pipeline(pm, hw: HWCapability | None = None):
     """Build the standard TTIR optimization pipeline.
 
     This is extracted from triton_race's ``_make_ttir()`` and is identical
@@ -75,39 +75,76 @@ def build_ttir_pipeline(pm, hw: Optional[HWCapability] = None):
         _try_add_pass(passes.ttir, "add_expression_restructing", pm)
 
 
-def _try_add_pass(module, pass_name, pm, **kwargs):
+class _PassLike(Protocol):
+    def __call__(self, pm, **kwargs): ...
+
+
+def _module_name(module) -> str:
+    """Return a stable display name for pass modules in diagnostics."""
+    return getattr(module, "__name__", module.__class__.__name__)
+
+
+def _get_pass(module, pass_name: str) -> _PassLike | None:
+    """Look up a pass registration function without invoking descriptors twice."""
+    fn = getattr(module, pass_name, None)
+    if fn is None:
+        return None
+    if not callable(fn):
+        mod_name = _module_name(module)
+        raise TypeError(
+            f"Pass '{pass_name}' in module '{mod_name}' is not callable. "
+            f"Check your Triton version and backend installation."
+        )
+    return fn
+
+
+def _add_pass(module, pass_name: str, pm, *, required: bool, **kwargs) -> bool:
+    """Add a Triton pass and normalize optional/required failure handling."""
+    fn = _get_pass(module, pass_name)
+    if fn is None:
+        if not required:
+            return False
+
+        mod_name = _module_name(module)
+        raise RuntimeError(
+            f"Required pass '{pass_name}' not found in module '{mod_name}'. "
+            f"This pass is critical for the current compilation path. "
+            f"Check your Triton version and backend installation."
+        )
+
+    try:
+        fn(pm, **kwargs) if kwargs else fn(pm)
+    except TypeError as exc:
+        mod_name = _module_name(module)
+        arg_names = ", ".join(sorted(kwargs)) or "no keyword arguments"
+        raise TypeError(
+            f"Pass '{pass_name}' in module '{mod_name}' rejected arguments "
+            f"({arg_names})."
+        ) from exc
+
+    return True
+
+
+def _try_add_pass(module, pass_name: str, pm, **kwargs) -> bool:
     """Safely try to add a pass. Silently skip if not available.
 
     For optional passes (e.g., add_expression_restructing, add_loop_unroll)
     whose absence does not affect compilation correctness.
     """
-    fn = getattr(module, pass_name, None)
-    if fn is not None:
-        fn(pm, **kwargs) if kwargs else fn(pm)
-        return True
-    return False
+    return _add_pass(module, pass_name, pm, required=False, **kwargs)
 
 
-def _require_pass(module, pass_name, pm, **kwargs):
+def _require_pass(module, pass_name: str, pm, **kwargs) -> bool:
     """Add a critical-path pass. Raise if not available.
 
     For passes on the critical compilation path (e.g., GPU's
     add_rewrite_tensor_pointer, add_convert_to_ttgpuir) whose
     absence would cause incorrect compilation results.
     """
-    fn = getattr(module, pass_name, None)
-    if fn is None:
-        mod_name = getattr(module, "__name__", str(module))
-        raise RuntimeError(
-            f"Required pass '{pass_name}' not found in module '{mod_name}'. "
-            f"This pass is critical for the current compilation path. "
-            f"Check your Triton version and backend installation."
-        )
-    fn(pm, **kwargs) if kwargs else fn(pm)
-    return True
+    return _add_pass(module, pass_name, pm, required=True, **kwargs)
 
 
-def make_ttir(mod, metadata: dict, hw: Optional[HWCapability] = None):
+def make_ttir(mod, metadata: dict, hw: HWCapability | None = None):
     """Convenience function: build pipeline + run it on a module.
 
     This mirrors the signature of triton_race's ``_make_ttir(mod, metadata, options)``.
