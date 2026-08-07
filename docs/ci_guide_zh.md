@@ -200,6 +200,81 @@ PR 场景比较 base SHA 和 PR head SHA；push 场景比较 push 前后的 SHA�
 - 评论包含变化摘要和兼容性 workflow 链接。
 - 同一 PR 或 commit 使用固定标记更新既有评论，避免重复刷屏。
 
+### 3.5 API 废弃周期与迁移指引
+
+公共 API 不允许"直接破坏"。确需修改接口时，必须走"先废弃、后移除"的流程，给下游后端至少 1 个 minor 版本的迁移窗口。兼容性检查器（`scripts/api_contract/check_public_api.py`）会自动执行该策略。
+
+#### 3.5.1 废弃政策（Deprecation Policy）
+
+- **过渡期至少 1 个 minor 版本**：在 0.3.0 标记废弃的符号，最早只能在 0.4.0 移除（整个 0.3.x 系列保持可用）。
+- 废弃期内必须同时做到：
+  1. 旧 API 继续可用（可内部转发到新实现），并在运行时发出 `DeprecationWarning`；
+  2. 在 `api_contract/public_api.json` 的 `deprecations` 字段登记废弃信息（格式见 3.5.2）；
+  3. 提供迁移指引（模板见 3.5.3）。
+- 只有不低于 removal 目标版本的发布才允许真正移除，检查器自动判定：
+
+| 场景 | 检查结果 | code |
+| --- | --- | --- |
+| 未标记废弃就直接移除 | breaking | `export-removed` / `function-removed` / `class-removed` / `method-removed` |
+| 已标记废弃、符号仍存在（过渡期内） | 通过 | - |
+| 达到或超过 removal 目标版本后移除 | 通过（计划内移除） | `deprecated-symbol-removed` |
+| 早于 removal 目标版本移除 | breaking | `deprecation-period-violated` |
+| 已移除但无法读取候选版本号 | 通过 + warning | `removal-version-unverifiable` |
+
+候选版本号从候选修订版的 `python/triton_anchor/__init__.py` 的 `__version__` 读取。
+
+#### 3.5.2 deprecations 字段格式
+
+`api_contract/public_api.json` 顶层 `deprecations`，key 为符号全名：
+
+```json
+{
+  "deprecations": {
+    "triton_anchor.build_ttir_pipeline": {
+      "since": "0.3.0",
+      "removal": "0.4.0",
+      "alternative": "triton_anchor.create_ttir_pass_pipeline",
+      "migration": "迁移指引文档链接或简述"
+    }
+  }
+}
+```
+
+- `since`：开始废弃的版本；
+- `removal`：允许移除的最早版本（必须比 since 至少晚 1 个 minor 版本）；
+- `alternative`：替代 API（建议必填）；
+- `migration`：迁移指引或文档链接（建议必填）。
+
+#### 3.5.3 迁移指引模板
+
+每次废弃必须随附以下迁移信息（写入 PR 描述、独立文档或跟踪 Issue 均可；Breaking Change 通知自动创建的 Issue 里已带 Migration notes 模板）：
+
+~~~markdown
+## <符号名> 废弃迁移指引
+
+- 旧 API：`triton_anchor.old_name(...)`
+- 新 API：`triton_anchor.new_name(...)`
+- 变更原因：<一句话说明>
+- 废弃版本（since）：0.3.0
+- 计划移除版本（removal）：0.4.0
+- 迁移步骤：
+  1. <步骤一>
+  2. <步骤二>
+- 前后对照示例：
+
+    # 旧写法
+    triton_anchor.old_name(x)
+
+    # 新写法
+    triton_anchor.new_name(x)
+~~~
+
+#### 3.5.4 典型流程
+
+1. **废弃 PR**：新增 API，保留旧 API（转发 + `DeprecationWarning`），在 `deprecations` 登记并附迁移指引。此 PR 兼容性检查通过（符号仍存在）。
+2. **过渡期**（至少 1 个 minor 版本）：下游后端完成迁移；旧 API 保持可用。
+3. **移除 PR**：删除旧 API 及对应 `deprecations` 条目。版本达到 removal 时检查自动通过；若此前因违规移除产生过跟踪 Issue，通知流程在检查转绿后会自动关闭它。
+
 ## 4. Local CI
 
 ### 4.1 任务投递与触发方式

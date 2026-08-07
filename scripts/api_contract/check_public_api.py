@@ -350,9 +350,82 @@ def _compare_fields(base: list[dict[str, Any]], candidate: list[dict[str, Any]],
             _change(changes, "compatible", "optional-dataclass-field-added", field_symbol, "new optional dataclass field was appended")
 
 
+def _version_tuple(version: str | None) -> tuple[int, ...] | None:
+    """Parse a dotted version string into a comparable tuple of ints.
+
+    Returns None when the version is missing or cannot be parsed.
+    """
+    if not version:
+        return None
+    nums: list[int] = []
+    for part in str(version).strip().split("."):
+        digits = "".join(ch for ch in part if ch.isdigit())
+        if not digits:
+            return None
+        nums.append(int(digits))
+    return tuple(nums) if nums else None
+
+
+def _version_at_least(candidate_version: str | None, target: str | None) -> bool | None:
+    """Return candidate >= target; None when either side is unparseable."""
+    cand = _version_tuple(candidate_version)
+    tgt = _version_tuple(target)
+    if cand is None or tgt is None:
+        return None
+    length = max(len(cand), len(tgt))
+    cand = cand + (0,) * (length - len(cand))
+    tgt = tgt + (0,) * (length - len(tgt))
+    return cand >= tgt
+
+
+def _read_candidate_version(candidate_root: Path) -> str | None:
+    """Best-effort read of __version__ from the candidate triton_anchor package."""
+    init_file = candidate_root / "python" / "triton_anchor" / "__init__.py"
+    try:
+        tree = ast.parse(init_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, SyntaxError):
+        return None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "__version__":
+                    return str(node.value.value)
+    return None
+
+
 def compare_contracts(base: dict[str, Any], candidate: dict[str, Any], scope: dict[str, Any],
-                      scope_changed: bool = False) -> list[dict[str, str]]:
+                      scope_changed: bool = False, deprecations: dict[str, Any] | None = None,
+                      candidate_version: str | None = None) -> list[dict[str, str]]:
     changes: list[dict[str, str]] = []
+    deprecations = deprecations or {}
+
+    def _removal_change(symbol: str, base_code: str, base_message: str) -> None:
+        """Removal check honoring the deprecation cycle.
+
+        - removed without a deprecation entry: breaking (original behaviour)
+        - removed at/after the planned removal version: compatible
+        - removed before the planned removal version: breaking policy violation
+        - removal target unverifiable (no readable candidate version): warning
+        """
+        entry = deprecations.get(symbol)
+        if not entry:
+            _change(changes, "breaking", base_code, symbol,
+                    base_message + "; no deprecation period was declared, see the deprecation policy in docs/ci_guide_zh.md")
+            return
+        removal_target = entry.get("removal")
+        alternative = entry.get("alternative")
+        hint = f"; use {alternative} instead" if alternative else ""
+        at_least = _version_at_least(candidate_version, removal_target)
+        if at_least is True:
+            _change(changes, "compatible", "deprecated-symbol-removed", symbol,
+                    f"deprecated symbol removed as planned (removal target: {removal_target}){hint}")
+        elif at_least is False:
+            _change(changes, "breaking", "deprecation-period-violated", symbol,
+                    f"symbol removed before its planned removal version {removal_target}{hint}")
+        else:
+            _change(changes, "warning", "removal-version-unverifiable", symbol,
+                    f"deprecated symbol removed, but candidate version could not be verified against removal target {removal_target}{hint}")
+
     if scope_changed:
         _change(changes, "warning", "scope-file-changed", "api_contract/public_api.json",
                 "the candidate scope changed; this run still uses the reviewed base-branch scope")
@@ -370,7 +443,7 @@ def compare_contracts(base: dict[str, Any], candidate: dict[str, Any], scope: di
             if old is None:
                 raise ContractError(f"Base contract export does not exist: {symbol}")
             if current is None:
-                _change(changes, "breaking", "export-removed", symbol, "public export was removed")
+                _removal_change(symbol, "export-removed", "public export was removed")
             elif old != current:
                 _change(changes, "breaking", "export-target-changed", symbol, "public export points to a different implementation symbol")
 
@@ -381,7 +454,7 @@ def compare_contracts(base: dict[str, Any], candidate: dict[str, Any], scope: di
             if old is None:
                 raise ContractError(f"Base contract function does not exist: {symbol}")
             if current is None:
-                _change(changes, "breaking", "function-removed", symbol, "public function was removed or changed into another symbol kind")
+                _removal_change(symbol, "function-removed", "public function was removed or changed into another symbol kind")
             else:
                 _compare_signature(old, current, symbol, changes)
 
@@ -395,7 +468,7 @@ def compare_contracts(base: dict[str, Any], candidate: dict[str, Any], scope: di
             if old["kind"] != expected_kind:
                 raise ContractError(f"Base contract kind mismatch for {symbol}: expected {expected_kind}, found {old['kind']}")
             if current is None:
-                _change(changes, "breaking", "class-removed", symbol, "public class was removed or changed into another symbol kind")
+                _removal_change(symbol, "class-removed", "public class was removed or changed into another symbol kind")
                 continue
             if current["kind"] != old["kind"]:
                 _change(changes, "breaking", "class-kind-changed", symbol, "class kind changed")
@@ -422,7 +495,7 @@ def compare_contracts(base: dict[str, Any], candidate: dict[str, Any], scope: di
                 if old_method is None:
                     raise ContractError(f"Base contract method does not exist: {method_symbol}")
                 if current_method is None:
-                    _change(changes, "breaking", "method-removed", method_symbol, "public method was removed")
+                    _removal_change(method_symbol, "method-removed", "public method was removed")
                 else:
                     _compare_signature(old_method, current_method, method_symbol, changes)
             if class_config.get("track_added_abstract_methods"):
@@ -449,7 +522,10 @@ def run_check(base_root: Path, candidate_root: Path, scope_path: Path,
     base = extract_contract(base_root, scope)
     candidate = extract_contract(candidate_root, scope)
     scope_changed = candidate_scope_missing or scope != candidate_scope
-    changes = compare_contracts(base, candidate, scope, scope_changed=scope_changed)
+    candidate_version = _read_candidate_version(candidate_root)
+    changes = compare_contracts(base, candidate, scope, scope_changed=scope_changed,
+                                deprecations=scope.get("deprecations", {}),
+                                candidate_version=candidate_version)
     if candidate_scope_missing:
         _change(changes, "breaking", "scope-file-removed", "api_contract/public_api.json",
                 "the public API scope file is missing from the candidate revision")
