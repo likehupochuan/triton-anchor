@@ -172,6 +172,39 @@ class PublicApiCheckerTests(unittest.TestCase):
         self.assertEqual(0, result["breaking_count"])
         self.assert_change(result, "removal-version-unverifiable")
 
+    def test_deprecation_same_minor_removal_is_breaking(self):
+        result = self._compare(
+            "def old_fn():\n    pass\n",
+            "",
+            functions=["old_fn"],
+            deprecations={"sample.old_fn": {"since": "0.3.0", "removal": "0.3.1"}},
+            candidate_version="0.3.1",
+        )
+        self.assertEqual("breaking", result["status"])
+        self.assert_change(result, "deprecation-window-invalid")
+
+    def test_deprecation_missing_removal_field_is_breaking(self):
+        result = self._compare(
+            "def old_fn():\n    pass\n",
+            "",
+            functions=["old_fn"],
+            deprecations={"sample.old_fn": {"since": "0.3.0"}},
+            candidate_version="0.4.0",
+        )
+        self.assertEqual("breaking", result["status"])
+        self.assert_change(result, "deprecation-window-invalid")
+
+    def test_deprecation_cross_major_removal_is_compatible(self):
+        result = self._compare(
+            "def old_fn():\n    pass\n",
+            "",
+            functions=["old_fn"],
+            deprecations={"sample.old_fn": {"since": "0.9.0", "removal": "1.0.0"}},
+            candidate_version="1.0.0",
+        )
+        self.assertEqual("compatible", result["status"])
+        self.assert_change(result, "deprecated-symbol-removed")
+
     def _compare(self, base_source, candidate_source, functions=None, classes=None,
                  deprecations=None, candidate_version=None):
         with tempfile.TemporaryDirectory() as temp_dir:

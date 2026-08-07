@@ -378,6 +378,20 @@ def _version_at_least(candidate_version: str | None, target: str | None) -> bool
     return cand >= tgt
 
 
+def _minor_window_ok(since: str | None, removal: str | None) -> bool | None:
+    """Return whether removal is at least one minor version after since.
+
+    Policy: the deprecation transition window must span at least one minor
+    version. Returns None when since or removal is missing/unparseable or
+    has no minor component.
+    """
+    s = _version_tuple(since)
+    r = _version_tuple(removal)
+    if s is None or r is None or len(s) < 2 or len(r) < 2:
+        return None
+    return (r[0], r[1]) >= (s[0], s[1] + 1)
+
+
 def _read_candidate_version(candidate_root: Path) -> str | None:
     """Best-effort read of __version__ from the candidate triton_anchor package."""
     init_file = candidate_root / "python" / "triton_anchor" / "__init__.py"
@@ -403,6 +417,8 @@ def compare_contracts(base: dict[str, Any], candidate: dict[str, Any], scope: di
         """Removal check honoring the deprecation cycle.
 
         - removed without a deprecation entry: breaking (original behaviour)
+        - entry with missing/invalid since/removal, or removal not at least
+          one minor version after since: breaking (policy window invalid)
         - removed at/after the planned removal version: compatible
         - removed before the planned removal version: breaking policy violation
         - removal target unverifiable (no readable candidate version): warning
@@ -415,6 +431,16 @@ def compare_contracts(base: dict[str, Any], candidate: dict[str, Any], scope: di
         removal_target = entry.get("removal")
         alternative = entry.get("alternative")
         hint = f"; use {alternative} instead" if alternative else ""
+        window_ok = _minor_window_ok(entry.get("since"), removal_target)
+        if window_ok is not True:
+            if window_ok is None:
+                detail = "deprecation entry has a missing or unparseable since/removal version"
+            else:
+                detail = (f"removal {removal_target} is not at least one minor version after "
+                          f"since {entry.get('since')}")
+            _change(changes, "breaking", "deprecation-window-invalid", symbol,
+                    f"{detail}; the policy requires at least one minor transition version{hint}")
+            return
         at_least = _version_at_least(candidate_version, removal_target)
         if at_least is True:
             _change(changes, "compatible", "deprecated-symbol-removed", symbol,

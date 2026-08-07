@@ -219,6 +219,7 @@ PR 场景比较 base SHA 和 PR head SHA；push 场景比较 push 前后的 SHA�
 | 已标记废弃、符号仍存在（过渡期内） | 通过 | - |
 | 达到或超过 removal 目标版本后移除 | 通过（计划内移除） | `deprecated-symbol-removed` |
 | 早于 removal 目标版本移除 | breaking | `deprecation-period-violated` |
+| 登记了废弃，但 removal 未比 since 至少晚 1 个 minor（或 since/removal 缺失/非法） | breaking | `deprecation-window-invalid` |
 | 已移除但无法读取候选版本号 | 通过 + warning | `removal-version-unverifiable` |
 
 候选版本号从候选修订版的 `python/triton_anchor/__init__.py` 的 `__version__` 读取。
@@ -241,7 +242,7 @@ PR 场景比较 base SHA 和 PR head SHA；push 场景比较 push 前后的 SHA�
 ```
 
 - `since`：开始废弃的版本；
-- `removal`：允许移除的最早版本（必须比 since 至少晚 1 个 minor 版本）；
+- `removal`：允许移除的最早版本（必须比 since 至少晚 1 个 minor 版本，检查器强制校验，违反报 `deprecation-window-invalid`）；
 - `alternative`：替代 API（建议必填）；
 - `migration`：迁移指引或文档链接（建议必填）。
 
