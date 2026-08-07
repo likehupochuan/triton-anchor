@@ -96,7 +96,14 @@ def _recording_pass(name, calls):
     return add_pass
 
 
-def _install_fake_libtriton(monkeypatch, calls, *, include_gpu_rewrite=True):
+def _install_fake_libtriton(
+    monkeypatch,
+    calls,
+    *,
+    include_gpu_rewrite=True,
+    include_loop_unroll=True,
+    include_expression_restructing=True,
+):
     common = SimpleNamespace(
         add_inliner=_recording_pass("common.add_inliner", calls),
         add_canonicalizer=_recording_pass("common.add_canonicalizer", calls),
@@ -107,11 +114,13 @@ def _install_fake_libtriton(monkeypatch, calls, *, include_gpu_rewrite=True):
     ttir_passes = {
         "add_combine": _recording_pass("ttir.add_combine", calls),
         "add_reorder_broadcast": _recording_pass("ttir.add_reorder_broadcast", calls),
-        "add_loop_unroll": _recording_pass("ttir.add_loop_unroll", calls),
-        "add_expression_restructing": _recording_pass(
-            "ttir.add_expression_restructing", calls
-        ),
     }
+    if include_loop_unroll:
+        ttir_passes["add_loop_unroll"] = _recording_pass("ttir.add_loop_unroll", calls)
+    if include_expression_restructing:
+        ttir_passes["add_expression_restructing"] = _recording_pass(
+            "ttir.add_expression_restructing", calls
+        )
     if include_gpu_rewrite:
         ttir_passes["add_rewrite_tensor_pointer"] = _recording_pass(
             "ttir.add_rewrite_tensor_pointer", calls
@@ -187,3 +196,46 @@ def test_build_ttir_pipeline_requires_gpu_rewrite_pass(monkeypatch):
 
     with pytest.raises(RuntimeError, match="add_rewrite_tensor_pointer"):
         build_ttir_pipeline(object(), hw=hw)
+
+
+def test_build_ttir_pipeline_skips_gpu_rewrite_for_non_gpu_hw(monkeypatch):
+    calls = []
+    _install_fake_libtriton(monkeypatch, calls, include_gpu_rewrite=False)
+    hw = SimpleNamespace(
+        compute_paradigm=ComputeParadigm.AME_MATRIX,
+        enable_loop_unroll=False,
+    )
+
+    build_ttir_pipeline(object(), hw=hw)
+
+    assert "ttir.add_rewrite_tensor_pointer" not in [name for name, _, _ in calls]
+    assert [name for name, _, _ in calls][-1] == "ttir.add_expression_restructing"
+
+
+def test_build_ttir_pipeline_skips_missing_optional_passes(monkeypatch):
+    calls = []
+    _install_fake_libtriton(
+        monkeypatch,
+        calls,
+        include_loop_unroll=False,
+        include_expression_restructing=False,
+    )
+    hw = SimpleNamespace(
+        compute_paradigm=ComputeParadigm.AME_MATRIX,
+        enable_loop_unroll=True,
+    )
+
+    build_ttir_pipeline(object(), hw=hw)
+
+    call_names = [name for name, _, _ in calls]
+    assert "ttir.add_loop_unroll" not in call_names
+    assert "ttir.add_expression_restructing" not in call_names
+    assert call_names == [
+        "common.add_inliner",
+        "ttir.add_combine",
+        "common.add_canonicalizer",
+        "ttir.add_reorder_broadcast",
+        "common.add_cse",
+        "common.add_licm",
+        "common.add_symbol_dce",
+    ]
