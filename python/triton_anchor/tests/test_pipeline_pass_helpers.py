@@ -1,8 +1,10 @@
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from triton_anchor.pipeline import _require_pass, _try_add_pass
+from triton_anchor.hw_capability import ComputeParadigm
+from triton_anchor.pipeline import _require_pass, _try_add_pass, build_ttir_pipeline
 
 
 class RecordingPassModule:
@@ -85,3 +87,103 @@ def test_pass_type_error_includes_pass_module_and_kwarg_context():
     assert "add_strict_pass" in message
     assert "fake.strict" in message
     assert "unexpected" in message
+
+
+def _recording_pass(name, calls):
+    def add_pass(pm, **kwargs):
+        calls.append((name, pm, kwargs))
+
+    return add_pass
+
+
+def _install_fake_libtriton(monkeypatch, calls, *, include_gpu_rewrite=True):
+    common = SimpleNamespace(
+        add_inliner=_recording_pass("common.add_inliner", calls),
+        add_canonicalizer=_recording_pass("common.add_canonicalizer", calls),
+        add_cse=_recording_pass("common.add_cse", calls),
+        add_licm=_recording_pass("common.add_licm", calls),
+        add_symbol_dce=_recording_pass("common.add_symbol_dce", calls),
+    )
+    ttir_passes = {
+        "add_combine": _recording_pass("ttir.add_combine", calls),
+        "add_reorder_broadcast": _recording_pass("ttir.add_reorder_broadcast", calls),
+        "add_loop_unroll": _recording_pass("ttir.add_loop_unroll", calls),
+        "add_expression_restructing": _recording_pass(
+            "ttir.add_expression_restructing", calls
+        ),
+    }
+    if include_gpu_rewrite:
+        ttir_passes["add_rewrite_tensor_pointer"] = _recording_pass(
+            "ttir.add_rewrite_tensor_pointer", calls
+        )
+
+    libtriton = ModuleType("triton._C.libtriton")
+    libtriton.passes = SimpleNamespace(
+        common=common,
+        ttir=SimpleNamespace(**ttir_passes),
+    )
+
+    triton_module = ModuleType("triton")
+    triton_c_module = ModuleType("triton._C")
+    triton_module._C = triton_c_module
+    triton_c_module.libtriton = libtriton
+
+    monkeypatch.setitem(sys.modules, "triton", triton_module)
+    monkeypatch.setitem(sys.modules, "triton._C", triton_c_module)
+    monkeypatch.setitem(sys.modules, "triton._C.libtriton", libtriton)
+
+
+def test_build_ttir_pipeline_adds_mandatory_passes_in_order(monkeypatch):
+    calls = []
+    _install_fake_libtriton(monkeypatch, calls)
+    pm = object()
+
+    build_ttir_pipeline(pm)
+
+    assert [name for name, _, _ in calls] == [
+        "common.add_inliner",
+        "ttir.add_combine",
+        "common.add_canonicalizer",
+        "ttir.add_reorder_broadcast",
+        "common.add_cse",
+        "common.add_licm",
+        "common.add_symbol_dce",
+    ]
+    assert all(call_pm is pm for _, call_pm, _ in calls)
+
+
+def test_build_ttir_pipeline_adds_gpu_and_optional_passes(monkeypatch):
+    calls = []
+    _install_fake_libtriton(monkeypatch, calls)
+    pm = object()
+    hw = SimpleNamespace(
+        compute_paradigm=ComputeParadigm.GPGPU,
+        enable_loop_unroll=True,
+    )
+
+    build_ttir_pipeline(pm, hw=hw)
+
+    assert [name for name, _, _ in calls] == [
+        "common.add_inliner",
+        "ttir.add_combine",
+        "common.add_canonicalizer",
+        "ttir.add_reorder_broadcast",
+        "common.add_cse",
+        "common.add_licm",
+        "common.add_symbol_dce",
+        "ttir.add_rewrite_tensor_pointer",
+        "ttir.add_loop_unroll",
+        "ttir.add_expression_restructing",
+    ]
+
+
+def test_build_ttir_pipeline_requires_gpu_rewrite_pass(monkeypatch):
+    calls = []
+    _install_fake_libtriton(monkeypatch, calls, include_gpu_rewrite=False)
+    hw = SimpleNamespace(
+        compute_paradigm=ComputeParadigm.GPGPU,
+        enable_loop_unroll=False,
+    )
+
+    with pytest.raises(RuntimeError, match="add_rewrite_tensor_pointer"):
+        build_ttir_pipeline(object(), hw=hw)
