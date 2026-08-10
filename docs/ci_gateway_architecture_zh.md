@@ -49,6 +49,30 @@ flowchart LR
   Notify --> Status
 ```
 
+## 文件与职责
+
+下面按文件名对比默认分支和普通目标分支中的职责。同一路径的 workflow 可以因所在分支不同而承担不同角色。
+
+| 文件 | 默认分支职责 | 普通目标分支职责 |
+| --- | --- | --- |
+| `.github/workflows/ci-gateway.yml` | 作为 router-only Gateway，监听 PR 目标事件、检查目标分支是否具备完整 worker 和兼容契约，并按 `base.ref` 调度该分支 | 作为 worker-capable Gateway，校验并处理 `dispatch`、`receive`、`pages` 请求，再调用对应 reusable workflow |
+| `.github/workflows/api-breaking-notify.yml` | 通过 `workflow_run` 消费 Public API Compatibility 结果，校验结果后写入 PR 或 commit 通知 | 不参与当前运行；即使保留副本，系统也只依赖默认分支上的版本 |
+| `.github/workflows/api-compat.yml` | router-only 部署形态下不保留 | 运行公共 API 对比并发布兼容性结果，供默认分支的通知 workflow 消费 |
+| `.github/workflows/dispatch-local-ci.yml` | router-only 部署形态下不保留 | 必需 worker；解析精确提交、创建 Gitee task ref、写入 pending 状态并启动 receiver |
+| `.github/workflows/receive-local-ci-result.yml` | router-only 部署形态下不保留 | 必需 worker；轮询和续接本地结果、回写 GitHub 状态，并按任务类型请求 Pages 刷新 |
+| `.github/workflows/backend-status-pages.yml` | router-only 部署形态下不保留 | 必需 worker；同步当前分支 push/full 结果、校验 Dashboard 数据并部署 Pages |
+| `.github/workflows/ci.yml` | router-only 部署形态下不保留 | 分支自有 CI；执行 Ruff、格式检查和纯 Python 单元测试 |
+| `.github/workflows/delivery-ci.yml` | router-only 部署形态下不保留 | 分支自有 CI；执行 CI 脚本预检、性能契约和手动容器化 smoke |
+
+普通目标分支启用 Local CI 时，`ci-gateway.yml`、dispatcher、receiver 和 Pages workflow 是默认分支 router 会检查的必需文件。`ci.yml`、`delivery-ci.yml` 和 `api-compat.yml` 属于普通目标分支可独立维护的 CI；`api-breaking-notify.yml` 只需要由默认分支提供。
+
+| 支撑文件或目录 | 默认分支职责 | 普通目标分支职责 |
+| --- | --- | --- |
+| `scripts/local_ci/` | 不执行本地测试逻辑 | 提供任务轮询、测试执行、结果发布、状态回写和性能比较脚本 |
+| `scripts/dashboard/`、`dashboard/` | 不构建或部署 Dashboard | 提供结果同步、数据契约、静态页面资源和部署输入 |
+| `scripts/api_contract/`、`api_contract/` | 不执行 API 对比 | 定义公共 API 范围并执行兼容性检查 |
+| `docker/build-env.Dockerfile` | 不构建测试镜像 | 为手动容器化 full smoke 提供构建环境 |
+
 ## 自动链路
 
 ```mermaid
