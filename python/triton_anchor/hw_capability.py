@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Optional, Set, Tuple, Literal
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from .anchor_ir import AnchorIRTrack
@@ -52,6 +52,54 @@ class ComputeParadigm(Enum):
     Characteristics: SIMT threads, shared memory, warp execution."""
 
 
+_SUPPORTED_PTR_MODELS = {"structured", "axis_info", "hybrid", "gpu"}
+
+
+def _require_string(
+    value: object, field_name: str, *, allow_none: bool = False
+) -> None:
+    if value is None:
+        if allow_none:
+            return
+        raise ValueError(f"{field_name} must not be None")
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    if not value.strip():
+        raise ValueError(f"{field_name} must not be empty")
+
+
+def _require_positive_int(value: object, field_name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field_name} must be an integer")
+    if value <= 0:
+        raise ValueError(f"{field_name} must be greater than zero")
+
+
+def _require_nonnegative_int(value: object, field_name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field_name} must be an integer")
+    if value < 0:
+        raise ValueError(f"{field_name} must be greater than or equal to zero")
+
+
+def _require_shape(value: object, field_name: str, dimensions: int) -> None:
+    if not isinstance(value, tuple):
+        raise TypeError(f"{field_name} must be a tuple")
+    if len(value) != dimensions:
+        raise ValueError(f"{field_name} must have {dimensions} dimensions")
+    for index, dimension in enumerate(value):
+        _require_positive_int(dimension, f"{field_name}[{index}]")
+
+
+def _require_nonempty_dtype_set(value: object, field_name: str) -> None:
+    if not isinstance(value, set):
+        raise TypeError(f"{field_name} must be a set")
+    if not value:
+        raise ValueError(f"{field_name} must not be empty")
+    for dtype in value:
+        _require_string(dtype, f"{field_name} item")
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Paradigm-Specific Capability Descriptors
 # ═══════════════════════════════════════════════════════════════════════
@@ -65,11 +113,21 @@ class MatrixCapability:
     """
 
     num_matrix_registers: int = 8
-    tile_shape: Tuple[int, int] = (8, 8)
-    supported_dtypes: Set[str] = field(default_factory=lambda: {"fp32", "fp16", "int8"})
+    tile_shape: tuple[int, int] = (8, 8)
+    supported_dtypes: set[str] = field(default_factory=lambda: {"fp32", "fp16", "int8"})
     has_accumulator_tiles: bool = True
     vector_length: int = 256
     supports_pointwise: bool = True
+
+    def __post_init__(self):
+        _require_positive_int(
+            self.num_matrix_registers, "matrix_cap.num_matrix_registers"
+        )
+        _require_shape(self.tile_shape, "matrix_cap.tile_shape", 2)
+        _require_nonempty_dtype_set(
+            self.supported_dtypes, "matrix_cap.supported_dtypes"
+        )
+        _require_positive_int(self.vector_length, "matrix_cap.vector_length")
 
 
 @dataclass(frozen=True)
@@ -83,8 +141,18 @@ class TensorCapability:
     local_mem_size: int = 0  # bytes, per-core local SRAM
     global_mem_size: int = 0  # bytes, HBM/DDR
     dma_channels: int = 1
-    supported_dtypes: Set[str] = field(default_factory=lambda: {"fp32", "fp16", "int8"})
+    supported_dtypes: set[str] = field(default_factory=lambda: {"fp32", "fp16", "int8"})
     max_tensor_dims: int = 4
+
+    def __post_init__(self):
+        _require_positive_int(self.num_cores, "tensor_cap.num_cores")
+        _require_nonnegative_int(self.local_mem_size, "tensor_cap.local_mem_size")
+        _require_nonnegative_int(self.global_mem_size, "tensor_cap.global_mem_size")
+        _require_positive_int(self.dma_channels, "tensor_cap.dma_channels")
+        _require_nonempty_dtype_set(
+            self.supported_dtypes, "tensor_cap.supported_dtypes"
+        )
+        _require_positive_int(self.max_tensor_dims, "tensor_cap.max_tensor_dims")
 
 
 @dataclass(frozen=True)
@@ -99,10 +167,19 @@ class GPGPUCapability:
     shared_mem_size: int = 49152  # bytes
     num_stages: int = 2
     num_ctas: int = 1
-    cluster_dims: Tuple[int, int, int] = (1, 1, 1)
-    supported_dtypes: Set[str] = field(
+    cluster_dims: tuple[int, int, int] = (1, 1, 1)
+    supported_dtypes: set[str] = field(
         default_factory=lambda: {"fp32", "fp16", "bf16", "int8"}
     )
+
+    def __post_init__(self):
+        _require_positive_int(self.num_warps, "gpgpu_cap.num_warps")
+        _require_positive_int(self.warp_size, "gpgpu_cap.warp_size")
+        _require_nonnegative_int(self.shared_mem_size, "gpgpu_cap.shared_mem_size")
+        _require_positive_int(self.num_stages, "gpgpu_cap.num_stages")
+        _require_positive_int(self.num_ctas, "gpgpu_cap.num_ctas")
+        _require_shape(self.cluster_dims, "gpgpu_cap.cluster_dims", 3)
+        _require_nonempty_dtype_set(self.supported_dtypes, "gpgpu_cap.supported_dtypes")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -145,16 +222,16 @@ class HWCapability:
 
     # ── Compilation Strategy ─────────────────────────────────────────
     compute_paradigm: ComputeParadigm
-    anchor_ir_track: "AnchorIRTrack"  # Decoupled from paradigm; backend controls
+    anchor_ir_track: AnchorIRTrack  # Decoupled from paradigm; backend controls
     ptr_model: Literal["structured", "axis_info", "hybrid", "gpu"]
 
     # ── Adapter Override ─────────────────────────────────────────────
-    preferred_adapter: Optional[str] = None  # e.g. "triton-shared", "triton-linalg"
+    preferred_adapter: str | None = None  # e.g. "triton-shared", "triton-linalg"
 
     # ── Paradigm-Specific Capabilities (mutually exclusive) ──────────
-    matrix_cap: Optional[MatrixCapability] = None  # AME
-    tensor_cap: Optional[TensorCapability] = None  # Tensor
-    gpgpu_cap: Optional[GPGPUCapability] = None  # gpGPU
+    matrix_cap: MatrixCapability | None = None  # AME
+    tensor_cap: TensorCapability | None = None  # Tensor
+    gpgpu_cap: GPGPUCapability | None = None  # gpGPU
 
     # ── Optional Flags ───────────────────────────────────────────────
     enable_loop_unroll: bool = False
@@ -216,21 +293,48 @@ class HWCapability:
             ValueError: If paradigm-specific cap doesn't match compute_paradigm,
                 or if lowering_path is inconsistent.
         """
-        if self.compute_paradigm == ComputeParadigm.AME_MATRIX:
-            if self.matrix_cap is None:
-                raise ValueError(
-                    f"AME_MATRIX paradigm requires matrix_cap (hw: {self.name})"
-                )
+        _require_string(self.name, "name")
+        _require_string(self.arch_family, "arch_family")
+        _require_string(self.preferred_adapter, "preferred_adapter", allow_none=True)
+        _require_positive_int(self.num_cores, "num_cores")
 
-        elif self.compute_paradigm == ComputeParadigm.TENSOR_PROCESSOR:
-            if self.tensor_cap is None:
-                raise ValueError(
-                    f"TENSOR_PROCESSOR paradigm requires tensor_cap (hw: {self.name})"
-                )
+        if not isinstance(self.compute_paradigm, ComputeParadigm):
+            raise TypeError("compute_paradigm must be a ComputeParadigm")
 
-        elif self.compute_paradigm == ComputeParadigm.GPGPU:
-            if self.gpgpu_cap is None:
-                raise ValueError(f"GPGPU paradigm requires gpgpu_cap (hw: {self.name})")
+        if self.ptr_model not in _SUPPORTED_PTR_MODELS:
+            supported = ", ".join(sorted(_SUPPORTED_PTR_MODELS))
+            raise ValueError(f"ptr_model must be one of: {supported}")
+
+        capability_specs = {
+            ComputeParadigm.AME_MATRIX: ("matrix_cap", MatrixCapability),
+            ComputeParadigm.TENSOR_PROCESSOR: ("tensor_cap", TensorCapability),
+            ComputeParadigm.GPGPU: ("gpgpu_cap", GPGPUCapability),
+        }
+        required_field, required_type = capability_specs[self.compute_paradigm]
+        capabilities = {
+            "matrix_cap": self.matrix_cap,
+            "tensor_cap": self.tensor_cap,
+            "gpgpu_cap": self.gpgpu_cap,
+        }
+
+        for field_name, capability in capabilities.items():
+            if field_name == required_field:
+                if capability is None:
+                    raise ValueError(
+                        f"{self.compute_paradigm.name} paradigm requires "
+                        f"{required_field} (hw: {self.name})"
+                    )
+                if not isinstance(capability, required_type):
+                    raise TypeError(
+                        f"{required_field} must be {required_type.__name__}"
+                    )
+                continue
+
+            if capability is not None:
+                raise ValueError(
+                    f"{field_name} must be empty for {self.compute_paradigm.name} "
+                    f"paradigm (hw: {self.name})"
+                )
 
     def __post_init__(self):
         """Validate capability fields and resolve AnchorIRTrack.

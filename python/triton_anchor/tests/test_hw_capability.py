@@ -1,14 +1,15 @@
 """Tests for HWCapability and ComputeParadigm."""
 
 import pytest
+
+from triton_anchor.anchor_ir import AnchorIRTrack
 from triton_anchor.hw_capability import (
-    HWCapability,
     ComputeParadigm,
+    GPGPUCapability,
+    HWCapability,
     MatrixCapability,
     TensorCapability,
-    GPGPUCapability,
 )
-from triton_anchor.anchor_ir import AnchorIRTrack
 
 
 class TestComputeParadigm:
@@ -84,4 +85,95 @@ class TestHWCapability:
                 anchor_ir_track=AnchorIRTrack.LINALG,
                 ptr_model="structured",
                 # Missing matrix_cap!
+            )
+
+    def test_validation_rejects_empty_identity_fields(self):
+        with pytest.raises(ValueError, match="name"):
+            HWCapability(
+                name=" ",
+                arch_family="tpu",
+                compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
+                anchor_ir_track=AnchorIRTrack.LINALG,
+                ptr_model="axis_info",
+                tensor_cap=TensorCapability(),
+            )
+
+        with pytest.raises(ValueError, match="arch_family"):
+            HWCapability(
+                name="bad-tpu",
+                arch_family="",
+                compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
+                anchor_ir_track=AnchorIRTrack.LINALG,
+                ptr_model="axis_info",
+                tensor_cap=TensorCapability(),
+            )
+
+    def test_validation_rejects_bad_ptr_model(self):
+        with pytest.raises(ValueError, match="ptr_model"):
+            HWCapability(
+                name="bad-tpu",
+                arch_family="tpu",
+                compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
+                anchor_ir_track=AnchorIRTrack.LINALG,
+                ptr_model="raw",
+                tensor_cap=TensorCapability(),
+            )
+
+    def test_validation_rejects_nonpositive_hw_core_count(self):
+        with pytest.raises(ValueError, match="num_cores"):
+            HWCapability(
+                name="bad-tpu",
+                arch_family="tpu",
+                compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
+                anchor_ir_track=AnchorIRTrack.LINALG,
+                ptr_model="axis_info",
+                tensor_cap=TensorCapability(),
+                num_cores=0,
+            )
+
+    def test_validation_rejects_wrong_capability_type(self):
+        with pytest.raises(TypeError, match="matrix_cap"):
+            HWCapability(
+                name="bad-ame",
+                arch_family="riscv",
+                compute_paradigm=ComputeParadigm.AME_MATRIX,
+                anchor_ir_track=AnchorIRTrack.LINALG,
+                ptr_model="structured",
+                matrix_cap=TensorCapability(),
+            )
+
+    def test_validation_rejects_extra_capability_for_paradigm(self):
+        with pytest.raises(ValueError, match="matrix_cap must be empty"):
+            HWCapability(
+                name="bad-tpu",
+                arch_family="tpu",
+                compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
+                anchor_ir_track=AnchorIRTrack.LINALG,
+                ptr_model="axis_info",
+                matrix_cap=MatrixCapability(),
+                tensor_cap=TensorCapability(),
+            )
+
+    def test_capability_descriptors_validate_numeric_fields(self):
+        with pytest.raises(ValueError, match="matrix_cap.tile_shape"):
+            MatrixCapability(tile_shape=(8, 0))
+
+        with pytest.raises(ValueError, match="tensor_cap.local_mem_size"):
+            TensorCapability(local_mem_size=-1)
+
+        with pytest.raises(ValueError, match="gpgpu_cap.cluster_dims"):
+            GPGPUCapability(cluster_dims=(1, 1))
+
+        with pytest.raises(ValueError, match="gpgpu_cap.supported_dtypes"):
+            GPGPUCapability(supported_dtypes=set())
+
+    def test_validation_rejects_non_enum_compute_paradigm(self):
+        with pytest.raises(TypeError, match="ComputeParadigm"):
+            HWCapability(
+                name="bad-tpu",
+                arch_family="tpu",
+                compute_paradigm="tensor",
+                anchor_ir_track=AnchorIRTrack.LINALG,
+                ptr_model="axis_info",
+                tensor_cap=TensorCapability(),
             )
