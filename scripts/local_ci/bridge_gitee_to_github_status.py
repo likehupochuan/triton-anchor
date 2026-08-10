@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gitee-repo", required=True)
     parser.add_argument("--gitee-results-branch", default="local-ci-results")
     parser.add_argument("--gitee-web-url", required=True)
-    parser.add_argument("--source-branch", default="jiwang-delivery-ci")
+    parser.add_argument("--source-branch", default="CI_dev")
     parser.add_argument("--reconcile-source-branches", default="")
     parser.add_argument("--task-ref", default="")
     parser.add_argument("--sha", default="")

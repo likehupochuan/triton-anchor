@@ -3,7 +3,7 @@ run-name: ${{ inputs.run_title || github.event.pull_request.title || github.even
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
     paths:
       - "dashboard/**"
       - "scripts/dashboard/**"
@@ -11,20 +11,30 @@ on:
       - "python/triton_anchor/tests/test_dashboard_*.py"
       - ".github/workflows/backend-status-pages.yml"
   pull_request:
-    branches: [main]
     paths:
       - "dashboard/**"
       - "scripts/dashboard/**"
       - "scripts/local_ci/result_paths.py"
       - "python/triton_anchor/tests/test_dashboard_*.py"
       - ".github/workflows/backend-status-pages.yml"
-  workflow_dispatch:
+  workflow_call:
     inputs:
+      source_branch:
+        description: "Validated target branch used for dashboard data"
+        required: true
+        type: string
+      task_ref:
+        description: "Validated push or full task that requested the refresh"
+        required: true
+        type: string
       run_title:
         description: "Source commit or PR title shown as the workflow run name"
         required: false
         default: ""
         type: string
+    secrets:
+      GITEE_TOKEN:
+        required: true
 
 permissions:
   contents: read
@@ -56,8 +66,8 @@ jobs:
           GITEE_RESULTS_WEB_URL: ${{ vars.GITEE_RESULTS_WEB_URL || 'https://gitee.com/race-org/triton-anchor-local-ci-results' }}
           GITEE_USERNAME: ${{ vars.GITEE_USERNAME || 'likehupochuan' }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-          DASHBOARD_SOURCE_BRANCH: ${{ vars.DASHBOARD_SOURCE_BRANCH || 'ci/push/main' }}
-          DASHBOARD_FULL_TEST_SOURCE_BRANCH: ${{ vars.DASHBOARD_FULL_TEST_SOURCE_BRANCH || 'ci/full/main' }}
+          DASHBOARD_SOURCE_BRANCH: ${{ format('ci/push/{0}', inputs.source_branch || github.ref_name) }}
+          DASHBOARD_FULL_TEST_SOURCE_BRANCH: ${{ format('ci/full/{0}', inputs.source_branch || github.ref_name) }}
           BACKEND_PROFILE: ${{ vars.LOCAL_CI_BACKEND_PROFILE || 'sophgo-cmodel' }}
         run: |
           if [[ -z "${GITEE_TOKEN}" ]]; then

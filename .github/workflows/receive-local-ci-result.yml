@@ -2,7 +2,7 @@ name: Receive Local CI Result
 run-name: ${{ inputs.run_title || format('{0} @ {1}', inputs.source_branch, inputs.sha) }}
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       sha:
         description: Commit SHA being tested
@@ -24,7 +24,6 @@ on:
       attempt:
         description: Receiver continuation attempt
         required: true
-        default: "1"
         type: string
       started_at:
         description: Initial dispatch time in UTC
@@ -33,13 +32,15 @@ on:
       wait_seconds:
         description: Polling window for this receiver attempt
         required: true
-        default: "20400"
         type: string
       run_title:
         description: Source commit or PR title shown as the workflow run name
         required: false
         default: ""
         type: string
+    secrets:
+      GITEE_TOKEN:
+        required: true
 
 permissions:
   actions: write
@@ -71,7 +72,8 @@ jobs:
       RUN_TITLE: ${{ inputs.run_title }}
       MAX_ATTEMPTS: ${{ vars.LOCAL_CI_RECEIVER_MAX_ATTEMPTS || '6' }}
       POLL_INTERVAL_SECONDS: ${{ vars.LOCAL_CI_BRIDGE_POLL_INTERVAL_SECONDS || '60' }}
-      RECEIVER_REF: ${{ vars.LOCAL_CI_RECEIVER_REF || github.event.repository.default_branch }}
+      GATEWAY_CONTRACT_VERSION: "1"
+      GATEWAY_REF: ${{ github.ref_name }}
       GITEE_RESULTS_OWNER: ${{ vars.GITEE_RESULTS_OWNER || vars.GITEE_OWNER || 'race-org' }}
       GITEE_RESULTS_REPO: ${{ vars.GITEE_RESULTS_REPO || 'triton-anchor-local-ci-results' }}
       GITEE_RESULTS_BRANCH: ${{ vars.GITEE_RESULTS_BRANCH || 'local-ci-results' }}
@@ -129,9 +131,11 @@ jobs:
             3)
               if [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then
                 next_attempt=$((ATTEMPT + 1))
-                if gh workflow run receive-local-ci-result.yml \
+                if gh workflow run ci-gateway.yml \
                   --repo "${REPO}" \
-                  --ref "${RECEIVER_REF}" \
+                  --ref "${GATEWAY_REF}" \
+                  -f gateway_contract_version="${GATEWAY_CONTRACT_VERSION}" \
+                  -f mode="receive" \
                   -f sha="${SHA}" \
                   -f source_branch="${SOURCE_BRANCH}" \
                   -f task_ref="${TASK_REF}" \
@@ -167,17 +171,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          DASHBOARD_MAIN_TASK_REF: ${{ vars.DASHBOARD_SOURCE_BRANCH || 'ci/push/main' }}
-          DASHBOARD_FULL_TEST_TASK_REF: ${{ vars.DASHBOARD_FULL_TEST_SOURCE_BRANCH || 'ci/full/main' }}
         run: |
-          if [[ "${TASK_REF}" != "${DASHBOARD_MAIN_TASK_REF}" \
-            && "${TASK_REF}" != "${DASHBOARD_FULL_TEST_TASK_REF}" ]]; then
+          dashboard_push_ref="ci/push/${GATEWAY_REF}"
+          dashboard_full_ref="ci/full/${GATEWAY_REF}"
+          if [[ "${TASK_REF}" != "${dashboard_push_ref}" \
+            && "${TASK_REF}" != "${dashboard_full_ref}" ]]; then
             echo "Skip Pages refresh for non-dashboard task: ${TASK_REF}"
             exit 0
           fi
-          gh workflow run backend-status-pages.yml \
+          gh workflow run ci-gateway.yml \
             --repo "${REPO}" \
-            --ref "${RECEIVER_REF}" \
+            --ref "${GATEWAY_REF}" \
+            -f gateway_contract_version="${GATEWAY_CONTRACT_VERSION}" \
+            -f mode="pages" \
+            -f source_branch="${GATEWAY_REF}" \
+            -f task_ref="${TASK_REF}" \
             -f run_title="${RUN_TITLE}"
 
   stage-results:

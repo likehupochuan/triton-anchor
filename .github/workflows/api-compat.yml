@@ -2,9 +2,8 @@ name: Public API Compatibility
 
 on:
   pull_request:
-    branches: [main]
   push:
-    branches: [main]
+    branches: ["**"]
   workflow_dispatch:
 
 permissions:
@@ -90,14 +89,13 @@ jobs:
           BASE_SHA: ${{ steps.refs.outputs.base_sha }}
           HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
         run: |
-          if [[ -f base/scripts/api_contract/check_public_api.py && -f base/api_contract/public_api.json ]]; then
-            checker=base/scripts/api_contract/check_public_api.py
-            scope=base/api_contract/public_api.json
-          else
-            # Bootstrap path for the first merge that introduces this check.
-            checker=candidate/scripts/api_contract/check_public_api.py
-            scope=candidate/api_contract/public_api.json
+          if [[ ! -f base/scripts/api_contract/check_public_api.py \
+            || ! -f base/api_contract/public_api.json ]]; then
+            echo "::error::The base revision does not contain the trusted public API checker and scope."
+            exit 1
           fi
+          checker=base/scripts/api_contract/check_public_api.py
+          scope=base/api_contract/public_api.json
 
           set +e
           python "$checker" \

@@ -2,9 +2,8 @@ name: Delivery CI
 
 on:
   pull_request:
-    branches: [main]
   push:
-    branches: [main]
+    branches: ["**"]
   workflow_dispatch:
     inputs:
       run_full_smoke:

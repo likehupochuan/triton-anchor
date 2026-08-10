@@ -2,18 +2,13 @@ name: Dispatch Local CI via Gitee
 
 on:
   push:
-    branches:
-      - main
-  pull_request_target:
-    branches:
-      - main
-    types: [opened, synchronize, reopened, ready_for_review]
+    branches: ["**"]
   workflow_dispatch:
     inputs:
       source_branch:
         description: "GitHub branch represented by this local CI task"
         required: false
-        default: "main"
+        default: ""
         type: string
       commit_sha:
         description: "Commit SHA to test; defaults to the workflow commit"
@@ -28,6 +23,40 @@ on:
         options:
           - sample
           - full
+  workflow_call:
+    inputs:
+      pr_number:
+        description: "Validated pull request number"
+        required: true
+        type: string
+      head_sha:
+        description: "Validated pull request head SHA"
+        required: true
+        type: string
+      base_sha:
+        description: "Validated pull request base SHA"
+        required: true
+        type: string
+      base_ref:
+        description: "Validated pull request base branch"
+        required: true
+        type: string
+      head_repo:
+        description: "Validated pull request head repository"
+        required: true
+        type: string
+      head_ref:
+        description: "Validated pull request head branch"
+        required: true
+        type: string
+      run_title:
+        description: "Sanitized workflow run title"
+        required: false
+        default: ""
+        type: string
+    secrets:
+      GITEE_TOKEN:
+        required: true
 
 permissions:
   actions: write
@@ -35,11 +64,12 @@ permissions:
   statuses: write
 
 concurrency:
-  group: dispatch-local-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref_name || inputs.source_branch }}-${{ inputs.flaggems_mode || 'sample' }}
+  group: dispatch-local-ci-${{ github.event_name }}-${{ inputs.pr_number || github.ref_name || inputs.source_branch }}-${{ inputs.flaggems_mode || 'sample' }}
   cancel-in-progress: true
 
 jobs:
   dispatch-local-ci:
+    if: ${{ github.ref_type == 'branch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -50,25 +80,26 @@ jobs:
       GITEE_CI_WEB_URL: ${{ vars.GITEE_RESULTS_WEB_URL || 'https://gitee.com/race-org/triton-anchor-local-ci-results' }}
       GITEE_USERNAME: ${{ vars.GITEE_USERNAME || 'likehupochuan' }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      RECEIVER_REF: ${{ vars.LOCAL_CI_RECEIVER_REF || github.event.repository.default_branch }}
+      GATEWAY_CONTRACT_VERSION: "1"
+      GATEWAY_REF: ${{ github.ref_name }}
       RECEIVER_WAIT_SECONDS: ${{ vars.LOCAL_CI_RECEIVER_WAIT_SECONDS || '20400' }}
 
     steps:
       - name: Resolve task metadata
         id: meta
         env:
-          EVENT_SHA: ${{ github.event.pull_request.head.sha || inputs.commit_sha || github.sha }}
-          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          EVENT_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
-          EVENT_SOURCE_BRANCH: ${{ github.event.pull_request.head.ref || inputs.source_branch || github.ref_name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          EVENT_SHA: ${{ inputs.head_sha || inputs.commit_sha || github.sha }}
+          EVENT_BASE_SHA: ${{ inputs.base_sha }}
+          EVENT_BASE_BRANCH: ${{ inputs.base_ref }}
+          EVENT_SOURCE_BRANCH: ${{ inputs.head_ref || inputs.source_branch || github.ref_name }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          PR_HEAD_REPO: ${{ inputs.head_repo }}
           REQUESTED_FLAGGEMS_MODE: ${{ inputs.flaggems_mode || 'sample' }}
         run: |
           set -euo pipefail
 
           flaggems_mode="sample"
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+          if [ -z "${PR_NUMBER}" ] && [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             flaggems_mode="${REQUESTED_FLAGGEMS_MODE:-sample}"
           fi
           case "${flaggems_mode}" in
@@ -80,7 +111,7 @@ jobs:
           esac
 
           context="${CONTEXT}"
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request_target" ]; then
+          if [ -n "${PR_NUMBER}" ]; then
             task_ref="ci/pr-${PR_NUMBER}/${EVENT_SOURCE_BRANCH}"
             base_task_ref="ci/base/pr-${PR_NUMBER}/${EVENT_SOURCE_BRANCH}"
             base_fetch_ref="refs/heads/${EVENT_BASE_BRANCH}"
@@ -100,7 +131,7 @@ jobs:
             exit 1
           fi
 
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request_target" ]; then
+          if [ -n "${PR_NUMBER}" ]; then
             fetch_ref="refs/pull/${PR_NUMBER}/head"
             source_label="${PR_HEAD_REPO}:${EVENT_SOURCE_BRANCH}"
           elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
@@ -124,7 +155,7 @@ jobs:
             echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "${GITHUB_OUTPUT}"
 
-      - name: Fetch exact task commit
+      - name: Fetch and verify exact task commit
         env:
           SHA: ${{ steps.meta.outputs.sha }}
           FETCH_REF: ${{ steps.meta.outputs.fetch_ref }}
@@ -132,6 +163,11 @@ jobs:
           BASE_FETCH_REF: ${{ steps.meta.outputs.base_fetch_ref }}
         run: |
           set -euo pipefail
+
+          if [[ ! "${SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Task SHA must be a full 40-character commit SHA"
+            exit 1
+          fi
 
           git init .
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
@@ -148,13 +184,15 @@ jobs:
             fi
           fi
 
-          git checkout --detach "${SHA}"
-
-          actual_sha="$(git rev-parse HEAD)"
+          if ! actual_sha="$(git rev-parse --verify "${SHA}^{commit}")"; then
+            echo "::error::Requested task commit ${SHA} was not fetched"
+            exit 1
+          fi
           if [ "${actual_sha}" != "${SHA}" ]; then
             echo "::error::Fetched ${actual_sha}, expected ${SHA}"
             exit 1
           fi
+          git update-ref refs/local-ci/task-selected "${actual_sha}"
 
       - name: Push task ref to CI relay repository
         env:
@@ -184,7 +222,8 @@ jobs:
           git config user.email "github-actions@github.com"
           git remote add gitee-ci "${repo_url}"
           GIT_ASKPASS="${askpass}" GIT_TERMINAL_PROMPT=0 \
-            git push --force gitee-ci "HEAD:refs/heads/${TASK_REF}"
+            git push --force gitee-ci \
+              "refs/local-ci/task-selected:refs/heads/${TASK_REF}"
 
           if [ -n "${BASE_SHA}" ] && [ -n "${BASE_TASK_REF}" ]; then
             GIT_ASKPASS="${askpass}" GIT_TERMINAL_PROMPT=0 \
@@ -213,11 +252,13 @@ jobs:
           TASK_REF: ${{ steps.meta.outputs.task_ref }}
           STARTED_AT: ${{ steps.meta.outputs.started_at }}
           STATUS_CONTEXT: ${{ steps.meta.outputs.context }}
-          RUN_TITLE: ${{ github.event.pull_request.title || github.event.head_commit.message || inputs.source_branch || github.ref_name }}
+          RUN_TITLE: ${{ inputs.run_title || github.event.head_commit.message || inputs.source_branch || github.ref_name }}
         run: |
-          gh workflow run receive-local-ci-result.yml \
+          gh workflow run ci-gateway.yml \
             --repo "${GITHUB_REPOSITORY}" \
-            --ref "${RECEIVER_REF}" \
+            --ref "${GATEWAY_REF}" \
+            -f gateway_contract_version="${GATEWAY_CONTRACT_VERSION}" \
+            -f mode="receive" \
             -f sha="${SHA}" \
             -f source_branch="${SOURCE_BRANCH}" \
             -f task_ref="${TASK_REF}" \
