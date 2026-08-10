@@ -1,0 +1,225 @@
+name: CI Gateway
+run-name: ${{ inputs.run_title || github.event.pull_request.title || format('CI gateway on {0}', github.ref_name) }}
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      gateway_contract_version:
+        description: "Internal gateway contract version"
+        required: false
+        default: "1"
+        type: string
+      mode:
+        description: "Internal gateway operation"
+        required: true
+        default: "dispatch"
+        type: choice
+        options:
+          - dispatch
+          - receive
+          - pages
+      pr_number:
+        description: "Pull request number for dispatch mode"
+        required: false
+        default: ""
+        type: string
+      expected_head_sha:
+        description: "Expected pull request head SHA"
+        required: false
+        default: ""
+        type: string
+      expected_base_sha:
+        description: "Expected pull request base SHA"
+        required: false
+        default: ""
+        type: string
+      sha:
+        description: "Commit SHA whose local CI status is being received"
+        required: false
+        default: ""
+        type: string
+      source_branch:
+        description: "Source branch represented by the local CI task"
+        required: false
+        default: ""
+        type: string
+      task_ref:
+        description: "Gitee task branch"
+        required: false
+        default: ""
+        type: string
+      context:
+        description: "GitHub commit status context"
+        required: false
+        default: ""
+        type: string
+      attempt:
+        description: "Receiver continuation attempt"
+        required: false
+        default: "1"
+        type: string
+      started_at:
+        description: "Initial dispatch time in UTC"
+        required: false
+        default: ""
+        type: string
+      wait_seconds:
+        description: "Polling window for this receiver attempt"
+        required: false
+        default: "20400"
+        type: string
+      run_title:
+        description: "Sanitized source title shown as the workflow run name"
+        required: false
+        default: ""
+        type: string
+
+permissions: {}
+
+env:
+  GATEWAY_CONTRACT_VERSION: "1"
+
+jobs:
+  route-pull-request:
+    name: Route PR to target branch CI
+    if: ${{ github.event_name == 'pull_request_target' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - name: Validate target branch and dispatch gateway
+        uses: actions/github-script@v7
+        env:
+          STATUS_CONTEXT: ${{ vars.LOCAL_CI_CONTEXT || 'local-ci/sophgo-cmodel' }}
+        with:
+          script: |
+            const expectedContract = process.env.GATEWAY_CONTRACT_VERSION;
+            const eventPull = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const shaPattern = /^[0-9a-f]{40}$/i;
+
+            if (!eventPull || !Number.isInteger(eventPull.number)) {
+              throw new Error('pull_request_target payload is missing a pull request number');
+            }
+
+            let statusSha = eventPull.head?.sha || '';
+            const statusTarget = `${context.serverUrl}/${owner}/${repo}/actions/workflows/ci-gateway.yml`;
+            const markRouteError = async (description) => {
+              if (!shaPattern.test(statusSha)) {
+                core.warning('Cannot publish a routing error because the head SHA is invalid.');
+                return;
+              }
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha: statusSha,
+                state: 'error',
+                context: process.env.STATUS_CONTEXT,
+                description: description.slice(0, 140),
+                target_url: statusTarget,
+              });
+            };
+
+            try {
+              const { data: pull } = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: eventPull.number,
+              });
+
+              statusSha = pull.head.sha;
+              if (pull.state !== 'open') {
+                core.notice(`PR #${pull.number} is no longer open; routing is not needed.`);
+                return;
+              }
+              if (
+                pull.head.sha !== eventPull.head.sha ||
+                pull.base.sha !== eventPull.base.sha ||
+                pull.base.ref !== eventPull.base.ref
+              ) {
+                core.notice(`PR #${pull.number} changed after this event; ignoring the stale route request.`);
+                return;
+              }
+              if (!shaPattern.test(pull.head.sha) || !shaPattern.test(pull.base.sha)) {
+                throw new Error('GitHub returned an invalid pull request head or base SHA');
+              }
+
+              const readFile = async (path) => {
+                try {
+                  const response = await github.rest.repos.getContent({
+                    owner,
+                    repo,
+                    path,
+                    ref: pull.base.sha,
+                  });
+                  if (Array.isArray(response.data) || response.data.type !== 'file') {
+                    throw new Error(`${path} is not a regular file at ${pull.base.sha}`);
+                  }
+                  return Buffer.from(response.data.content, 'base64').toString('utf8');
+                } catch (error) {
+                  if (error.status === 404) {
+                    return null;
+                  }
+                  throw error;
+                }
+              };
+
+              const markerPath = '.github/workflows/dispatch-local-ci.yml';
+              if ((await readFile(markerPath)) === null) {
+                core.notice(`Branch ${pull.base.ref} has not enabled local CI; routing is skipped.`);
+                return;
+              }
+
+              const requiredPaths = [
+                '.github/workflows/ci-gateway.yml',
+                markerPath,
+                '.github/workflows/receive-local-ci-result.yml',
+                '.github/workflows/backend-status-pages.yml',
+              ];
+              const contents = new Map();
+              for (const path of requiredPaths) {
+                const content = await readFile(path);
+                if (content === null) {
+                  throw new Error(`Local CI is enabled on ${pull.base.ref}, but ${path} is missing`);
+                }
+                contents.set(path, content);
+              }
+
+              const gatewayText = contents.get('.github/workflows/ci-gateway.yml');
+              const contractMarker = `GATEWAY_CONTRACT_VERSION: "${expectedContract}"`;
+              if (!gatewayText.includes(contractMarker)) {
+                throw new Error(`Target gateway does not implement contract version ${expectedContract}`);
+              }
+
+              const cleanTitle = String(pull.title || '')
+                .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 140);
+              const runTitle = `PR #${pull.number}: ${cleanTitle || pull.head.sha.slice(0, 12)}`;
+
+              await github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: 'ci-gateway.yml',
+                ref: pull.base.ref,
+                inputs: {
+                  gateway_contract_version: expectedContract,
+                  mode: 'dispatch',
+                  pr_number: String(pull.number),
+                  expected_head_sha: pull.head.sha,
+                  expected_base_sha: pull.base.sha,
+                  run_title: runTitle,
+                },
+              });
+              core.info(`Dispatched PR #${pull.number} to ci-gateway.yml on ${pull.base.ref}.`);
+            } catch (error) {
+              await markRouteError(`failed to route local CI: ${error.message}`);
+              throw error;
+            }
