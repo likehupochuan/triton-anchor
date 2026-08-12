@@ -1,4 +1,5 @@
 # 多分支 CI Gateway v3 架构与责任边界
+<!-- fork PR smoke-test touch. -->
 
 ## 目标
 
