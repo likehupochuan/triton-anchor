@@ -1,0 +1,433 @@
+name: CI Gateway
+run-name: ${{ inputs.run_title || github.event.pull_request.title || format('CI gateway on {0}', github.ref_name) }}
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      gateway_contract_version:
+        description: "Internal gateway contract version"
+        required: false
+        default: "1"
+        type: string
+      mode:
+        description: "Internal gateway operation"
+        required: true
+        default: "dispatch"
+        type: choice
+        options:
+          - dispatch
+          - receive
+          - pages
+      pr_number:
+        description: "Pull request number for dispatch mode"
+        required: false
+        default: ""
+        type: string
+      expected_head_sha:
+        description: "Expected pull request head SHA"
+        required: false
+        default: ""
+        type: string
+      expected_base_sha:
+        description: "Expected pull request base SHA"
+        required: false
+        default: ""
+        type: string
+      sha:
+        description: "Commit SHA whose local CI status is being received"
+        required: false
+        default: ""
+        type: string
+      source_branch:
+        description: "Source branch represented by the local CI task"
+        required: false
+        default: ""
+        type: string
+      task_ref:
+        description: "Gitee task branch"
+        required: false
+        default: ""
+        type: string
+      context:
+        description: "GitHub commit status context"
+        required: false
+        default: ""
+        type: string
+      attempt:
+        description: "Receiver continuation attempt"
+        required: false
+        default: "1"
+        type: string
+      started_at:
+        description: "Initial dispatch time in UTC"
+        required: false
+        default: ""
+        type: string
+      wait_seconds:
+        description: "Polling window for this receiver attempt"
+        required: false
+        default: "20400"
+        type: string
+      run_title:
+        description: "Sanitized source title shown as the workflow run name"
+        required: false
+        default: ""
+        type: string
+
+permissions: {}
+
+env:
+  GATEWAY_CONTRACT_VERSION: "1"
+
+jobs:
+  route-pull-request:
+    name: Route PR to target branch CI
+    if: ${{ github.event_name == 'pull_request_target' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - name: Validate target branch and dispatch gateway
+        uses: actions/github-script@v7
+        env:
+          STATUS_CONTEXT: ${{ vars.LOCAL_CI_CONTEXT || 'local-ci/sophgo-cmodel' }}
+        with:
+          script: |
+            const expectedContract = process.env.GATEWAY_CONTRACT_VERSION;
+            const eventPull = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const shaPattern = /^[0-9a-f]{40}$/i;
+
+            if (!eventPull || !Number.isInteger(eventPull.number)) {
+              throw new Error('pull_request_target payload is missing a pull request number');
+            }
+
+            let statusSha = eventPull.head?.sha || '';
+            const statusTarget = `${context.serverUrl}/${owner}/${repo}/actions/workflows/ci-gateway.yml`;
+            const markRouteError = async (description) => {
+              if (!shaPattern.test(statusSha)) {
+                core.warning('Cannot publish a routing error because the head SHA is invalid.');
+                return;
+              }
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha: statusSha,
+                state: 'error',
+                context: process.env.STATUS_CONTEXT,
+                description: description.slice(0, 140),
+                target_url: statusTarget,
+              });
+            };
+
+            try {
+              const { data: pull } = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: eventPull.number,
+              });
+
+              statusSha = pull.head.sha;
+              if (pull.state !== 'open') {
+                core.notice(`PR #${pull.number} is no longer open; routing is not needed.`);
+                return;
+              }
+              if (
+                pull.head.sha !== eventPull.head.sha ||
+                pull.base.sha !== eventPull.base.sha ||
+                pull.base.ref !== eventPull.base.ref
+              ) {
+                core.notice(`PR #${pull.number} changed after this event; ignoring the stale route request.`);
+                return;
+              }
+              if (!shaPattern.test(pull.head.sha) || !shaPattern.test(pull.base.sha)) {
+                throw new Error('GitHub returned an invalid pull request head or base SHA');
+              }
+
+              const readFile = async (path) => {
+                try {
+                  const response = await github.rest.repos.getContent({
+                    owner,
+                    repo,
+                    path,
+                    ref: pull.base.sha,
+                  });
+                  if (Array.isArray(response.data) || response.data.type !== 'file') {
+                    throw new Error(`${path} is not a regular file at ${pull.base.sha}`);
+                  }
+                  return Buffer.from(response.data.content, 'base64').toString('utf8');
+                } catch (error) {
+                  if (error.status === 404) {
+                    return null;
+                  }
+                  throw error;
+                }
+              };
+
+              const markerPath = '.github/workflows/dispatch-local-ci.yml';
+              if ((await readFile(markerPath)) === null) {
+                core.notice(`Branch ${pull.base.ref} has not enabled local CI; routing is skipped.`);
+                return;
+              }
+
+              const requiredPaths = [
+                '.github/workflows/ci-gateway.yml',
+                markerPath,
+                '.github/workflows/receive-local-ci-result.yml',
+                '.github/workflows/backend-status-pages.yml',
+              ];
+              const contents = new Map();
+              for (const path of requiredPaths) {
+                const content = await readFile(path);
+                if (content === null) {
+                  throw new Error(`Local CI is enabled on ${pull.base.ref}, but ${path} is missing`);
+                }
+                contents.set(path, content);
+              }
+
+              const gatewayText = contents.get('.github/workflows/ci-gateway.yml');
+              const contractMarker = `GATEWAY_CONTRACT_VERSION: "${expectedContract}"`;
+              if (!gatewayText.includes(contractMarker)) {
+                throw new Error(`Target gateway does not implement contract version ${expectedContract}`);
+              }
+
+              const cleanTitle = String(pull.title || '')
+                .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 140);
+              const runTitle = `PR #${pull.number}: ${cleanTitle || pull.head.sha.slice(0, 12)}`;
+
+              await github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: 'ci-gateway.yml',
+                ref: pull.base.ref,
+                inputs: {
+                  gateway_contract_version: expectedContract,
+                  mode: 'dispatch',
+                  pr_number: String(pull.number),
+                  expected_head_sha: pull.head.sha,
+                  expected_base_sha: pull.base.sha,
+                  run_title: runTitle,
+                },
+              });
+              core.info(`Dispatched PR #${pull.number} to ci-gateway.yml on ${pull.base.ref}.`);
+            } catch (error) {
+              await markRouteError(`failed to route local CI: ${error.message}`);
+              throw error;
+            }
+
+  validate-dispatch:
+    name: Validate PR dispatch request
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      pr_number: ${{ steps.validate.outputs.pr_number }}
+      head_sha: ${{ steps.validate.outputs.head_sha }}
+      base_sha: ${{ steps.validate.outputs.base_sha }}
+      base_ref: ${{ steps.validate.outputs.base_ref }}
+      head_repo: ${{ steps.validate.outputs.head_repo }}
+      head_ref: ${{ steps.validate.outputs.head_ref }}
+      run_title: ${{ steps.validate.outputs.run_title }}
+    steps:
+      - name: Revalidate pull request metadata
+        id: validate
+        uses: actions/github-script@v7
+        env:
+          REQUESTED_CONTRACT: ${{ inputs.gateway_contract_version }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          EXPECTED_BASE_SHA: ${{ inputs.expected_base_sha }}
+          TARGET_REF: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          INPUT_RUN_TITLE: ${{ inputs.run_title }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const expectedContract = process.env.GATEWAY_CONTRACT_VERSION;
+            const prText = process.env.PR_NUMBER;
+
+            if (process.env.REQUESTED_CONTRACT !== expectedContract) {
+              throw new Error(`Gateway contract mismatch: expected ${expectedContract}`);
+            }
+            if (process.env.REF_TYPE !== 'branch') {
+              throw new Error(`Local CI workers require a branch ref, got ${process.env.TARGET_REF}`);
+            }
+            if (!/^[1-9][0-9]*$/.test(prText)) {
+              throw new Error('pr_number must be a positive integer');
+            }
+            if (process.env.WORKFLOW_SHA.toLowerCase() !== process.env.EXPECTED_BASE_SHA.toLowerCase()) {
+              throw new Error('The target branch advanced after routing; refusing to run a stale gateway');
+            }
+
+            const prNumber = Number.parseInt(prText, 10);
+            const { data: pull } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: prNumber,
+            });
+            if (pull.state !== 'open') {
+              throw new Error(`PR #${prNumber} is not open`);
+            }
+            if (pull.base.ref !== process.env.TARGET_REF) {
+              throw new Error(`PR base ${pull.base.ref} does not match gateway ref ${process.env.TARGET_REF}`);
+            }
+            if (pull.base.sha.toLowerCase() !== process.env.EXPECTED_BASE_SHA.toLowerCase()) {
+              throw new Error('PR base SHA changed after routing');
+            }
+            if (pull.head.sha.toLowerCase() !== process.env.EXPECTED_HEAD_SHA.toLowerCase()) {
+              throw new Error('PR head SHA changed after routing');
+            }
+            if (!pull.head.repo?.full_name || !pull.head.ref) {
+              throw new Error('PR head repository metadata is incomplete');
+            }
+
+            const cleanTitle = String(process.env.INPUT_RUN_TITLE || `PR #${prNumber}: ${pull.title}`)
+              .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 160);
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('head_sha', pull.head.sha);
+            core.setOutput('base_sha', pull.base.sha);
+            core.setOutput('base_ref', pull.base.ref);
+            core.setOutput('head_repo', pull.head.repo.full_name);
+            core.setOutput('head_ref', pull.head.ref);
+            core.setOutput('run_title', cleanTitle || `PR #${prNumber}`);
+
+  dispatch:
+    name: Dispatch local CI task
+    needs: validate-dispatch
+    permissions:
+      actions: write
+      contents: read
+      statuses: write
+    uses: ./.github/workflows/dispatch-local-ci.yml
+    with:
+      pr_number: ${{ needs.validate-dispatch.outputs.pr_number }}
+      head_sha: ${{ needs.validate-dispatch.outputs.head_sha }}
+      base_sha: ${{ needs.validate-dispatch.outputs.base_sha }}
+      base_ref: ${{ needs.validate-dispatch.outputs.base_ref }}
+      head_repo: ${{ needs.validate-dispatch.outputs.head_repo }}
+      head_ref: ${{ needs.validate-dispatch.outputs.head_ref }}
+      run_title: ${{ needs.validate-dispatch.outputs.run_title }}
+    secrets:
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+
+  validate-receive:
+    name: Validate receiver request
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'receive' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate receiver inputs
+        uses: actions/github-script@v7
+        env:
+          REQUESTED_CONTRACT: ${{ inputs.gateway_contract_version }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          TASK_REF: ${{ inputs.task_ref }}
+          TARGET_REF: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        with:
+          script: |
+            const expectedContract = process.env.GATEWAY_CONTRACT_VERSION;
+
+            if (process.env.REQUESTED_CONTRACT !== expectedContract) {
+              throw new Error(`Gateway contract mismatch: expected ${expectedContract}`);
+            }
+            if (process.env.REF_TYPE !== 'branch') {
+              throw new Error(`Receiver requires a branch ref, got ${process.env.TARGET_REF}`);
+            }
+
+            const sourceBranch = process.env.SOURCE_BRANCH;
+            const taskRef = process.env.TASK_REF;
+            const prMatch = taskRef.match(/^ci\/pr-([1-9][0-9]*)\/(.+)$/);
+            const taskMatchesSource =
+              taskRef === `ci/push/${sourceBranch}` ||
+              taskRef === `ci/full/${sourceBranch}` ||
+              (prMatch && prMatch[2] === sourceBranch);
+            if (!taskMatchesSource) {
+              throw new Error('task_ref does not match source_branch');
+            }
+
+  receive:
+    name: Receive local CI result
+    needs: validate-receive
+    permissions:
+      actions: write
+      contents: read
+      statuses: write
+    uses: ./.github/workflows/receive-local-ci-result.yml
+    with:
+      sha: ${{ inputs.sha }}
+      source_branch: ${{ inputs.source_branch }}
+      task_ref: ${{ inputs.task_ref }}
+      context: ${{ inputs.context }}
+      attempt: ${{ inputs.attempt }}
+      started_at: ${{ inputs.started_at }}
+      wait_seconds: ${{ inputs.wait_seconds }}
+      run_title: ${{ inputs.run_title }}
+    secrets:
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+
+  validate-pages:
+    name: Validate Pages refresh request
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'pages' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate Pages inputs
+        uses: actions/github-script@v7
+        env:
+          REQUESTED_CONTRACT: ${{ inputs.gateway_contract_version }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          TASK_REF: ${{ inputs.task_ref }}
+          TARGET_REF: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        with:
+          script: |
+            const expectedContract = process.env.GATEWAY_CONTRACT_VERSION;
+
+            if (process.env.REQUESTED_CONTRACT !== expectedContract) {
+              throw new Error(`Gateway contract mismatch: expected ${expectedContract}`);
+            }
+            if (process.env.REF_TYPE !== 'branch') {
+              throw new Error(`Pages refresh requires a branch ref, got ${process.env.TARGET_REF}`);
+            }
+            if (process.env.SOURCE_BRANCH !== process.env.TARGET_REF) {
+              throw new Error('Pages source_branch must match the gateway target branch');
+            }
+            const allowedTaskRefs = new Set([
+              `ci/push/${process.env.SOURCE_BRANCH}`,
+              `ci/full/${process.env.SOURCE_BRANCH}`,
+            ]);
+            if (!allowedTaskRefs.has(process.env.TASK_REF)) {
+              throw new Error('Pages task_ref is not a push or full task for this target branch');
+            }
+
+  pages:
+    name: Refresh backend status Pages
+    needs: validate-pages
+    permissions:
+      contents: read
+      id-token: write
+      pages: write
+    uses: ./.github/workflows/backend-status-pages.yml
+    with:
+      source_branch: ${{ inputs.source_branch }}
+      task_ref: ${{ inputs.task_ref }}
+      run_title: ${{ inputs.run_title }}
+    secrets:
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
