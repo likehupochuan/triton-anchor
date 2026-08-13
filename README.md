@@ -266,6 +266,37 @@ python -c "import triton_anchor; print(f'triton-anchor {triton_anchor.__version_
 ```
 
 
+### 4.3 仅安装纯 Python 模块（无需 LLVM）
+
+如果你只需要使用 `HWCapability`、`AnchorIRValidator` 等纯 Python API（例如开发后端 Plugin 时），可以跳过 C++ 构建：
+
+```bash
+# 将 python/ 目录加入 PYTHONPATH 即可
+export PYTHONPATH=/path/to/triton-anchor/python:$PYTHONPATH
+
+python -c "from triton_anchor import HWCapability, ComputeParadigm; print('OK')"
+```
+
+### 4.4 开发模式
+
+```bash
+# 安装包含测试工具的完整开发依赖
+uv pip install -e ".[dev]"
+
+# 运行单元测试
+pytest python/triton_anchor/tests/ -v
+
+# 运行 Local CI/Codex 契约测试
+pytest scripts/local_ci/codex_ai/tests scripts/local_ci/tests scripts/local_ci/results/tests -v
+```
+
+> 更详细的 Local CI 使用、维护和故障排查说明见 `scripts/local_ci/README.md` 和 `scripts/local_ci/DEVELOPMENT_GUIDE.md`。
+
+```bash
+# 代码风格检查
+pip install ruff
+ruff check python/ tests/ scripts/local_ci/
+```
 
 > 💡 **完整构建指南**（Docker 环境配置、LLVM 源码编译、Wheel 打包等）请参阅 [docs/build.md](docs/build.md)。
 
@@ -278,9 +309,14 @@ triton-anchor/
 ├── docs/                        # 文档
 │   ├── build.md                 #   构建与环境配置指南
 │   └── custom_backend.md        #   自定义硬件后端接入指南
-├── tests/                       # 框架级和端到端测试
-│   ├── test_discovery.py        #   entry_points 后端发现测试
-│   └── test_e2e.py              #   端到端编译链路测试
+├── tests/                       # 产品级和端到端测试
+│   └── test_smoke.py            #   安装后 smoke、binding 和编译链路测试
+├── scripts/local_ci/            # Local CI 控制面及模块内契约测试
+│   ├── README.md                #   Local CI 使用说明
+│   ├── DEVELOPMENT_GUIDE.md     #   Local CI 长期开发指南
+│   ├── tests/                   #   Local CI 布局测试
+│   ├── codex_ai/tests/          #   Codex prompt、报告和容器 harness
+│   └── results/tests/           #   Gitee/GitHub bridge 测试
 ├── .github/                     # GitHub 配置
 │   ├── workflows/ci.yml         #   CI 流水线（lint + 单元测试）
 │   └── ISSUE_TEMPLATE/          #   Issue 模板（Feature Request / Bug Report）

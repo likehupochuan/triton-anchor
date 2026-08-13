@@ -5,9 +5,7 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
   pull_request:
-    branches: [main, develop]
 
 # 同一分支上新的推送自动取消旧的运行
 concurrency:
@@ -49,14 +47,18 @@ jobs:
             --exclude "$RUFF_EXCLUDE" \
             --ignore "$RUFF_CRITICAL_RULES" \
             --output-format=concise \
-            python/ tests/; then
+            python/ tests/ scripts/local_ci/ \
+            scripts/ci/scan_pr_security.py \
+            scripts/ci/tests/; then
             has_warning=true
           fi
 
           if ! ruff format \
             --check \
             --exclude "$RUFF_EXCLUDE" \
-            python/ tests/; then
+            python/ tests/ scripts/local_ci/ \
+            scripts/ci/scan_pr_security.py \
+            scripts/ci/tests/; then
             has_warning=true
           fi
 
@@ -70,7 +72,9 @@ jobs:
             --exclude "$RUFF_EXCLUDE" \
             --select "$RUFF_CRITICAL_RULES" \
             --output-format=github \
-            python/ tests/
+            python/ tests/ scripts/local_ci/ \
+            scripts/ci/scan_pr_security.py \
+            scripts/ci/tests/
 
   # ───────────── Job 2: Pure-Python unit tests ────────────────
   unit-test:
@@ -96,13 +100,14 @@ jobs:
       - name: Run pure-Python unit tests
         run: |
           pytest python/triton_anchor/tests/ \
+            scripts/ci/tests/ \
             -v \
             --tb=short \
             --cov=python/triton_anchor \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml
         env:
-          PYTHONPATH: python
+          PYTHONPATH: python:scripts/local_ci
 
       - name: Upload coverage artifact
         if: matrix.python-version == '3.10'
