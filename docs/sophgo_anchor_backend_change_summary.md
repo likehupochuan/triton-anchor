@@ -2,7 +2,7 @@
 
 ## 1. 文档目的
 
-本文记录 `triton-anchor_v3.0` 中 Anchor 后端基础设施、硬件能力校验和
+本文记录说明 `triton-anchor_v3.0` 中 Anchor 后端基础设施、硬件能力校验和
 `triton-sophgo-backend` 的本轮改造，说明以下内容：
 
 - `AnchorBackendBase` 的职责、扩展接口和编译阶段所有权；
