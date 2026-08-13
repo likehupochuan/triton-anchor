@@ -1,5 +1,5 @@
 name: CI Gateway
-run-name: ${{ inputs.run_title || (github.event_name == 'pull_request_target' && format('Route PR #{0} head {1}', github.event.pull_request.number, github.event.pull_request.head.sha)) || format('CI gateway on {0}', github.ref_name) }}
+run-name: "${{ inputs.run_title || (github.event_name == 'pull_request_target' && format('Route PR #{0} head {1}', github.event.pull_request.number, github.event.pull_request.head.sha)) || format('CI gateway on {0}', github.ref_name) }}"
 
 on:
   pull_request_target:
