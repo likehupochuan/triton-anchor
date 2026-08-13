@@ -381,6 +381,8 @@ AST → TTIR
 | `HWCapability.active_capability` | `triton_anchor.hw_capability` | 返回当前计算范式对应的能力描述符 |
 | `HWCapability.supported_dtypes` | `triton_anchor.hw_capability` | 返回当前能力描述符支持的数据类型集合 |
 | `HWCapability.supports_dtype()` | `triton_anchor.hw_capability` | 统一判断目标硬件是否支持某种数据类型 |
+| `HWCapability.unsupported_dtypes()` | `triton_anchor.hw_capability` | 返回批量 dtype 检查中的不支持项 |
+| `HWCapability.supports_all_dtypes()` | `triton_anchor.hw_capability` | 判断目标硬件是否支持一组数据类型 |
 | `ComputeParadigm` | `triton_anchor.hw_capability` | 枚举：`AME_MATRIX` / `TENSOR_PROCESSOR` / `GPGPU` |
 | `MatrixCapability` | `triton_anchor.hw_capability` | AME 矩阵扩展能力描述（tile 形状、寄存器数量等） |
 | `TensorCapability` | `triton_anchor.hw_capability` | Tensor Processor 能力描述（核心数、SRAM 大小等） |
@@ -410,6 +412,7 @@ hw = HWCapability(
 
 assert hw.active_capability is hw.tensor_cap
 assert hw.supports_dtype("float32")  # normalized to "fp32"
+assert hw.supports_all_dtypes(["float32", "int8"])
 print(sorted(hw.supported_dtypes))
 ```
 

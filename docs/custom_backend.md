@@ -123,14 +123,18 @@ HW = HWCapability(
 )
 
 def _make_linalg(mod, metadata, options):
-    if not HW.supports_dtype("float32"):
-        raise ValueError("my-device-v1 does not support fp32 kernels")
+    required_dtypes = {"float32", "int8"}
+    unsupported = HW.unsupported_dtypes(required_dtypes)
+    if unsupported:
+        raise ValueError(
+            f"my-device-v1 does not support required dtypes: {sorted(unsupported)}"
+        )
     metadata["hw_supported_dtypes"] = sorted(HW.supported_dtypes)
     # ... run TTIR to Linalg conversion passes
     return mod
 ```
 
-`supports_dtype()` 会将常见拼写如 `float32`、`float16` 和 `bfloat16` 规范化为能力描述符使用的 `fp32`、`fp16` 和 `bf16`。`supported_dtypes` 返回的是拷贝，调用方修改它不会改变后端声明的能力。
+`supports_dtype()`、`supports_all_dtypes()` 和 `unsupported_dtypes()` 会将常见拼写如 `float32`、`float16` 和 `bfloat16` 规范化为能力描述符使用的 `fp32`、`fp16` 和 `bf16`。`supported_dtypes` 返回的是拷贝，调用方修改它不会改变后端声明的能力。
 
 ### 编译阶段
 

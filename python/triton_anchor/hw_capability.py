@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Optional, Set, Tuple, Literal, Union
+from typing import TYPE_CHECKING, Iterable, Optional, Set, Tuple, Literal, Union
 
 if TYPE_CHECKING:
     from .anchor_ir import AnchorIRTrack
@@ -43,6 +43,12 @@ _DTYPE_ALIASES = {
     "fp16": "fp16",
     "bf16": "bf16",
 }
+
+
+def _normalize_dtype(dtype: str) -> str:
+    """Normalize common dtype spellings to capability descriptor names."""
+    normalized = dtype.strip().lower()
+    return _DTYPE_ALIASES.get(normalized, normalized)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -235,8 +241,24 @@ class HWCapability:
         normalized to the canonical ``fp32`` and ``bf16`` names used by
         capability descriptors.
         """
-        normalized = _DTYPE_ALIASES.get(dtype.strip().lower(), dtype.strip().lower())
-        return normalized in self.supported_dtypes
+        return _normalize_dtype(dtype) in self.supported_dtypes
+
+    def unsupported_dtypes(self, dtypes: Iterable[str]) -> Set[str]:
+        """Return normalized dtypes that are not supported by this hardware.
+
+        This is useful for validating a full kernel signature where inputs,
+        outputs, and accumulators may use different dtypes.
+        """
+        supported = self.supported_dtypes
+        return {
+            normalized
+            for normalized in (_normalize_dtype(dtype) for dtype in dtypes)
+            if normalized not in supported
+        }
+
+    def supports_all_dtypes(self, dtypes: Iterable[str]) -> bool:
+        """Return True if all provided dtypes are supported."""
+        return len(self.unsupported_dtypes(dtypes)) == 0
 
     def _infer_backend_name(self) -> str:
         """Infer the backend name string for GPUTarget compatibility."""

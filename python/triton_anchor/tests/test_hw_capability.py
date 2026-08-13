@@ -89,6 +89,32 @@ class TestHWCapability:
         dtypes.add("int8")
         assert hw.supported_dtypes == {"fp32"}
 
+    def test_unsupported_dtypes_normalizes_and_deduplicates(self):
+        hw = HWCapability(
+            name="sophgo-bm1684x",
+            arch_family="tpu",
+            compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
+            anchor_ir_track=AnchorIRTrack.LINALG,
+            ptr_model="axis_info",
+            tensor_cap=TensorCapability(supported_dtypes={"fp32", "int8"}),
+        )
+        assert hw.unsupported_dtypes(["float32", "BF16", "bf16", "i16"]) == {
+            "bf16",
+            "i16",
+        }
+
+    def test_supports_all_dtypes_accepts_iterables(self):
+        hw = HWCapability(
+            name="usc-gpu",
+            arch_family="gpu",
+            compute_paradigm=ComputeParadigm.GPGPU,
+            anchor_ir_track=AnchorIRTrack.TRITON_GPU,
+            ptr_model="gpu",
+            gpgpu_cap=GPGPUCapability(supported_dtypes={"fp32", "bf16"}),
+        )
+        assert hw.supports_all_dtypes(dtype for dtype in ["float32", "bfloat16"])
+        assert not hw.supports_all_dtypes(["float32", "int8"])
+
     def test_to_gpu_target(self):
         hw = HWCapability(
             name="sophgo-bm1684x",
