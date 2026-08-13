@@ -378,6 +378,9 @@ AST → TTIR
 | 类 / 函数 | 模块 | 说明 |
 |-----------|------|------|
 | `HWCapability` | `triton_anchor.hw_capability` | 硬件能力声明（计算范式、架构族、指针模型等） |
+| `HWCapability.active_capability` | `triton_anchor.hw_capability` | 返回当前计算范式对应的能力描述符 |
+| `HWCapability.supported_dtypes` | `triton_anchor.hw_capability` | 返回当前能力描述符支持的数据类型集合 |
+| `HWCapability.supports_dtype()` | `triton_anchor.hw_capability` | 统一判断目标硬件是否支持某种数据类型 |
 | `ComputeParadigm` | `triton_anchor.hw_capability` | 枚举：`AME_MATRIX` / `TENSOR_PROCESSOR` / `GPGPU` |
 | `MatrixCapability` | `triton_anchor.hw_capability` | AME 矩阵扩展能力描述（tile 形状、寄存器数量等） |
 | `TensorCapability` | `triton_anchor.hw_capability` | Tensor Processor 能力描述（核心数、SRAM 大小等） |
@@ -404,6 +407,10 @@ hw = HWCapability(
     ptr_model="axis_info",
     tensor_cap=TensorCapability(num_cores=8, local_mem_size=16 * 1024 * 1024),
 )
+
+assert hw.active_capability is hw.tensor_cap
+assert hw.supports_dtype("float32")  # normalized to "fp32"
+print(sorted(hw.supported_dtypes))
 ```
 
 **验证 AnchorIR 合规性**

@@ -46,6 +46,7 @@ class TestHWCapability:
         )
         assert hw.arch_family == "riscv"
         assert hw.matrix_cap.num_matrix_registers == 8
+        assert hw.active_capability is hw.matrix_cap
 
     def test_gpu_capability(self):
         hw = HWCapability(
@@ -57,6 +58,36 @@ class TestHWCapability:
             gpgpu_cap=GPGPUCapability(num_warps=4, warp_size=32),
         )
         assert hw.gpgpu_cap.num_warps == 4
+        assert hw.active_capability is hw.gpgpu_cap
+
+    def test_supported_dtypes_uses_active_capability(self):
+        hw = HWCapability(
+            name="sophgo-bm1684x",
+            arch_family="tpu",
+            compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
+            anchor_ir_track=AnchorIRTrack.LINALG,
+            ptr_model="axis_info",
+            tensor_cap=TensorCapability(supported_dtypes={"fp32", "int8"}),
+        )
+        assert hw.active_capability is hw.tensor_cap
+        assert hw.supported_dtypes == {"fp32", "int8"}
+        assert hw.supports_dtype("fp32")
+        assert hw.supports_dtype("float32")
+        assert hw.supports_dtype(" INT8 ")
+        assert not hw.supports_dtype("bf16")
+
+    def test_supported_dtypes_returns_copy(self):
+        hw = HWCapability(
+            name="usc-gpu",
+            arch_family="gpu",
+            compute_paradigm=ComputeParadigm.GPGPU,
+            anchor_ir_track=AnchorIRTrack.TRITON_GPU,
+            ptr_model="gpu",
+            gpgpu_cap=GPGPUCapability(supported_dtypes={"fp32"}),
+        )
+        dtypes = hw.supported_dtypes
+        dtypes.add("int8")
+        assert hw.supported_dtypes == {"fp32"}
 
     def test_to_gpu_target(self):
         hw = HWCapability(

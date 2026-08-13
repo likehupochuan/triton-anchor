@@ -100,6 +100,38 @@ class MyDeviceBackend(BaseBackend):
         stages["so"]     = lambda src, metadata: _make_binary(src, metadata)
 ```
 
+### 声明硬件能力与 dtype gate
+
+后端可以用 `HWCapability` 声明计算范式、AnchorIR Track 和能力描述符，并通过统一的 dtype 查询接口决定是否接受某个 kernel 配置：
+
+```python
+from triton_anchor import HWCapability, ComputeParadigm
+from triton_anchor.anchor_ir import AnchorIRTrack
+from triton_anchor.hw_capability import TensorCapability
+
+HW = HWCapability(
+    name="my-device-v1",
+    arch_family="tpu",
+    compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
+    anchor_ir_track=AnchorIRTrack.LINALG,
+    ptr_model="axis_info",
+    tensor_cap=TensorCapability(
+        num_cores=8,
+        local_mem_size=16 * 1024 * 1024,
+        supported_dtypes={"fp32", "fp16", "int8"},
+    ),
+)
+
+def _make_linalg(mod, metadata, options):
+    if not HW.supports_dtype("float32"):
+        raise ValueError("my-device-v1 does not support fp32 kernels")
+    metadata["hw_supported_dtypes"] = sorted(HW.supported_dtypes)
+    # ... run TTIR to Linalg conversion passes
+    return mod
+```
+
+`supports_dtype()` 会将常见拼写如 `float32`、`float16` 和 `bfloat16` 规范化为能力描述符使用的 `fp32`、`fp16` 和 `bf16`。`supported_dtypes` 返回的是拷贝，调用方修改它不会改变后端声明的能力。
+
 ### 编译阶段
 
 每个 stage 签名为 `(module, metadata) → module`，最后一个 stage 必须返回 `bytes`。

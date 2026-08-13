@@ -21,10 +21,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Optional, Set, Tuple, Literal
+from typing import TYPE_CHECKING, Optional, Set, Tuple, Literal, Union
 
 if TYPE_CHECKING:
     from .anchor_ir import AnchorIRTrack
+
+
+CapabilityDescriptor = Union[
+    "MatrixCapability",
+    "TensorCapability",
+    "GPGPUCapability",
+]
+
+_DTYPE_ALIASES = {
+    "float32": "fp32",
+    "float16": "fp16",
+    "bfloat16": "bf16",
+    "int8": "int8",
+    "i8": "int8",
+    "fp32": "fp32",
+    "fp16": "fp16",
+    "bf16": "bf16",
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -183,6 +201,42 @@ class HWCapability:
         except ImportError:
             # Fallback when triton is not installed (e.g., in tests)
             return {"backend": backend, "arch": arch, "warp_size": warp_size}
+
+    @property
+    def active_capability(self) -> CapabilityDescriptor:
+        """Return the paradigm-specific capability descriptor in use.
+
+        This gives callers a uniform way to inspect hardware limits without
+        branching over ``matrix_cap``, ``tensor_cap``, and ``gpgpu_cap``.
+        """
+        if (
+            self.compute_paradigm == ComputeParadigm.AME_MATRIX
+            and self.matrix_cap is not None
+        ):
+            return self.matrix_cap
+        if (
+            self.compute_paradigm == ComputeParadigm.TENSOR_PROCESSOR
+            and self.tensor_cap is not None
+        ):
+            return self.tensor_cap
+        if self.compute_paradigm == ComputeParadigm.GPGPU and self.gpgpu_cap is not None:
+            return self.gpgpu_cap
+        raise ValueError(f"No active capability descriptor for hw: {self.name}")
+
+    @property
+    def supported_dtypes(self) -> Set[str]:
+        """Return a copy of dtypes supported by the active capability descriptor."""
+        return set(self.active_capability.supported_dtypes)
+
+    def supports_dtype(self, dtype: str) -> bool:
+        """Return True if the active capability supports ``dtype``.
+
+        Common spelling aliases such as ``float32`` and ``bfloat16`` are
+        normalized to the canonical ``fp32`` and ``bf16`` names used by
+        capability descriptors.
+        """
+        normalized = _DTYPE_ALIASES.get(dtype.strip().lower(), dtype.strip().lower())
+        return normalized in self.supported_dtypes
 
     def _infer_backend_name(self) -> str:
         """Infer the backend name string for GPUTarget compatibility."""
