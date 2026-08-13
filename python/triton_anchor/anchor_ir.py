@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Set, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Set, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     pass
@@ -155,6 +155,49 @@ class AnchorIRViolation:
 
     def __str__(self):
         return f"  L{self.line_number}: {self.op_name} — {self.message}"
+
+
+@dataclass
+class AnchorIRValidationReport:
+    """Structured AnchorIR validation result."""
+
+    violations: List[AnchorIRViolation]
+
+    @property
+    def is_valid(self) -> bool:
+        """Return True if no violations were found."""
+        return len(self.violations) == 0
+
+    def count_by_dialect(self) -> Dict[str, int]:
+        """Return violation counts grouped by dialect."""
+        counts: Dict[str, int] = {}
+        for violation in self.violations:
+            counts[violation.dialect] = counts.get(violation.dialect, 0) + 1
+        return counts
+
+    def count_by_kind(self) -> Dict[str, int]:
+        """Return violation counts grouped by reference kind."""
+        counts: Dict[str, int] = {}
+        for violation in self.violations:
+            counts[violation.kind] = counts.get(violation.kind, 0) + 1
+        return counts
+
+    def summary(self) -> str:
+        """Return a compact summary suitable for logs and exceptions."""
+        if self.is_valid:
+            return "AnchorIR validation passed"
+
+        dialect_counts = ", ".join(
+            f"{dialect}={count}"
+            for dialect, count in sorted(self.count_by_dialect().items())
+        )
+        kind_counts = ", ".join(
+            f"{kind}={count}" for kind, count in sorted(self.count_by_kind().items())
+        )
+        return (
+            f"{len(self.violations)} violation(s); "
+            f"by dialect: {dialect_counts}; by kind: {kind_counts}"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -348,6 +391,10 @@ class AnchorIRValidator:
         base_allowed, forbidden = _get_track_config(self.track)
         return self._scan_ops(ir_text, base_allowed, forbidden)
 
+    def validate_pre_hook_report(self, ir_text: str) -> AnchorIRValidationReport:
+        """Phase 1 validation with structured summary information."""
+        return AnchorIRValidationReport(self.validate_pre_hook(ir_text))
+
     def validate_post_hook(
         self,
         ir_text: str,
@@ -370,6 +417,14 @@ class AnchorIRValidator:
         all_allowed = base_allowed | (ext_allowed or set())
         return self._scan_ops(ir_text, all_allowed, forbidden)
 
+    def validate_post_hook_report(
+        self,
+        ir_text: str,
+        ext_allowed: Optional[Set[str]] = None,
+    ) -> AnchorIRValidationReport:
+        """Phase 2 validation with structured summary information."""
+        return AnchorIRValidationReport(self.validate_post_hook(ir_text, ext_allowed))
+
     # ─── Legacy Single-Phase API ──────────────────────────────────────
 
     def validate(self, ir_text: str) -> List[AnchorIRViolation]:
@@ -379,19 +434,23 @@ class AnchorIRValidator:
         """
         return self._scan_ops(ir_text, self.allowed, self.forbidden)
 
+    def validate_report(self, ir_text: str) -> AnchorIRValidationReport:
+        """Legacy single-phase validation with structured summary information."""
+        return AnchorIRValidationReport(self.validate(ir_text))
+
     def is_valid(self, ir_text: str) -> bool:
         """Quick check — returns True if IR conforms to AnchorIR."""
         return len(self.validate(ir_text)) == 0
 
     def validate_and_raise(self, ir_text: str, context: str = "") -> None:
         """Validate and raise ``AnchorIRError`` if violations are found."""
-        violations = self.validate(ir_text)
-        if violations:
+        report = self.validate_report(ir_text)
+        if not report.is_valid:
             header = "AnchorIR validation failed"
             if context:
                 header += f" for {context}"
-            details = "\n".join(str(v) for v in violations)
-            raise AnchorIRError(f"{header}:\n{details}")
+            details = "\n".join(str(v) for v in report.violations)
+            raise AnchorIRError(f"{header}: {report.summary()}\n{details}")
 
 
 class AnchorIRError(Exception):

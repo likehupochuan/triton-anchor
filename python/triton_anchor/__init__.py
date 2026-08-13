@@ -19,6 +19,8 @@ from .hw_capability import (
 )
 from .anchor_ir import (
     AnchorIRTrack as AnchorIRTrack,
+    AnchorIRValidationReport as AnchorIRValidationReport,
     AnchorIRValidator as AnchorIRValidator,
+    AnchorIRViolation as AnchorIRViolation,
 )
 from .pipeline import build_ttir_pipeline as build_ttir_pipeline

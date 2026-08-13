@@ -1,7 +1,12 @@
 """Tests for AnchorIR validator."""
 
 import pytest
-from triton_anchor.anchor_ir import AnchorIRValidator, AnchorIRError
+import triton_anchor
+from triton_anchor.anchor_ir import (
+    AnchorIRValidationReport,
+    AnchorIRValidator,
+    AnchorIRError,
+)
 
 
 VALID_LINALG_IR = """
@@ -131,9 +136,52 @@ class TestAnchorIRValidator:
             viol.dialect == "tt" and viol.kind == "type" for viol in violations
         )
 
+    def test_validation_report_summarizes_dialects_and_kinds(self):
+        v = AnchorIRValidator()
+        ir_with_mixed_violations = """
+        #layout = #triton_gpu.blocked_layout<{sizePerThread = [1]}>
+        module {
+          func.func @kernel(%arg0: !tt.ptr<f32>) {
+            %0 = unknown.foo %arg0 : !tt.ptr<f32>
+            return
+          }
+        }
+        """
+        report = v.validate_report(ir_with_mixed_violations)
+        assert isinstance(report, AnchorIRValidationReport)
+        assert not report.is_valid
+        assert report.count_by_dialect()["tt"] == 2
+        assert report.count_by_dialect()["triton_gpu"] == 1
+        assert report.count_by_dialect()["unknown"] == 1
+        assert report.count_by_kind()["operation"] == 1
+        assert report.count_by_kind()["type"] == 2
+        assert report.count_by_kind()["attribute"] == 1
+        assert "4 violation(s)" in report.summary()
+
+    def test_post_hook_report_uses_extension_dialects(self):
+        v = AnchorIRValidator()
+        ir_with_ext_type = """
+        module {
+          func.func @kernel(%arg0: !xsmt.private_ptr<f32>) {
+            return
+          }
+        }
+        """
+        pre_report = v.validate_pre_hook_report(ir_with_ext_type)
+        post_report = v.validate_post_hook_report(
+            ir_with_ext_type,
+            ext_allowed={"xsmt"},
+        )
+        assert not pre_report.is_valid
+        assert post_report.is_valid
+
+    def test_public_report_types_are_exported(self):
+        assert triton_anchor.AnchorIRValidationReport is AnchorIRValidationReport
+        assert hasattr(triton_anchor, "AnchorIRViolation")
+
     def test_validate_and_raise(self):
         v = AnchorIRValidator()
-        with pytest.raises(AnchorIRError, match="AnchorIR validation failed"):
+        with pytest.raises(AnchorIRError, match=r"AnchorIR validation failed.*tt="):
             v.validate_and_raise(INVALID_IR_WITH_TT, context="test_kernel")
 
     def test_extra_allowed_dialects(self):
