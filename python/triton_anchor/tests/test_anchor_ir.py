@@ -3,6 +3,7 @@
 import pytest
 import triton_anchor
 from triton_anchor.anchor_ir import (
+    AnchorIRDialectStatus,
     AnchorIRValidationReport,
     AnchorIRValidator,
     AnchorIRError,
@@ -62,6 +63,11 @@ class TestAnchorIRValidator:
         violations = v.validate(INVALID_IR_WITH_TT)
         assert len(violations) > 0
         assert any(viol.dialect == "tt" for viol in violations)
+        assert all(
+            viol.status == AnchorIRDialectStatus.FORBIDDEN
+            for viol in violations
+            if viol.dialect == "tt"
+        )
 
     def test_mixed_ir(self):
         v = AnchorIRValidator()
@@ -156,7 +162,10 @@ class TestAnchorIRValidator:
         assert report.count_by_kind()["operation"] == 1
         assert report.count_by_kind()["type"] == 2
         assert report.count_by_kind()["attribute"] == 1
+        assert report.count_by_status()["forbidden"] == 3
+        assert report.count_by_status()["unknown"] == 1
         assert "4 violation(s)" in report.summary()
+        assert "by status: forbidden=3, unknown=1" in report.summary()
 
     def test_post_hook_report_uses_extension_dialects(self):
         v = AnchorIRValidator()
@@ -176,6 +185,7 @@ class TestAnchorIRValidator:
         assert post_report.is_valid
 
     def test_public_report_types_are_exported(self):
+        assert triton_anchor.AnchorIRDialectStatus is AnchorIRDialectStatus
         assert triton_anchor.AnchorIRValidationReport is AnchorIRValidationReport
         assert hasattr(triton_anchor, "AnchorIRViolation")
 

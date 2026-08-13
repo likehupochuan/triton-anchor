@@ -60,6 +60,7 @@ class AnchorIRDialectStatus(Enum):
     ALLOWED = "allowed"
     FORBIDDEN = "forbidden"
     EXTENSION = "extension"  # Allowed only when declared via get_allowed_dialects()
+    UNKNOWN = "unknown"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -152,6 +153,7 @@ class AnchorIRViolation:
     op_name: str
     message: str
     kind: str = "operation"
+    status: AnchorIRDialectStatus = AnchorIRDialectStatus.UNKNOWN
 
     def __str__(self):
         return f"  L{self.line_number}: {self.op_name} — {self.message}"
@@ -182,6 +184,14 @@ class AnchorIRValidationReport:
             counts[violation.kind] = counts.get(violation.kind, 0) + 1
         return counts
 
+    def count_by_status(self) -> Dict[str, int]:
+        """Return violation counts grouped by dialect status."""
+        counts: Dict[str, int] = {}
+        for violation in self.violations:
+            status = violation.status.value
+            counts[status] = counts.get(status, 0) + 1
+        return counts
+
     def summary(self) -> str:
         """Return a compact summary suitable for logs and exceptions."""
         if self.is_valid:
@@ -194,9 +204,14 @@ class AnchorIRValidationReport:
         kind_counts = ", ".join(
             f"{kind}={count}" for kind, count in sorted(self.count_by_kind().items())
         )
+        status_counts = ", ".join(
+            f"{status}={count}"
+            for status, count in sorted(self.count_by_status().items())
+        )
         return (
             f"{len(self.violations)} violation(s); "
-            f"by dialect: {dialect_counts}; by kind: {kind_counts}"
+            f"by dialect: {dialect_counts}; by kind: {kind_counts}; "
+            f"by status: {status_counts}"
         )
 
 
@@ -293,6 +308,7 @@ class AnchorIRValidator:
                             line_number=line_no,
                             dialect=dialect,
                             op_name=op_name,
+                            status=AnchorIRDialectStatus.FORBIDDEN,
                             message=f"Forbidden dialect '{dialect}' must be fully lowered before AnchorIR",
                         )
                     )
@@ -302,6 +318,7 @@ class AnchorIRValidator:
                             line_number=line_no,
                             dialect=dialect,
                             op_name=op_name,
+                            status=AnchorIRDialectStatus.UNKNOWN,
                             message=(
                                 f"Unknown dialect '{dialect}'. "
                                 f"Register it via backend's get_allowed_dialects()."
@@ -320,6 +337,7 @@ class AnchorIRValidator:
                             dialect=dialect,
                             op_name=type_name,
                             kind="type",
+                            status=AnchorIRDialectStatus.FORBIDDEN,
                             message=(
                                 f"Forbidden dialect '{dialect}' in type "
                                 "must be fully lowered before AnchorIR"
@@ -333,6 +351,7 @@ class AnchorIRValidator:
                             dialect=dialect,
                             op_name=type_name,
                             kind="type",
+                            status=AnchorIRDialectStatus.UNKNOWN,
                             message=(
                                 f"Unknown dialect '{dialect}' in type. "
                                 f"Register it via backend's get_allowed_dialects()."
@@ -351,6 +370,7 @@ class AnchorIRValidator:
                             dialect=dialect,
                             op_name=attr_name,
                             kind="attribute",
+                            status=AnchorIRDialectStatus.FORBIDDEN,
                             message=(
                                 f"Forbidden dialect '{dialect}' in attribute "
                                 "must be fully lowered before AnchorIR"
@@ -364,6 +384,7 @@ class AnchorIRValidator:
                             dialect=dialect,
                             op_name=attr_name,
                             kind="attribute",
+                            status=AnchorIRDialectStatus.UNKNOWN,
                             message=(
                                 f"Unknown dialect '{dialect}' in attribute. "
                                 f"Register it via backend's get_allowed_dialects()."

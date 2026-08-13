@@ -18,6 +18,7 @@ from .hw_capability import (
     ComputeParadigm as ComputeParadigm,
 )
 from .anchor_ir import (
+    AnchorIRDialectStatus as AnchorIRDialectStatus,
     AnchorIRTrack as AnchorIRTrack,
     AnchorIRValidationReport as AnchorIRValidationReport,
     AnchorIRValidator as AnchorIRValidator,
