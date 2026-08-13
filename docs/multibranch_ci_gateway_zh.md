@@ -1,7 +1,8 @@
 # 多分支 CI Gateway v3 架构与责任边界
+<!-- fork PR smoke-test touch. -->
 
 ## 目标
-
+本文档说明多分支CI架构与责任边界，仅作说明，不执行代码
 多分支 CI 允许不同开发者维护各自普通目标分支的 CI 微调，同时由默认分支提供稳定入口。统一 Gateway Contract 约束调用接口和安全边界，避免某个分支自行改变 inputs、SHA 语义或 secret 使用方式。
 
 ## 分支职责
