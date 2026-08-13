@@ -184,6 +184,55 @@ class TestAnchorIRValidator:
         assert not pre_report.is_valid
         assert post_report.is_valid
 
+    def test_pre_hook_validate_and_raise_rejects_extensions(self):
+        v = AnchorIRValidator()
+        ir_with_ext_type = """
+        module {
+          func.func @kernel(%arg0: !xsmt.private_ptr<f32>) {
+            return
+          }
+        }
+        """
+        with pytest.raises(
+            AnchorIRError,
+            match=r"AnchorIR pre-hook validation failed.*unknown=1",
+        ):
+            v.validate_pre_hook_and_raise(ir_with_ext_type, context="kernel")
+
+    def test_post_hook_validate_and_raise_allows_declared_extensions(self):
+        v = AnchorIRValidator()
+        ir_with_ext_type = """
+        module {
+          func.func @kernel(%arg0: !xsmt.private_ptr<f32>) {
+            return
+          }
+        }
+        """
+        v.validate_post_hook_and_raise(
+            ir_with_ext_type,
+            ext_allowed={"xsmt"},
+            context="kernel",
+        )
+
+    def test_post_hook_validate_and_raise_rejects_forbidden(self):
+        v = AnchorIRValidator()
+        ir_with_tt_type = """
+        module {
+          func.func @kernel(%arg0: !tt.ptr<f32>) {
+            return
+          }
+        }
+        """
+        with pytest.raises(
+            AnchorIRError,
+            match=r"AnchorIR post-hook validation failed.*forbidden=1",
+        ):
+            v.validate_post_hook_and_raise(
+                ir_with_tt_type,
+                ext_allowed={"tt"},
+                context="kernel",
+            )
+
     def test_public_report_types_are_exported(self):
         assert triton_anchor.AnchorIRDialectStatus is AnchorIRDialectStatus
         assert triton_anchor.AnchorIRValidationReport is AnchorIRValidationReport

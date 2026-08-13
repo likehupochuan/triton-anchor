@@ -416,6 +416,14 @@ class AnchorIRValidator:
         """Phase 1 validation with structured summary information."""
         return AnchorIRValidationReport(self.validate_pre_hook(ir_text))
 
+    def validate_pre_hook_and_raise(self, ir_text: str, context: str = "") -> None:
+        """Phase 1 validation that raises ``AnchorIRError`` on violations."""
+        self._raise_if_invalid(
+            self.validate_pre_hook_report(ir_text),
+            "AnchorIR pre-hook validation failed",
+            context,
+        )
+
     def validate_post_hook(
         self,
         ir_text: str,
@@ -446,6 +454,19 @@ class AnchorIRValidator:
         """Phase 2 validation with structured summary information."""
         return AnchorIRValidationReport(self.validate_post_hook(ir_text, ext_allowed))
 
+    def validate_post_hook_and_raise(
+        self,
+        ir_text: str,
+        ext_allowed: Optional[Set[str]] = None,
+        context: str = "",
+    ) -> None:
+        """Phase 2 validation that raises ``AnchorIRError`` on violations."""
+        self._raise_if_invalid(
+            self.validate_post_hook_report(ir_text, ext_allowed),
+            "AnchorIR post-hook validation failed",
+            context,
+        )
+
     # ─── Legacy Single-Phase API ──────────────────────────────────────
 
     def validate(self, ir_text: str) -> List[AnchorIRViolation]:
@@ -465,9 +486,20 @@ class AnchorIRValidator:
 
     def validate_and_raise(self, ir_text: str, context: str = "") -> None:
         """Validate and raise ``AnchorIRError`` if violations are found."""
-        report = self.validate_report(ir_text)
+        self._raise_if_invalid(
+            self.validate_report(ir_text),
+            "AnchorIR validation failed",
+            context,
+        )
+
+    def _raise_if_invalid(
+        self,
+        report: AnchorIRValidationReport,
+        header: str,
+        context: str = "",
+    ) -> None:
+        """Raise ``AnchorIRError`` for a non-empty validation report."""
         if not report.is_valid:
-            header = "AnchorIR validation failed"
             if context:
                 header += f" for {context}"
             details = "\n".join(str(v) for v in report.violations)
