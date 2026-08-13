@@ -65,6 +65,72 @@ class TestAnchorIRValidator:
         tt_violations = [v for v in violations if v.dialect == "tt"]
         assert len(tt_violations) > 0
 
+    def test_forbidden_type_reference_detected(self):
+        v = AnchorIRValidator()
+        ir_with_tt_type = """
+        module {
+          func.func @kernel(%arg0: !tt.ptr<f32>) {
+            return
+          }
+        }
+        """
+        violations = v.validate(ir_with_tt_type)
+        assert any(
+            viol.dialect == "tt"
+            and viol.kind == "type"
+            and viol.op_name == "!tt.ptr"
+            for viol in violations
+        )
+
+    def test_forbidden_attribute_reference_detected(self):
+        v = AnchorIRValidator()
+        ir_with_gpu_attr = """
+        #layout = #triton_gpu.blocked_layout<{sizePerThread = [1]}>
+        module {
+          func.func @kernel(%arg0: tensor<128xf32, #layout>) {
+            return
+          }
+        }
+        """
+        violations = v.validate(ir_with_gpu_attr)
+        assert any(
+            viol.dialect == "triton_gpu"
+            and viol.kind == "attribute"
+            and viol.op_name == "#triton_gpu.blocked_layout"
+            for viol in violations
+        )
+
+    def test_post_hook_allows_declared_extension_attribute(self):
+        v = AnchorIRValidator()
+        ir_with_ext_attr = """
+        #layout = #xsmt.private_layout<{bank = 0}>
+        module {
+          func.func @kernel(%arg0: memref<128xf32, #layout>) {
+            return
+          }
+        }
+        """
+        pre_violations = v.validate_pre_hook(ir_with_ext_attr)
+        assert any(
+            viol.dialect == "xsmt" and viol.kind == "attribute"
+            for viol in pre_violations
+        )
+        assert v.validate_post_hook(ir_with_ext_attr, ext_allowed={"xsmt"}) == []
+
+    def test_post_hook_extension_cannot_override_forbidden_type(self):
+        v = AnchorIRValidator()
+        ir_with_tt_type = """
+        module {
+          func.func @kernel(%arg0: !tt.ptr<f32>) {
+            return
+          }
+        }
+        """
+        violations = v.validate_post_hook(ir_with_tt_type, ext_allowed={"tt"})
+        assert any(
+            viol.dialect == "tt" and viol.kind == "type" for viol in violations
+        )
+
     def test_validate_and_raise(self):
         v = AnchorIRValidator()
         with pytest.raises(AnchorIRError, match="AnchorIR validation failed"):
@@ -102,7 +168,7 @@ class TestAnchorIRValidator:
         # tt.store also ignored
         module {
           func.func @kernel(%arg0: memref<128xf32>) {
-            return
+            return // !tt.ptr<f32> and #triton_gpu.layout are ignored
           }
         }
         """

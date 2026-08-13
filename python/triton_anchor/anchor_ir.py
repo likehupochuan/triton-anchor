@@ -18,6 +18,7 @@ Two-Phase Validation:
 
 Key invariants:
   - Each Track has its own whitelist and forbidden list
+  - Validator scans dialect-qualified operations, types, and attributes
   - Numerical consistency: same Track, different Adapters → same numerical
     results within tolerance (float rtol≤1e-5, int bitwise)
   - Extension dialects declared by backend via ``get_allowed_dialects()``
@@ -150,6 +151,7 @@ class AnchorIRViolation:
     dialect: str
     op_name: str
     message: str
+    kind: str = "operation"
 
     def __str__(self):
         return f"  L{self.line_number}: {self.op_name} — {self.message}"
@@ -194,6 +196,8 @@ class AnchorIRValidator:
         r'"?',  # optional quote
         re.MULTILINE,
     )
+    _TYPE_PATTERN = re.compile(r"!(\w+)\.(\w[\w.]*)")
+    _ATTR_PATTERN = re.compile(r"#(\w+)\.(\w[\w.]*)")
 
     def __init__(
         self,
@@ -221,17 +225,22 @@ class AnchorIRValidator:
     def _scan_ops(
         self, ir_text: str, allowed: Set[str], forbidden: Set[str]
     ) -> List[AnchorIRViolation]:
-        """Scan IR text and report violations against given whitelist/forbidden sets."""
+        """Scan IR text and report violations against whitelist/forbidden sets."""
         violations: List[AnchorIRViolation] = []
         lines = ir_text.splitlines()
 
         for line_no, line in enumerate(lines, start=1):
             # Skip comments
             stripped = line.strip()
-            if stripped.startswith("//") or stripped.startswith("#"):
+            if stripped.startswith("//") or (
+                stripped.startswith("#")
+                and (len(stripped) == 1 or stripped[1].isspace())
+            ):
                 continue
 
-            for match in self._OP_PATTERN.finditer(line):
+            code = line.split("//", 1)[0]
+
+            for match in self._OP_PATTERN.finditer(code):
                 dialect = match.group(1)
                 op_name = f"{dialect}.{match.group(2)}"
 
@@ -252,6 +261,68 @@ class AnchorIRValidator:
                             op_name=op_name,
                             message=(
                                 f"Unknown dialect '{dialect}'. "
+                                f"Register it via backend's get_allowed_dialects()."
+                            ),
+                        )
+                    )
+
+            for match in self._TYPE_PATTERN.finditer(code):
+                dialect = match.group(1)
+                type_name = f"!{dialect}.{match.group(2)}"
+
+                if dialect in forbidden:
+                    violations.append(
+                        AnchorIRViolation(
+                            line_number=line_no,
+                            dialect=dialect,
+                            op_name=type_name,
+                            kind="type",
+                            message=(
+                                f"Forbidden dialect '{dialect}' in type "
+                                "must be fully lowered before AnchorIR"
+                            ),
+                        )
+                    )
+                elif dialect not in allowed:
+                    violations.append(
+                        AnchorIRViolation(
+                            line_number=line_no,
+                            dialect=dialect,
+                            op_name=type_name,
+                            kind="type",
+                            message=(
+                                f"Unknown dialect '{dialect}' in type. "
+                                f"Register it via backend's get_allowed_dialects()."
+                            ),
+                        )
+                    )
+
+            for match in self._ATTR_PATTERN.finditer(code):
+                dialect = match.group(1)
+                attr_name = f"#{dialect}.{match.group(2)}"
+
+                if dialect in forbidden:
+                    violations.append(
+                        AnchorIRViolation(
+                            line_number=line_no,
+                            dialect=dialect,
+                            op_name=attr_name,
+                            kind="attribute",
+                            message=(
+                                f"Forbidden dialect '{dialect}' in attribute "
+                                "must be fully lowered before AnchorIR"
+                            ),
+                        )
+                    )
+                elif dialect not in allowed:
+                    violations.append(
+                        AnchorIRViolation(
+                            line_number=line_no,
+                            dialect=dialect,
+                            op_name=attr_name,
+                            kind="attribute",
+                            message=(
+                                f"Unknown dialect '{dialect}' in attribute. "
                                 f"Register it via backend's get_allowed_dialects()."
                             ),
                         )
