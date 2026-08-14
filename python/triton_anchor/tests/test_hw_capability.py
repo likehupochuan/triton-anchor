@@ -75,6 +75,58 @@ class TestHWCapability:
         else:
             assert target.backend == "sophgo"
 
+    def test_supported_dtypes_for_tensor_capability(self):
+        hw = HWCapability(
+            name="sophgo-bm1684x",
+            arch_family="tpu",
+            compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
+            anchor_ir_track=AnchorIRTrack.LINALG,
+            ptr_model="axis_info",
+            tensor_cap=TensorCapability(supported_dtypes={"fp32", "int8"}),
+        )
+
+        assert hw.supported_dtypes == {"fp32", "int8"}
+        assert hw.supports_dtype("int8")
+        assert not hw.supports_dtype("bf16")
+
+    def test_supported_dtypes_for_matrix_and_gpu_capabilities(self):
+        matrix_hw = HWCapability(
+            name="spacemit-x60",
+            arch_family="riscv",
+            compute_paradigm=ComputeParadigm.AME_MATRIX,
+            anchor_ir_track=AnchorIRTrack.LINALG,
+            ptr_model="structured",
+            matrix_cap=MatrixCapability(supported_dtypes={"fp32", "fp16"}),
+        )
+        gpu_hw = HWCapability(
+            name="usc-gpu",
+            arch_family="gpu",
+            compute_paradigm=ComputeParadigm.GPGPU,
+            anchor_ir_track=AnchorIRTrack.TRITON_GPU,
+            ptr_model="gpu",
+            gpgpu_cap=GPGPUCapability(supported_dtypes={"fp32", "bf16"}),
+        )
+
+        assert matrix_hw.supports_dtype("fp16")
+        assert not matrix_hw.supports_dtype("bf16")
+        assert gpu_hw.supports_dtype("bf16")
+        assert not gpu_hw.supports_dtype("int8")
+
+    def test_supported_dtypes_returns_copy(self):
+        hw = HWCapability(
+            name="sophgo-bm1684x",
+            arch_family="tpu",
+            compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
+            anchor_ir_track=AnchorIRTrack.LINALG,
+            ptr_model="axis_info",
+            tensor_cap=TensorCapability(supported_dtypes={"fp32"}),
+        )
+
+        dtypes = hw.supported_dtypes
+        dtypes.add("bf16")
+
+        assert hw.supported_dtypes == {"fp32"}
+
     def test_validation_missing_matrix_cap(self):
         with pytest.raises(ValueError, match="matrix_cap"):
             HWCapability(

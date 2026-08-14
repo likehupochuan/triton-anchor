@@ -207,6 +207,25 @@ class HWCapability:
         # Non-GPU paradigms don't have warps; use 0 as sentinel
         return 0
 
+    @property
+    def supported_dtypes(self) -> Set[str]:
+        """Return the dtype set supported by this hardware descriptor.
+
+        The returned set is a copy so callers can safely derive constraints
+        without mutating the capability object.
+        """
+        if self.compute_paradigm == ComputeParadigm.AME_MATRIX:
+            return set(self.matrix_cap.supported_dtypes)
+        if self.compute_paradigm == ComputeParadigm.TENSOR_PROCESSOR:
+            return set(self.tensor_cap.supported_dtypes)
+        if self.compute_paradigm == ComputeParadigm.GPGPU:
+            return set(self.gpgpu_cap.supported_dtypes)
+        raise ValueError(f"Unknown compute paradigm: {self.compute_paradigm}")
+
+    def supports_dtype(self, dtype: str) -> bool:
+        """Return whether this hardware descriptor supports ``dtype``."""
+        return dtype in self.supported_dtypes
+
     # ── Validation ───────────────────────────────────────────────────
 
     def validate(self) -> None:
