@@ -128,7 +128,85 @@ class PublicApiCheckerTests(unittest.TestCase):
         self.assertEqual("breaking", result["status"])
         self.assertIn("Breaking changes detected", report)
 
-    def _compare(self, base_source, candidate_source, functions=None, classes=None):
+    def test_deprecated_removal_at_planned_version_is_compatible(self):
+        result = self._compare(
+            "def old_fn():\n    pass\n",
+            "",
+            functions=["old_fn"],
+            deprecations={"sample.old_fn": {"since": "0.1.0", "removal": "0.2.0",
+                                            "alternative": "sample.new_fn"}},
+            candidate_version="0.2.0",
+        )
+        self.assertEqual("compatible", result["status"])
+        self.assert_change(result, "deprecated-symbol-removed")
+
+    def test_deprecated_removal_before_planned_version_is_breaking(self):
+        result = self._compare(
+            "def old_fn():\n    pass\n",
+            "",
+            functions=["old_fn"],
+            deprecations={"sample.old_fn": {"since": "0.1.0", "removal": "0.2.0"}},
+            candidate_version="0.1.5",
+        )
+        self.assertEqual("breaking", result["status"])
+        self.assert_change(result, "deprecation-period-violated")
+
+    def test_removal_without_deprecation_stays_breaking(self):
+        result = self._compare(
+            "def old_fn():\n    pass\n",
+            "",
+            functions=["old_fn"],
+            candidate_version="0.2.0",
+        )
+        self.assertEqual("breaking", result["status"])
+        self.assert_change(result, "function-removed")
+
+    def test_deprecated_removal_with_unverifiable_version_is_warning(self):
+        result = self._compare(
+            "def old_fn():\n    pass\n",
+            "",
+            functions=["old_fn"],
+            deprecations={"sample.old_fn": {"since": "0.1.0", "removal": "0.2.0"}},
+        )
+        self.assertEqual("compatible", result["status"])
+        self.assertEqual(0, result["breaking_count"])
+        self.assert_change(result, "removal-version-unverifiable")
+
+    def test_deprecation_same_minor_removal_is_breaking(self):
+        result = self._compare(
+            "def old_fn():\n    pass\n",
+            "",
+            functions=["old_fn"],
+            deprecations={"sample.old_fn": {"since": "0.3.0", "removal": "0.3.1"}},
+            candidate_version="0.3.1",
+        )
+        self.assertEqual("breaking", result["status"])
+        self.assert_change(result, "deprecation-window-invalid")
+
+    def test_deprecation_missing_removal_field_is_breaking(self):
+        result = self._compare(
+            "def old_fn():\n    pass\n",
+            "",
+            functions=["old_fn"],
+            deprecations={"sample.old_fn": {"since": "0.3.0"}},
+            candidate_version="0.4.0",
+        )
+        self.assertEqual("breaking", result["status"])
+        self.assert_change(result, "deprecation-window-invalid")
+
+    def test_deprecation_cross_major_removal_is_compatible(self):
+        result = self._compare(
+            "def old_fn():\n    pass\n",
+            "",
+            functions=["old_fn"],
+            deprecations={"sample.old_fn": {"since": "0.9.0", "removal": "1.0.0"}},
+            candidate_version="1.0.0",
+        )
+        self.assertEqual("compatible", result["status"])
+        self.assert_change(result, "deprecated-symbol-removed")
+
+    def _compare(self, base_source, candidate_source, functions=None, classes=None,
+                 deprecations=None, candidate_version=None):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             base = root / "base"
@@ -136,7 +214,10 @@ class PublicApiCheckerTests(unittest.TestCase):
             scope = root / "scope.json"
             self._write_module(base, base_source)
             self._write_module(candidate, candidate_source)
-            self._write_scope(scope, functions=functions or [], classes=classes or {})
+            self._write_scope(scope, functions=functions or [], classes=classes or {},
+                              deprecations=deprecations)
+            if candidate_version:
+                self._write_version(candidate, candidate_version)
             return CHECKER.run_check(base, candidate, scope, scope)
 
     @staticmethod
@@ -146,19 +227,25 @@ class PublicApiCheckerTests(unittest.TestCase):
         module.write_text(source, encoding="utf-8")
 
     @staticmethod
-    def _write_scope(path, functions, classes=None):
-        path.write_text(
-            json.dumps({
-                "schema_version": 1,
-                "modules": {
-                    "sample": {
-                        "functions": functions,
-                        "classes": classes or {},
-                    }
-                },
-            }),
-            encoding="utf-8",
-        )
+    def _write_scope(path, functions, classes=None, deprecations=None):
+        payload = {
+            "schema_version": 1,
+            "modules": {
+                "sample": {
+                    "functions": functions,
+                    "classes": classes or {},
+                }
+            },
+        }
+        if deprecations:
+            payload["deprecations"] = deprecations
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    @staticmethod
+    def _write_version(root, version):
+        init = root / "python" / "triton_anchor" / "__init__.py"
+        init.parent.mkdir(parents=True, exist_ok=True)
+        init.write_text(f'__version__ = "{version}"\n', encoding="utf-8")
 
     def assert_change(self, result, code):
         self.assertIn(code, {change["code"] for change in result["changes"]})

@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "description": "Initial stable Python API contract for triton-anchor. The base branch copy is authoritative during compatibility checks.",
+  "deprecations": {},
   "modules": {
     "triton_anchor": {
       "exports": [
