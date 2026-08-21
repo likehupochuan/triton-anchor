@@ -1,660 +1,581 @@
-# triton-anchor CI 说明
+# triton-anchor CI 说明（重构版）
 
-## 1. 文档目的
+多分支 Gateway、Local CI 与 AI 辅助审查说明
 
-本文档说明 `triton-anchor` 当前持续集成系统的设计思路、功能范围、触发方式、执行流程、结果流转和日常使用方法，供项目开发、后端适配和 CI 维护人员参考。
+## 1. CI 现在做了哪些工作
 
-当前 CI 由两类执行环境共同组成：
+### 1.1 CI 的目标
 
-- GitHub-hosted runner：执行代码规范检查、纯 Python 单元测试、CI 脚本检查、公共 API 兼容性检查、容器化构建与 smoke，以及静态状态页面构建。
-- 本地服务器和 Docker 容器：执行依赖本地 LLVM/PPL、目标后端和运行环境的构建、smoke/JIT、FlagGems 和性能监测。
+triton-anchor 的 CI 不只是运行单元测试，而是覆盖从代码提交到结果回写的完整链路：
 
-两类环境通过 GitHub workflow、Gitee 中转仓库和 GitHub commit status 连接。GitHub 是开发入口和状态展示入口，Gitee 保存本地任务引用及运行结果，本地服务器负责重型测试。
+1. 在 GitHub 上接收 PR、push 或手动任务；
+2. 判断任务是否有权执行、应由哪个分支的 Worker 处理；
+3. 先完成快速、通用且不依赖专用硬件环境的检查；
+4. 将依赖 LLVM、PPL、目标后端和运行时的重型任务投递到本地服务器；
+5. 将本地测试结果、性能数据和 AI 审查结论回写 GitHub；
+6. 将指定分支的最新结果同步到 GitHub Pages Dashboard。
 
-本文档只描述 CI，不涉及软件包发布和版本发布流程。
+软件包发布和版本发布不在本文范围内。
 
-## 2. 总体设计
+### 1.2 GitHub、Gitee 和本地服务器分别负责什么
 
-### 2.1 为什么拆成 GitHub CI 和 Local CI
+CI 由三个执行域协同完成：
 
-`triton-anchor` 的检查可以分为两类：
-
-1. 不依赖特定后端的检查，例如 Ruff、纯 Python 单元测试、脚本语法检查和公共 API 对比。这些检查适合在 GitHub-hosted runner 上快速执行。
-2. 依赖本地工具链和目标后端的检查，例如重新编译前端、重新构建目标后端、运行后端 smoke/JIT、FlagGems 和性能监测。这些任务依赖预置环境、运行时间较长，更适合放在本地服务器。
-
-因此，系统没有要求 GitHub runner 直接访问本地服务器，而是采用 Gitee 仓库作为异步中转层：GitHub 将精确提交推送成任务分支，本地服务器主动轮询任务，完成后将结果发布回 Gitee，GitHub 再读取结果并更新状态。
-
-整体链路采用“公共调度与结果协议 + 后端专用执行配置”的方式扩展。任务投递、SHA 校验、轮询、脚本快照、结果发布和 GitHub 状态回写可由各后端复用；容器环境、后端构建、测试命令、FlagGems 用例和性能基线则按后端分别配置。当前已经完成端到端运行验证的后端 profile 是 **Sophgo CModel**，其他后端属于后续接入范围。
-
-### 2.2 总体流程
-
-```mermaid
-flowchart TB
-  A["GitHub PR / push / 手动触发"]
-
-  subgraph GitHub["GitHub-hosted runner"]
-    B["基础 CI<br/>Ruff / Python 单测"]
-    C["构建与 Smoke CI<br/>脚本预检 / 手动 full smoke"]
-    D["公共 API 兼容性<br/>Breaking Change 检测与通知"]
-    E["Local CI 调度<br/>解析 SHA / 创建 task ref"]
-    F["Local CI 结果接收<br/>状态回写 / 分阶段摘要"]
-    G["Backend Status Pages<br/>数据同步 / 静态站点部署"]
-  end
-
-  subgraph Relay["Gitee 中转仓库"]
-    H["ci/* 任务分支<br/>保存待测精确提交"]
-    I["local-ci-results<br/>日志 / 状态 / 性能数据"]
-  end
-
-  subgraph Local["本地服务器 + Docker"]
-    J["poller 扫描新任务"]
-    K["可信 CI 脚本快照"]
-    L["前端构建与 smoke"]
-    M["后端 rebuild 与 smoke/JIT"]
-    N["FlagGems 与性能监测"]
-  end
-
-  A --> B
-  A --> C
-  A --> D
-  A --> E
-  E --> H
-  H --> J --> K --> L --> M --> N --> I
-  I --> F
-  F --> G
-```
-
-### 2.3 当前工作流
-
-| 工作流 | 文件 | 作用 |
+| 执行域 | 主要职责 | 不承担的职责 |
 | --- | --- | --- |
-| CI Gateway | `.github/workflows/ci-gateway.yml` | 统一授权、契约校验、跨分支路由及 Worker 模式分流 |
-| Worker manifest | `.github/ci-gateway-manifest.json` | 机器可解析地声明 Contract 版本、角色、Merge-Result 和能力 |
-| CI | `.github/workflows/ci.yml` | Ruff、格式检查、多 Python 版本单元测试和覆盖率 |
-| Delivery CI | `.github/workflows/delivery-ci.yml` | CI 脚本预检、前端测试、性能契约测试、手动容器化 full smoke |
-| Public API Compatibility | `.github/workflows/api-compat.yml` | 比较基准提交与候选提交的稳定 Python API |
-| Public API Breaking Change Notification | `.github/workflows/api-breaking-notify.yml` | 对 Breaking Change 结果进行校验并通知提交者 |
-| Dispatch Local CI via Gitee | `.github/workflows/dispatch-local-ci.yml` | 将 PR、push 或手动任务的精确 SHA 投递到 Gitee |
-| Receive Local CI Result | `.github/workflows/receive-local-ci-result.yml` | 等待本地结果、回写 GitHub 状态并刷新 Pages |
-| Backend Status Pages | `.github/workflows/backend-status-pages.yml` | 同步 Gitee 结果、校验数据并部署 GitHub Pages |
+| GitHub | 接收事件、权限判断、分支路由、快速检查、安全门禁、状态展示、结果接收和 Pages 部署 | 不直接运行依赖完整后端环境的重型测试，不直接连接本地服务器 |
+| Gitee 中转仓库 | 保存待执行任务 ref、任务元数据、本地测试结果、性能缓存和 Dashboard 数据 | 不决定 PR 是否授权，不执行测试 |
+| 本地服务器与 Docker | 轮询任务、固定可信 runner、构建前后端、执行 smoke/JIT、FlagGems、性能测试和 Codex AI 审查 | 不决定 GitHub 权限、目标分支策略和合入规则 |
 
-### 2.4 多分支 Gateway v3
+GitHub 与本地服务器之间不建立入站直连。GitHub 将任务写入 Gitee，本地 poller 主动轮询；任务完成后结果仍写入 Gitee，再由 GitHub receiver 读取并回写状态。
 
-默认分支只保留控制面：监听全仓库 PR、执行人工授权、校验目标 Worker 和路由精确版本。普通目标分支持有完整 Worker，实现 Security Gate、任务投递、结果接收、取消和 Pages。目标分支没有 manifest 时，可以由 `LOCAL_CI_FALLBACK_WORKER_BRANCH` 指定的 Worker 临时代管；`LOCAL_CI_FALLBACK_PR_ENABLED=false` 可关闭新的 PR 代管，`LOCAL_CI_FALLBACK_PUSH_ENABLED=false` 可关闭手动跨分支 push 代管。两个开关未配置时均默认为 `true`。manifest 已存在但损坏或版本不兼容时仍直接失败，不会静默回退。
+### 1.3 当前 CI 能力清单
 
-`ci-gateway.yml` 是统一入口和契约实现，不直接执行本地测试。Contract v3 固定 `dispatch`、`push`、`receive`、`pages`、`cancel` 五种 mode，以及 head、base、Merge-Result、手动请求和 Worker 精确版本等 SHA 字段。PR 的实际被测对象始终是 GitHub `refs/pull/<PR号>/merge`：第二个 parent 必须等于当前 PR head，第一个 parent 作为该 Merge-Result 实际采用的 `comparison_base_sha`。
+| CI 工作 | 执行位置 | 触发方式 | 主要目的 |
+| --- | --- | --- | --- |
+| Router 与 Gateway Contract 校验 | GitHub，默认分支 | PR、维护者手动 push 路由 | 授权任务、选择 Worker、冻结 SHA、拒绝不兼容分支 |
+| Basic CI | GitHub-hosted runner | PR 和 push | Ruff、格式检查、Python 3.9 至 3.12 纯 Python 单测、覆盖率 |
+| Delivery precheck | GitHub-hosted runner | PR 和 push | 检查 Shell/Python CI 脚本、前端及性能协议是否可执行 |
+| Delivery full smoke | GitHub Docker runner | 手动设置 `run_full_smoke=true` | 验证容器构建环境及 frontend-only、Sophgo CModel、custom profile |
+| Public API Compatibility | GitHub-hosted runner | PR 和 push | 检查稳定 Python API 是否发生不兼容变更并生成报告 |
+| Security Gate | GitHub，Worker 分支 | Local CI 投递前 | 扫描凭据泄漏、不受控网络访问、危险执行方式并运行 CodeQL |
+| Local CI dispatch/receive | GitHub，Worker 分支 | Security Gate 通过后 | 投递 Gitee 任务、写 pending、等待结果、重验身份并回写状态 |
+| 前端构建与 smoke | 本地 Docker | PR、Worker push 或手动任务 | 验证 wheel 构建、安装、导入和前端基本功能 |
+| 后端 rebuild 与 smoke/JIT | 本地 Docker | PR、Worker push 或手动任务 | 验证目标后端、运行时及 JIT 链路 |
+| FlagGems 算子测试 | 本地 Docker | PR/push 默认 sample，手动 full | 验证算子正确性并记录独立算子结果 |
+| 性能与编译质量检查 | 本地 Docker | PR、push | 比较 compile-time、Pass profile 和 IR serialization |
+| Codex AI CI | 本地服务器 | 确定性 Local CI 之后 | 结合代码差异和测试证据给出补充审查与排查建议 |
+| 结果桥接与 Dashboard | GitHub + Gitee | Local CI 完成后 | 回写 commit status、PR 评论并部署指定分支的状态页面 |
+
+### 1.4 为什么有些工作在 GitHub 执行，有些必须在本地执行
+
+GitHub 适合执行以下任务：
+
+- 运行时间短、依赖通用、可以快速反馈；
+- 不需要目标后端、专用运行时或长期保存的性能基线；
+- 与 GitHub 权限、PR 身份、分支保护和状态展示直接相关；
+- 需要在使用写凭据前完成可信安全检查。
+
+本地服务器适合执行以下任务：
+
+- 依赖 LLVM、PPL、目标后端、预置数据和专用容器；
+- 构建时间长、资源消耗大，或需要复用硬件和缓存；
+- 需要连续保存性能基线、失败 IR、算子结果和历史产物；
+- 需要使用受控的 CI 专用凭据和 Codex AI 运行环境。
+
+这种拆分让 GitHub 先快速发现常见问题，本地环境再验证完整编译和后端链路，避免每次 PR 都在 GitHub runner 中重建复杂工具链。
+
+### 1.5 总体流程
 
 ```mermaid
 flowchart LR
-  R["默认分支 Gateway Router<br/>授权 / 状态 / Worker 选择"]
-  C["Gateway Contract v3<br/>固定 inputs / mode / ref / 权限边界"]
-  W["普通目标分支 Gateway Worker<br/>validate / security / dispatch / receive / pages / cancel"]
-  S["Security Gate<br/>可信 scanner + CodeQL"]
-  G["Gitee 中转仓库"]
-  L["本地服务器<br/>poller + Docker"]
-  P["GitHub status / Pages"]
-  R --> C --> W --> S --> G --> L --> G --> W --> P
+  PR["PR / push / 手动任务"] --> GH["GitHub\n授权、路由、快速检查和安全门禁"]
+  GH --> RelayTask["Gitee\n任务 ref 与 metadata"]
+  RelayTask --> Poller["本地 poller\n锁、去重和 runner 快照"]
+  Poller --> DCI["确定性 Local CI\n构建、smoke、后端、算子和性能"]
+  DCI --> AI["Codex AI CI\n补充审查和验证建议"]
+  AI --> RelayResult["Gitee\n结果、日志、缓存和报告"]
+  RelayResult --> Receiver["GitHub receiver\n身份重验和状态回写"]
+  Receiver --> Checks["PR Checks / commit status / comment"]
+  Receiver --> Pages["指定分支的 Dashboard"]
 ```
 
-外部 fork 的自动事件进入 `local-ci-fork-approval` Environment。仓库为该 Environment 配置 Required reviewers 后，维护者在 Actions 运行页面点击 `Review deployments` 才会继续；未配置 reviewer 时自动继续，适合先验证链路，但不构成人工授权门禁。审批后 Gateway 会再次读取 head 和 Merge-Result，因此 force-push、retarget、关闭或转 draft 都会使旧审批和旧结果失效。默认分支的手动 `mode=dispatch` + PR 编号入口继续作为备用方式。
+GitHub 上的 Basic CI、Delivery precheck 和 API Compatibility 与 Local CI 主链可以并行运行。它们分别给出快速检查结果，不需要等待本地任务完成。
 
-PR 页面只显示最新提交对应的 Checks。Gateway 的 Actions `run-name` 会记录 PR 编号及 head/Merge-Result SHA；Local CI 主状态描述显示当前 Merge-Result 的 12 位短 SHA，详情链接指向对应的具体 run，因此旧提交的执行记录仍可在 Actions 历史中区分和查看。
+## 2. PR 提交后会经历哪些 CI 流程
 
-## 3. GitHub 侧 CI
+### 2.1 PR 触发后的两条并行链路
 
-### 3.1 基础 CI
+一个 PR 提交到 `master` 或其他目标分支后，会同时形成两类检查：
 
-`.github/workflows/ci.yml` 在指定分支的 push 和 PR 上运行，包含两个主要 Job。
+1. **分支自有的 GitHub CI**：运行目标分支中定义的 Basic CI、Delivery precheck 和 API Compatibility；
+2. **Gateway + Local CI**：由默认分支 Router 进行授权和路由，再交给目标 Worker 或 fallback Worker 完成安全检查、本地测试和结果回写。
 
-`Lint & Style`：
+第一类检查解决“代码本身是否通过快速通用检查”；第二类检查解决“代码合并到目标分支后，是否能在真实编译和后端环境中工作”。
 
-- 使用 Ruff 检查 `python/` 和 `tests/`；
-- 检查静态规则和代码格式；
-- 不拉取 Triton submodule，以缩短运行时间。
+### 2.2 PR 目标分支如何影响 Worker 选择
 
-`Unit Tests (pure Python)`：
+默认分支是统一 Router 入口。无论 PR 的目标是 `master` 还是其他分支，授权和 Worker 选择都由默认分支中的可信 Router 完成；Router 不 checkout PR 代码，也不读取 `GITEE_TOKEN`。
 
-- 使用 Python 3.9、3.10、3.11、3.12 矩阵；
-- 运行 `python/triton_anchor/tests/`；
-- 输出终端覆盖率，并在 Python 3.10 任务中上传 `coverage.xml`。
-
-这层检查主要覆盖 Python 逻辑、数据模型、Adapter 注册、IR 校验和回归比较工具，不依赖真实后端。
-
-### 3.2 CI 脚本预检
-
-`.github/workflows/delivery-ci.yml` 中的 `delivery-precheck` 负责检查 CI 自身是否仍然可执行：
-
-1. 对 `scripts/ci/` 和关键 `scripts/local_ci/` Shell 脚本执行 `bash -n`。
-2. 对构建证据、性能监测、结果发布和状态桥接等 Python 脚本执行 `py_compile`。
-3. 对 `tests/test_smoke.py` 执行语法检查。
-4. 使用 `PYTHONPATH=python` 运行纯 Python 前端测试。
-
-该 Job 可以提前发现脚本语法、文件路径、Python 导入和基础逻辑问题，避免这些问题进入本地长任务后才暴露。
-
-这部分与 Local CI 有少量覆盖，但目前仍保留：它运行快，不依赖 Gitee、本地服务器、Docker 后端环境或 poller，在本地资源被占用或暂时不可用时仍能给出基础反馈，也能避免明显错误消耗稀缺的后端测试资源。
-
-同一 workflow 中的 `performance-regression-contract` 还会运行 IR 序列化回归的契约测试。该 Job 只验证比较、缓存和结果发布逻辑，不执行真实 Sophgo 性能测量；真实测量仍由 Local CI 完成。
-
-### 3.3 手动容器化 full smoke
-
-`delivery-full-smoke` 只在手动运行 `Delivery CI` 且设置 `run_full_smoke=true` 时执行。它支持 `frontend-only`、`sophgo-cmodel` 和 `custom` 三种 backend profile；其中 `custom` 是参数化接入口，需要调用方提供完整的后端仓库、环境和测试命令，并不表示任意后端已经自动适配。
-
-主要步骤如下：
-
-```text
-构建 docker/build-env.Dockerfile
-  -> 配置 backend profile
-  -> 准备并校验 LLVM/PPL 预构建依赖
-  -> 构建和安装 triton-anchor wheel
-  -> 安装可选后端依赖和后端包
-  -> 执行导入、backend discovery 和 tests/test_smoke.py
-  -> 执行可选后端命令及 FlagGems
-  -> 收集日志和 delivery-evidence.json
-```
-
-该流程适合人工检查 Docker 构建环境和完整参数组合。它与 Local CI 的部分构建和 smoke 步骤重复，但提供了一条独立于本地服务器的复现、诊断和环境检查路径。
-
-目前保留该入口，并继续维持手动触发，不把它设为日常 PR 的必跑项。常规后端回归以 Local CI 为主；需要验证 Docker 构建环境、排查本地环境差异，或单独检查 `frontend-only` profile 时，再运行该 Job。
-
-### 3.4 公共 API 兼容性与 Breaking Change
-
-#### 3.4.1 功能目标
-
-公共 API 兼容性检查用于识别一次代码修改是否破坏已经对外承诺的 Python 接口。它与 smoke 测试互补：smoke 主要回答“当前代码能否运行”，API 对比回答“已有调用方是否可能因为接口变化而失效”。
-
-当前功能由以下内容组成：
-
-```text
-api_contract/public_api.json
-scripts/api_contract/check_public_api.py
-scripts/api_contract/tests/test_check_public_api.py
-.github/workflows/api-compat.yml
-.github/workflows/api-breaking-notify.yml
-```
-
-#### 3.4.2 API 范围定义
-
-`api_contract/public_api.json` 是稳定 API 范围清单，当前覆盖：
-
-- `triton_anchor` 顶层导出；
-- 硬件能力相关 enum、dataclass 和方法；
-- Anchor IR 类型、异常、验证器和方法；
-- pipeline 函数；
-- Adapter 接口、注册表和获取函数。
-
-新增稳定 API 时，应先评估其兼容性承诺，再将模块、函数、类或方法加入该文件。候选分支自行删除或缩小范围不会让本次检查失效，因为 PR 检查以基准分支中的范围清单为准；范围文件被删除会被视为 Breaking Change。
-
-#### 3.4.3 比较原理
-
-`check_public_api.py` 使用 Python AST 分析基准代码和候选代码，不需要安装或导入两个版本。检查内容包括：
-
-- 模块、顶层导出、函数和类是否被删除；
-- 导出符号是否指向不同实现；
-- 函数或方法参数是否删除、重命名、重排或改变调用方式；
-- 可选参数是否变为必选参数，或者新增了必选参数；
-- 返回值和参数注解变化；
-- 类类型、父类和 dataclass 配置变化；
-- dataclass 字段顺序、默认值和必选状态变化；
-- enum 成员删除或取值变化；
-- 公共方法删除、变为抽象方法，或者 Adapter 接口新增抽象方法。
-
-变化分为 `breaking`、`warning` 和 `compatible`。存在 `breaking` 项时，兼容性 Job 失败；warning 和兼容性扩展仍会写入报告，但不会单独阻断。
-
-#### 3.4.4 触发和输出
-
-`api-compat.yml` 在以下场景执行：
-
-- 所有 PR；
-- 持有该 workflow 的分支发生 push；
-- 手动触发。
-
-PR 场景比较 base SHA 和 PR head SHA；push 场景比较 push 前后的 SHA。输出包括：
-
-- GitHub Job Summary 中的 Markdown 报告；
-- `api-compat-result.json`；
-- `api-compat-report.md`；
-- 名为 `public-api-compatibility` 的 artifact，默认保留 14 天。
-
-#### 3.4.5 提交者通知
-
-`api-breaking-notify.yml` 监听兼容性 workflow 完成事件。通知前会校验 artifact 的 schema、状态、Breaking Change 数量、事件类型和 head SHA，防止过期或伪造结果触发通知。
-
-- PR 发生 Breaking Change 时，在 PR 下创建或更新一条 Bot 评论并提及 PR 作者。
-- push 发生 Breaking Change 时，在对应 commit 下创建或更新评论并提及提交者。
-- 评论包含变化摘要和兼容性 workflow 链接。
-- 同一 PR 或 commit 使用固定标记更新既有评论，避免重复刷屏。
-- 后续检查恢复 compatible 时，既有 breaking 评论会更新为 resolved。
-
-## 4. Local CI
-
-### 4.1 任务投递与触发方式
-
-Local CI 由 `.github/workflows/ci-gateway.yml` 统一接收，并调用 `.github/workflows/dispatch-local-ci.yml`：
-
-- 持有完整 Worker 的普通分支 push 自动运行自身任务；
-- 同仓 PR 自动路由到目标分支 Worker；目标分支无 manifest 时回退到配置的 fallback Worker；
-- 外部 fork PR 自动进入 Environment 审批；未配置 Required reviewers 时自动继续，手动 Gateway 入口作为备用；
-- 无 Worker 分支的 push 可由维护者在默认分支使用 `mode=push` 手动代跑。
-
-默认分支 Router 使用 `pull_request_target` 读取 PR 元数据，但不读取 Gitee secret、不 checkout 或执行 PR 代码。只有普通目标分支 Worker 在完成精确 SHA 和 Security Gate 校验后调用 dispatcher，并在该 Worker 的受信任 workflow 上读取 Gitee 凭据。
-
-### 4.2 精确 SHA 和任务引用
-
-调度 workflow 首先确定 `tested_sha`、`comparison_base_sha`、`head_sha`、`source_branch` 和 `task_ref`，然后核对实际 checkout 的 SHA。PR 场景下 `tested_sha` 是 `refs/pull/<PR号>/merge` 指向的 GitHub test merge commit，`comparison_base_sha` 来自其第一个 parent，第二个 parent 必须匹配当前 PR head；如果该 ref 不存在或 head parent 不匹配，调度会失败或跳过，不会回退测试 PR head。任务引用规则如下：
-
-| 任务 | Gitee ref | 含义 |
+| PR 场景 | Router 的处理 | 实际执行 Local CI 的 Worker |
 | --- | --- | --- |
-| PR test merge | `ci/pr-<PR号>/<源分支>` | 本次 PR 需要测试的 GitHub test merge commit |
-| PR base | `ci/base/pr-<PR号>/<源分支>` | PR 基准提交，用于性能基线和 base/head diff |
-| PR head | `ci/head/pr-<PR号>/<源分支>` | PR 贡献分支精确提交，用于 metadata、Codex diff 和调试 |
-| push | `ci/push/<分支>` | 指定分支的最新 push 提交 |
-| 手动 full | `ci/full/<分支>` | 使用 full 模式执行 FlagGems |
-| 结果 | `local-ci-results` | 本地执行结果和性能数据 |
+| PR 提交到默认分支 `master` | 默认分支只负责路由和授权，不直接执行候选代码 | 按配置选择专用/fallback Worker |
+| PR 提交到带兼容 manifest 的其他分支 | 校验目标分支 manifest 和 Gateway Contract，并冻结 Worker revision | 目标分支自己的 Worker |
+| PR 提交到没有 manifest 的其他分支 | 在 `LOCAL_CI_FALLBACK_PR_ENABLED=true` 时进行代管 | `LOCAL_CI_FALLBACK_WORKER_BRANCH` 指定的 fallback Worker |
+| 目标分支 manifest 损坏、版本不兼容或能力不足 | 拒绝路由并写诊断状态 | 不投递 Local CI，等待分支维护者修复 |
+| 外部 fork PR | 先进入 `local-ci-fork-approval` Environment；审批后重新读取当前 PR | 审批通过后再按上述规则选择 Worker |
 
-同一 PR 更新时，GitHub 会把新的 test merge SHA 覆盖推送到同一个 PR task ref。本地 poller 按 task ref 和 SHA 判断是否产生新任务，因此每次 PR 更新都能测试最新合并结果，同时不会把不同 PR 的结果混在一起。
+这里的关键区别不是“master 是否测试”，而是“谁提供可信 Worker”。PR 的候选代码始终作为被测对象，不会替换 Router、scanner、dispatcher 或本地 supervisor。
 
-### 4.3 GitHub 状态初始化
+### 2.3 一个 PR 的完整处理步骤
 
-任务推送到 Gitee 后，dispatch workflow 会：
+#### 步骤 1：GitHub 接收 PR 事件
 
-1. 给原始 PR head 或 push SHA 写入 `pending` 状态；
-2. 将 Gitee task ref 作为状态链接；
-3. 通过 `ci-gateway.yml` 的 `mode=receive` 调用 `receive-local-ci-result.yml`，传入冻结的 head/base/tested/worker SHA、source/target branch、task ref 和等待参数；
-4. 调度阶段失败时将状态更新为 `error`。
+Router 读取 PR 的目标分支、贡献者 head、GitHub 生成的 Merge-Result 和 PR 生命周期状态。
 
-### 4.4 本地轮询与执行
-
-#### 4.4.1 poller
-
-`scripts/local_ci/poll_gitee_and_run.sh` 是运行在本地服务器上的稳定轮询入口。它读取 `LOCAL_CI_CONFIG` 指定的配置文件，通过 `git ls-remote` 扫描 Gitee 中转仓库，并只接收匹配以下规则的任务：
+PR Local CI 测试的不是单独的贡献者 head，而是：
 
 ```text
-^ci/(pr-[0-9]+/.+|push/.+|full/.+)$
+refs/pull/<PR号>/merge
 ```
 
-`ci/base/*` 是性能基线指针，不会被当作独立任务；`local-ci-results` 也不会进入任务扫描。
+该 Merge-Result 表示“当前 PR 合并到目标分支后的结果”。其中第一父提交作为 `comparison_base_sha`，第二父提交对应贡献者 head，Merge-Result 自身作为 `tested_sha`。
 
-poller 使用文件锁避免同一状态目录启动多个实例。每个新 SHA 都会生成独立的 run ID、运行目录和日志。无论测试成功或失败，只要最终结果成功发布，都会记录 last-processed SHA；若结果发布失败或任务异常中断、未完成收尾，则不会标记，下一轮轮询会重新执行同一 SHA。已有运行目录和日志会保留用于排查。
+#### 步骤 2：快速 GitHub CI 并行运行
 
-#### 4.4.2 可信脚本与待测代码分离
+目标分支中持有的 GitHub workflow 通常并行执行：
 
-Local CI 不直接使用 PR 中携带的控制脚本。服务器通过 `LOCAL_CI_SCRIPT_DIR` 指定一个固定、可信、可同步更新的脚本目录。每次任务执行前，poller 将该目录复制到：
+- Ruff 和格式检查；
+- Python 3.9、3.10、3.11、3.12 纯 Python 单测；
+- CI 脚本语法、导入和协议预检；
+- 稳定 Python Public API 兼容性检查。
+
+这些任务失败时会直接显示在 PR Checks 中，不需要等待 Local CI。
+
+#### 步骤 3：Router 授权并选择 Worker
+
+Router 完成以下工作：
+
+- 判断 PR 是否来自同仓库或外部 fork；
+- 对外部 fork 等待 Environment 审批；
+- 读取目标分支 Worker manifest；
+- 校验 `gateway_contract_version` 和所需能力；
+- 冻结 `expected_head_sha`、`comparison_base_sha`、`tested_sha` 和 `worker_revision_sha`；
+- 取消或标记已经过期的同 PR 旧任务。
+
+#### 步骤 4：Worker 执行 Security Gate
+
+被选中的 Worker 使用被冻结的可信版本运行 scanner 和 CodeQL。Security Gate 在任何 Gitee 写凭据进入执行链之前完成，用于发现：
+
+- 凭据泄漏或将 token 写入日志；
+- 不受控的网络访问；
+- 危险命令拼接或执行方式；
+- 可能突破既定 CI 边界的 workflow/脚本改动。
+
+Security Gate 通过后才允许 dispatcher 投递任务。
+
+#### 步骤 5：Dispatcher 写入 Gitee 任务
+
+Dispatcher 将以下信息写入 Gitee：
+
+- PR task ref：指向待测试的 Merge-Result；
+- base ref：提供可信基线和性能比较来源；
+- head ref：提供贡献者精确提交；
+- metadata：保存 PR 标题、描述以及 base/head/tested SHA；
+- GitHub pending status：表示 Local CI 已进入等待或执行状态。
+
+#### 步骤 6：本地 poller 执行确定性 Local CI
+
+本地 poller 主动扫描允许的 `ci/*` ref，完成锁、去重、runner 快照和任务目录准备，然后在 Docker 中按固定顺序执行：
 
 ```text
-LOCAL_CI_STATE_DIR/runner/<run-id>/
+精确 checkout tested SHA
+  -> 获取性能 baseline
+  -> 激活 Python 环境
+  -> 前端 build / wheel install / import verify
+  -> 前端 smoke
+  -> 后端环境 / rebuild / discovery
+  -> 后端 smoke + JIT
+  -> FlagGems sample
+  -> compile-time / Pass profile / IR serialization
+  -> 生成 summary 和 result.json
 ```
 
-`LOCAL_CI_SCRIPT_DIR` 必须指向完整的 `scripts/local_ci` 根目录，不能只指向某个子目录。根目录只保留完整实现的稳定服务器入口 `poll_gitee_and_run.sh`；其余实现按 `orchestration/`、`deterministic_ci/`、`codex_ai/`、`results/` 和 `shared/` 分层。
+前端 build、前端 smoke、后端 rebuild、后端 smoke/JIT 是必选阶段。阶段缺失、未运行、运行中或失败，都会使确定性 Local CI 失败。
 
-随后 `orchestration/run_deterministic_ci_in_container.sh` 再把完整快照复制进 Docker 容器。这样可以保证：
+#### 步骤 7：Codex AI 进行补充审查
 
-- PR 分支中没有 `scripts/local_ci` 时仍可执行；
-- 未受信任的 PR 不能直接修改本地 CI 控制逻辑；
-- 一次任务运行期间使用固定脚本版本；
-- 历史 run 可以追溯到当时使用的脚本快照。
+确定性 Local CI 完成后，Codex AI 读取被冻结的代码差异、PR 描述、阶段日志和失败产物，生成补充审查、风险说明和后续验证建议。AI 不改变必选阶段的退出码和门禁结论。
 
-#### 4.4.3 fresh-clone 和干净构建
+#### 步骤 8：Receiver 回写最终结果
 
-容器内的 `ANCHOR_DIR` 是专用待测目录。每个任务都会删除旧目录并从 Gitee task ref fresh-clone 精确提交，然后：
+本地结果先发布到 Gitee `local-ci-results`。GitHub receiver 读取结果后再次确认：
 
-1. 激活配置的 Python venv；
-2. 卸载旧的 `triton-anchor` distribution；
-3. PR 任务只对候选 `envsetup.sh` 做语法检查，并 source 从精确 base commit 提取到可信 runner 快照中的版本；push 任务 source 当前 push commit 的版本；
-4. 清理旧 build、dist 和 wheel；
-5. 从源码构建 wheel；
-6. 强制安装新 wheel；
-7. 校验实际导入版本。
+- PR 是否仍然打开且不是过期任务；
+- head、Merge-Result、tested SHA 和 run ID 是否仍匹配；
+- 结果是否来自预期的 Worker revision 和任务目录；
+- 状态是否应写到当前 Merge-Result。
 
-这一流程用于防止构建失败时误用旧安装包，也避免历史 CMake 或 wheel 产物污染当前结果。
+确认通过后，receiver 将最终 `success`、`failure` 或 `error` 写到 `tested_sha`，并发布 Codex 评论和相关结果链接。
 
-前端 build、前端 smoke、后端 rebuild、后端 smoke/JIT 是必选阶段。任何阶段缺失、处于 `not_run`/`running` 或失败时，即使候选脚本尝试 `exit 0`，最终退出码和 bridge 结果仍会被强制判为失败。
+### 2.4 PR 流程图
 
-### 4.4.7 凭据残余风险
-
-当前配置按部署选择保留 `LOCAL_CI_ALLOW_WRITE_TOKEN_IN_CONTAINER="1"`：如果未提供独立只读 token，候选代码运行容器可能获得 Gitee 写 token。Gateway、可信脚本快照和 base `envsetup.sh` 降低了控制脚本被替换的风险，但这不是 hostile-code 隔离。生产环境应优先提供 `LOCAL_CI_CONTAINER_GITEE_TOKEN` 或只读 token，并在条件允许时把该开关改为 `0`。
-
-#### 4.4.4 容器内执行顺序
-
-```text
-fresh-clone 精确 SHA
-  -> 构建并安装 triton-anchor
-  -> 前端 tests/test_smoke.py
-  -> source 后端环境
-  -> rebuild 后端 wheel 并强制安装
-  -> backend discovery
-  -> 后端 smoke/JIT
-  -> FlagGems sample 或 full
-  -> 编译时间监测
-  -> Pass profiling
-  -> IR 序列化/反序列化监测
-  -> 写入 summary 和阶段日志
+```mermaid
+flowchart TB
+  PR["PR 提交或更新"] --> Fast["并行：Basic CI / Delivery precheck / API Compatibility"]
+  PR --> Router["默认分支 Router\n授权、读取 Merge-Result、选择 Worker"]
+  Router --> Fork{"是否外部 fork"}
+  Fork -->|是| Approval["Environment 人工审批\n审批后重新冻结 PR"]
+  Fork -->|否| WorkerChoice["校验目标 Worker manifest"]
+  Approval --> WorkerChoice
+  WorkerChoice -->|目标分支可用| TargetWorker["目标分支 Worker"]
+  WorkerChoice -->|无 manifest 且允许 fallback| Fallback["fallback Worker"]
+  WorkerChoice -->|不兼容| RoutingError["routing error"]
+  TargetWorker --> Security["Security Gate"]
+  Fallback --> Security
+  Security --> Dispatch["投递 Gitee task/base/head/metadata"]
+  Dispatch --> Local["本地确定性 Local CI"]
+  Local --> AI["Codex AI 补充审查"]
+  AI --> Receive["receiver 重验身份和新鲜度"]
+  Receive --> Status["写 tested SHA 状态和 PR 评论"]
 ```
 
-前端 smoke 主要检查 Anchor API、dialect、IR 验证、Pass pipeline、Adapter 发现和 TTIR 生成。后端 rebuild、smoke/JIT 则检查前端变化是否破坏后端构建、编译、runtime 或执行链路。
+### 2.5 PR 更新、force-push 和目标分支变化
 
-#### 4.4.5 FlagGems
+同一个 PR 更新后会产生新的 head、Merge-Result 和 tested SHA。系统按以下规则处理旧任务：
 
-常规 PR/push 使用 sample 模式，当前从最新 full 结果中筛选成功且耗时不超过 600 秒的算子，并从覆盖的 6 个类别中各选一个。`norm` 和 `reduction` 因没有符合该时间条件的成功算子，仅在 full 模式覆盖。手动 full 模式使用 `ci/full/*`，执行完整算子列表。每个算子在独立进程中运行，并记录结果、失败阶段、耗时、超时原因和已完成测试节点数。
+- 新提交会更新对应 task ref，并形成新的 run；
+- Router/Worker 尝试取消或淘汰旧 receiver 和过期任务；
+- receiver 回写前再次检查 SHA，新鲜度不匹配时拒绝写回；
+- PR 改目标分支、关闭或转为 draft 后，旧任务不能更新当前状态；
+- 外部 fork 提交新 commit 后，需要按当前 Environment 策略重新审批；
+- Actions 和 Gitee 结果目录保留历史记录，但 PR Checks 只显示当前 tested SHA 的状态。
 
-如果设置 `FLAGGEMS_TEST_COMMAND`，则跳过内置算子选择器，直接执行后端维护的命令。
+### 2.6 push 和手动任务
 
-#### 4.4.6 多后端扩展边界
+PR 之外还支持以下入口：
 
-Local CI 的任务协议和 runner 骨架可以复用，但真实执行不能假设所有后端使用同一套环境和用例。每接入一个后端，至少需要形成一份独立、可复现的 backend profile：
-
-| 配置边界 | 需要按后端确定的内容 |
+| 场景 | 处理方式 |
 | --- | --- |
-| 运行环境 | `LOCAL_CI_CONTAINER`、工作区、Python venv、设备运行时和资源限制 |
-| 后端构建 | `EXPECTED_TRITON_BACKEND`、`BACKEND_PATH`、`BACKEND_ENVSETUP*`、rebuild 和测试命令 |
-| FlagGems | 适配仓库或 ref、依赖、pytest 参数、算子映射、sample 白名单、full 列表和超时策略 |
-| 性能监测 | 代表性 kernel、重复次数、噪声下限、回归阈值、backend profile 和 SHA 基线命名空间 |
-| 结果展示 | GitHub status context、结果中的 backend 标识以及 Pages 中的 backend 行 |
+| 自持 Worker 分支 push | 写入 `ci/push/<branch>`，测试该分支的精确 push SHA |
+| 无 Worker 分支 push | 具有 `write`、`maintain` 或 `admin` 权限的维护者从默认分支 Gateway 手动选择 `mode=push` |
+| 手动完整 FlagGems | 写入 `ci/full/<branch>`，运行完整算子集合 |
+| 手动 Delivery full smoke | 在 GitHub Docker runner 中运行，不经过本地 poller |
 
-当前仓库的默认配置和已经跑通的完整链路对应 **Sophgo CModel**：profile 为 `sophgo-cmodel`，预期 Triton backend 为 `sophgo`，后端通过 `PIO_CMODEL` 初始化，并执行 Sophgo 后端的 smoke/JIT。当前 FlagGems sample 白名单根据该环境 2026-07-28 的全量运行结果整理，包含 42 个成功且耗时不超过 600 秒的算子（因超时设置及仿真环境影响算子通过情况，当前结果仅为 CI 校验，不作为验收结果），覆盖 6 个类别；full 列表仍对应当前约定的 1～127 号算子并覆盖全部 8 类。
+跨分支 fallback push 只回写真实 source branch commit 的状态，不刷新生产 Dashboard。
 
-这些算子结果不能直接视为其他后端的白名单。后续接入新后端时，应先完成该后端的全量探测，再生成自己的算子映射、白名单和性能基线；必要时通过 `FLAGGEMS_TEST_COMMAND` 使用后端专用测试入口。建议每个后端使用独立的 `config.env`、容器、状态目录和 status context，公共脚本仅复用调度、快照、结果协议和通用阶段控制。
+## 3. AI 在 CI 中扮演什么角色
 
-#### 4.4.7 Codex AI CI 独立凭据
+### 3.1 AI 的位置
 
-Codex AI CI 不使用 poller 用户的个人 `~/.codex`。启用 `RUN_CODEX_AI_CI=true` 时，必须通过 `CODEX_AI_CI_HOME` 指向独立凭据目录，并提供可读的 `config.toml` 和 `auth.json`。建议目录使用 `700`、两个文件使用 `600`，但权限更宽、所有者不同或存在额外文件时只记录警告，不会阻止 AI-CI。`auth.json` 使用可独立撤销和审计的 CI 专用静态 API token。
+Codex AI 位于确定性 Local CI 之后。它使用已经产生的测试证据进行补充审查，而不是在测试之前猜测代码是否正确。
 
-部署时先停止 poller，创建 `/home/localci/local_ci/secrets/codex-ai`，按已验证的中转配置单独写入 `config.toml`（不要复制个人配置中的 `[projects]` 记录），并将 `auth.json` 写为 `{"OPENAI_API_KEY":"<CI 专用 token>"}`，再在 `config.env` 中设置 `CODEX_AI_CI_HOME`。不执行额外的 `chmod` 也可以运行；服务器存在其他用户时，仍建议收紧权限以避免 token 被读取。
+确定性 CI 负责回答：
 
-每次任务会把宿主机 Codex CLI 和独立凭据实体复制到任务专属临时容器的 `/root/.codex`，不会挂载凭据，也不会把容器内文件复制回宿主机。当前模式从 Local CI 容器创建 snapshot，只复制 exact-SHA checkout 和必要输入；runner 会比较任务前后的凭据文件哈希，发现外部修改时只记录中文告警，不自动恢复文件，也不改变确定性 Local CI 的结果。可在启动 poller 前运行 `CODEX_AI_CI_HOME=/home/localci/local_ci/secrets/codex-ai scripts/local_ci/codex_ai/setup_codex_ai_container.sh` 完成前置检查。
+- 代码是否构建成功；
+- 必选 smoke/JIT 是否通过；
+- 算子测试是否通过；
+- 性能和编译质量是否出现可量化变化；
+- 最终退出码是什么。
 
-### 4.5 性能监测
+Codex AI 负责回答：
 
-当前 Local CI 已接入以下三类监测：
+- 贡献者想解决什么问题；
+- 实际代码改动是否覆盖了该目标；
+- 失败更可能位于哪个阶段或文件；
+- 哪些风险没有被现有测试覆盖；
+- 下一步应补充什么验证。
 
-- 编译时间：测量 `add`、`mm`、`softmax`、`layernorm` 的 cold、warm 和估算编译时间；
-- Pass profiling：记录各 Pass 的事件、汇总耗时和热点；
-- IR 序列化：分别测量 TTIR serialize 和 deserialize，并记录 IR 大小及模块信息。
+### 3.2 AI 使用的输入和生成的输出
 
-PR 任务通过 `ci/base/pr-*` 获取 base SHA，并把 `ci/pr-*` 指向 GitHub test merge commit。结果仓库中存在 base SHA 和 backend profile 的缓存时直接复用；缺少时先为 base 生成基线，再测试 PR merge 结果。功能失败和 benchmark 执行失败会使任务失败；超过性能阈值通常以 warning 表示，并附带详细 JSON、CSV 和 Markdown 对比报告。
+PR 任务会冻结以下输入：
 
-性能结果按 SHA 和 backend profile 保存，供后续 PR 对比和趋势页面读取。
+- PR title 和 description；
+- base、head 和 tested SHA；
+- base 到 head 的代码差异；
+- Merge-Result 对应的确定性 CI 日志；
+- 构建、后端、FlagGems 和性能摘要；
+- 本次任务产生的 failure IR 和其他失败产物。
 
-#### 4.5.1 测量口径与回归策略
+AI 通常生成：
 
-三类监测默认使用 `add`、`mm`、`softmax`、`layernorm` 作为代表性 kernel，并在同一 backend profile 内比较。PR 使用精确 base SHA 作为基线；稳定结果按 `<sha>/<backend-profile>` 缓存，避免不同提交或后端的数据混用。缺少缓存时优先测量并保存 base，仍无法取得基线时将结果标记为 warning，而不是伪造对比值。
+- 审查摘要和合入建议；
+- 目标、预期效果和当前实现情况；
+- 需要处理的问题，以及可信时对应的文件和行；
+- 已完成验证和未覆盖范围；
+- 失败定位与后续验证建议；
+- 本次改动文件及影响概览。
 
-**编译时间**
+完整报告保存在 Local CI 结果中，GitHub PR 上显示 Codex 评论和 advisory 状态。同一 tested SHA 重跑时可更新对应评论；新的 tested SHA 保留新的审查记录。
 
-- 每次测量由新的 worker 进程执行，避免进程内 JIT 缓存把后续 cold 测量变成 warm。
-- `cold` 是第一次调用耗时，`warm` 是同一 worker 中第二次调用耗时，`compile_est = cold - warm` 用于估算编译部分耗时。
-- 同时将 kernel 输出与参考实现比较；正确性失败或 benchmark 进程失败会使该阶段失败。
-- 当前默认 warmup 1 次、正式重复 5 次，使用 `compile_est` 中位数比较。变化绝对值超过 `±20%` 时产生 warning，阈值可由配置覆盖。
-- 主要产物为 `compile-benchmark.json/.csv` 和 PR 的 `compile-time-comparison.json/.md`；稳定基线保存在 `compile-time/by-sha/<sha>/<backend-profile>/`。
+### 3.3 与传统 CI 的区别
 
-**Pass profiling**
+| 对比项 | 传统确定性 CI | Codex AI CI |
+| --- | --- | --- |
+| 判断依据 | 固定命令、断言、阈值和退出码 | 代码语义、PR 意图、差异、日志和测试证据 |
+| 输出 | 通过/失败、阶段状态、日志和指标 | 风险解释、问题归纳、验证缺口和排查建议 |
+| 可重复性 | 输入和环境相同则结果应稳定 | 结论具有辅助性，不作为唯一门禁 |
+| 适用问题 | 已知规则、回归测试、构建和性能阈值 | 跨文件影响、语义风险、测试覆盖不足和复杂失败解释 |
+| 合入门禁 | 是，必选阶段决定最终状态 | 否，当前定位为 advisory |
 
-- 设置 `TRITON_ANCHOR_PROFILE=1` 启用 MLIR `PassManager::enableTiming()`；它与现有 `MLIR_ENABLE_TIMING=1` 等价，并参与 Triton cache key。
-- 计时只覆盖 MLIR Pass 执行，不包含 Python JIT、Adapter 包装、后端子进程、链接、cache I/O 或 kernel 运行时间；warm cache 命中时不会重新执行 Pass，也不会产生 Pass 时间。
-- 当前默认 warmup 1 次、正式重复 3 次。比较粒度是“kernel + Pass”，默认只检查变慢：候选中位数比基线慢超过 20%，且基线至少为 1 ms、绝对增加至少为 1 ms 时产生 warning。
-- 产物包括逐事件 CSV、Pass 汇总 CSV、热点 Markdown 和 PR 对比报告；稳定基线保存在 `pass-profile/by-sha/<sha>/<backend-profile>/latest.json`。
+AI 驱动并不意味着用 AI 替代测试。当前设计是“确定性 CI 给出事实，AI 基于事实补充理解”，从而适应快速迭代或 vibe coding 场景中代码变化快、人工审查压力大的情况。
 
-**IR 序列化/反序列化**
+### 3.4 AI 的边界
 
-- 每个 kernel 先编译一次取得真实 `.ttir`，准备阶段不计入测量；随后重复测量 module 转文本和从文件解析回 MLIR module 的成本，不改变正常编译路径。
-- 结果同时记录 `serialize`、`write_text`、`read_text`、`deserialize`、`parse_estimate` 和 `roundtrip`，默认回归比较使用 `serialize` 与 `deserialize`。
-- 当前默认 warmup 3 次、正式重复 20 次。候选比基线慢超过 20%，且基线至少为 0.05 ms、绝对增加至少为 0.05 ms 时产生 warning。
-- `deserialize` 包含文件读取、MLIR 解析和 module clone；`parse_estimate` 只是诊断估算，不能视为纯解析 CPU 时间。
-- 产物包括 JSON、CSV、摘要和 PR 对比报告；SHA 基线及趋势数据保存在 `ir-serialization/by-sha/` 和对应 dashboard 文件中。
+- 确定性 Local CI 失败时，AI 可以帮助定位，但不能将失败改为成功；
+- AI 不可用、超时或报告生成失败时，必选阶段的门禁结论仍有效；
+- `RUN_CODEX_AI_CI=true` 时启用 AI 审查链路；
+- AI 使用独立的 `CODEX_AI_CI_HOME` 和 CI 专用 token，不复用开发者个人配置；
+- AI 临时工作区与确定性 runner 分离，报告和证据随任务结果一起保存；
+- 本地服务器仍是受信任的 CI 环境，不能把 AI 或 Docker 当成可执行任意恶意代码的绝对安全沙箱。
 
-上述 20% 和噪声下限是当前配置中的工程默认值，不等同于所有服务器和后端的永久标准。接入新后端时应在固定软件栈、资源限制和负载条件下重新建立基线，再确定阈值。性能 warning 不会伪装成功数据：GitHub commit status 仍显示 success，但状态描述、阶段摘要和 Gitee 报告会保留 warning；功能错误、结果解析错误或 benchmark 执行失败仍使任务失败。
+## 4. 安全性和抗挤兑设计
 
-### 4.6 结果保存与 GitHub 状态回写
+### 4.1 主要安全目标
 
-#### 4.6.1 本地和 Gitee 结果
+CI 需要同时防范以下风险：
 
-主机状态和日志保存在 `LOCAL_CI_STATE_DIR`，容器内完整产物保存在 `LOCAL_CI_ARTIFACT_ROOT`。选定结果发布到 Gitee `local-ci-results` 分支。
+1. PR 中的候选代码修改 CI 控制逻辑并窃取凭据；
+2. 外部 fork 未经授权占用本地后端和算力资源；
+3. force-push、改目标分支或旧任务回写错误状态；
+4. 伪造 Gitee 结果或将结果写到错误的 GitHub SHA；
+5. 大量 PR、重复更新或手动任务挤占队列、磁盘和本地服务器；
+6. AI token、Gitee token 或其他凭据进入候选代码执行环境。
 
-当前运行目录按任务类型分组：
+### 4.2 已实现的安全边界
+
+#### 可信 Router 与 Worker
+
+- Router 始终使用默认分支的可信代码；
+- Router 不 checkout PR 内容，也不读取 `GITEE_TOKEN`；
+- Worker revision 在投递前冻结，scanner、dispatcher 和 receiver 使用同一个精确版本；
+- Gateway Contract 和 manifest 版本不匹配时直接拒绝执行。
+
+#### 外部 fork 审批
+
+- 外部 fork 进入 `local-ci-fork-approval` Environment；
+- 配置 Required reviewers 后，维护者审批才会继续；
+- 审批后重新读取当前 head 和 Merge-Result，防止审批对象发生变化；
+- 新 commit 重新进入当前审批流程。
+
+注意：仅创建 Environment 但不配置 Required reviewers，不构成人工门禁，GitHub 可能自动继续。
+
+#### 凭据最小化
+
+- Security Gate 在 Gitee 写凭据使用前运行；
+- Router 不接触 Gitee 写 token；
+- `LOCAL_CI_ALLOW_WRITE_TOKEN_IN_CONTAINER=0` 时，不把写 token 传入候选容器；
+- 必须传入容器的 relay token 应使用最小权限；
+- Codex AI 使用专用 CI token，不复制个人配置；
+- 真实 token 只保存在 GitHub Secrets 或本地服务器的真实配置中。
+
+#### 精确身份与结果重验
+
+- 任务冻结 head、base、tested SHA、Worker revision 和 run ID；
+- PR 实际测试 Merge-Result，状态写到同一个 tested SHA；
+- receiver 在回写前重验 PR 状态、SHA、新鲜度和结果身份；
+- PR 关闭、改目标分支、force-push 或产生新 Merge-Result 后，旧结果不能覆盖当前状态。
+
+#### 本地执行边界
+
+- poller 只识别允许的 `ci/pr-*`、`ci/push/*` 和 `ci/full/*` 任务 ref；
+- `ci/base/*`、`ci/head/*`、`ci/meta/*` 和结果分支不会被当成执行任务；
+- poller 从 `LOCAL_CI_SCRIPT_DIR` 复制可信 runner 快照，PR 中的脚本不直接作为 supervisor；
+- 每个任务使用独立日志、runner 快照和带 ownership marker 的临时目录；
+- failure IR 只收集本次失败命令产生的文件，不清理全局缓存。
+
+### 4.3 当前用于防止任务挤兑的机制
+
+现有设计已经具备以下基础保护：
+
+| 机制 | 作用 |
+| --- | --- |
+| 外部 fork 人工审批 | 阻止未授权外部 PR 自动消耗本地资源 |
+| 维护者权限限制 | 无 Worker 分支的跨分支 push 只能由具有相应仓库权限的维护者手动发起 |
+| PR task ref 固定命名 | 同一 PR/来源分支的新任务更新对应 ref，避免无限创建同类活动入口 |
+| 过期任务取消和新鲜度检查 | PR 更新后淘汰旧 receiver，旧结果不能回写当前状态 |
+| poller 锁与去重 | 防止同一任务被多个轮询周期重复执行 |
+| ref 白名单 | base、head、metadata、结果分支和任意未知 ref 不会触发执行 |
+| full 任务手动触发 | 完整 FlagGems 和 full smoke 不作为每次 PR 的默认重型任务 |
+| sample 与 baseline 分层 | 常规 PR 运行 sample；性能 baseline 可复用并按 SHA/profile 隔离 |
+| metadata 长度限制 | PR title 最多 500 字符，description 最多 8000 字符，防止异常元数据无限膨胀 |
+
+这些机制能够抑制重复执行、旧任务回写和未授权外部任务，但对“大量不同 PR 同时涌入”的场景，仍需要部署侧的容量控制。
+
+### 4.4 建议补强的队列和资源保护
+
+当前文档和流程中没有把全局队列上限、单用户速率限制和资源熔断定义为完整协议。生产部署建议补充以下措施，并将其作为后续 CI 治理工作：
+
+1. **限制并发数**：按后端 profile 设置本地最大并发，重型后端默认串行或小并发运行；
+2. **设置有界队列**：限制 pending 任务总数，超过上限时停止 dispatch 或返回明确的 `queued/throttled` 状态；
+3. **按 PR 合并任务**：同一 PR 只保留最新 tested SHA，旧 SHA 在进入容器前直接丢弃；
+4. **按账号和来源限流**：对外部贡献者、同一 fork 或同一时间窗口设置任务配额；
+5. **队列 TTL**：长时间未开始、PR 已关闭或 SHA 已过期的任务自动回收；
+6. **资源配额**：限制单任务 CPU、内存、磁盘、运行时间、日志大小和 artifact 大小；
+7. **熔断和降级**：磁盘、Gitee、后端或结果发布异常时暂停接收新任务，保留 Basic CI 等 GitHub 快速检查；
+8. **监控与告警**：监控队列长度、等待时间、失败率、磁盘、容器和 token 错误；
+9. **保留策略**：按时间和数量清理旧 workspace、runner 快照、日志和非关键 artifact；
+10. **保护手动重型入口**：`ci/full/*`、full smoke 和跨分支 fallback push 仅向维护者开放。
+
+推荐的处理顺序是：先在 Router/dispatcher 处做授权和限流，再在 poller 处做有界队列、并发控制和过期回收，最后由容器运行时执行资源上限。只在本地服务器末端限流，仍会造成 Gitee task ref 和 GitHub receiver 的堆积。
+
+### 4.5 安全配置检查表
+
+- `local-ci-fork-approval` 已配置 Required reviewers；
+- `LOCAL_CI_ALLOW_WRITE_TOKEN_IN_CONTAINER=0`，或使用最小权限 relay token；
+- `GITEE_TOKEN` 只对 Worker workflow 可见，Router 不读取；
+- `CODEX_AI_CI_HOME` 使用专用 CI 账号和 token；
+- `GITEE_BRANCH_INCLUDE_REGEX` 只包含允许执行的任务 ref；
+- `LOCAL_CI_PAGES_BRANCH` 与 `github-pages` Environment 的允许分支一致；
+- GitHub Variables 未残留旧 owner、结果仓库或旧 Worker 分支；
+- poller、可信脚本和配置更新后已重启；
+- 本地服务设置了并发、超时、磁盘和日志上限；
+- 对异常队列长度和重复失败配置了告警。
+
+## 5. 其他实现与运维细节
+
+### 5.1 Gitee 任务 ref 和结果目录
+
+| 类型 | Gitee ref | poller 是否执行 | 用途 |
+| --- | --- | --- | --- |
+| PR task | `ci/pr-<PR号>/<source-branch>` | 是 | 指向 GitHub Merge-Result |
+| PR base | `ci/base/pr-<PR号>/<source-branch>` | 否 | 性能基线和可信 base |
+| PR head | `ci/head/pr-<PR号>/<source-branch>` | 否 | 贡献者精确 head 和 Codex diff |
+| PR metadata | `ci/meta/pr-<PR号>/<source-branch>` | 否 | 保存 `task-metadata.json` |
+| push | `ci/push/<branch>` | 是 | 测试精确 push SHA |
+| full | `ci/full/<branch>` | 是 | 手动完整 FlagGems |
+| 结果 | `local-ci-results` | 否 | 结果、日志、性能缓存和 Dashboard 数据 |
+
+结果目录由 `scripts/local_ci/shared/result_paths.py` 统一生成：
 
 ```text
-runs/ci_full/ci_full_<branch>/<sha>/<run-id>/
+runs/ci_push/ci_push_<branch>/<sha>/<run-id>/
 runs/ci_pr/ci_pr-<number>_<branch>/h-<head12>_m-<merge12>/<run-id>/
 runs/ci_pr/ci_base_pr-<number>_<branch>/<sha>/<run-id>/
-runs/ci_push/ci_push_<branch>/<sha>/<run-id>/
+runs/ci_full/ci_full_<branch>/<sha>/<run-id>/
 ```
 
-PR candidate 目录同时标识 head 和 Merge-Result；旧的纯 Merge SHA 目录仅保留为历史文件，新 receiver 不再读取。
+### 5.2 FlagGems 和性能基线
 
-结果可包含：
+- 常规 PR/push 可运行 FlagGems sample；
+- 手动 `ci/full/*` 运行完整算子集合；
+- 每个 operator 在独立进程中执行并保存状态、失败阶段和耗时；
+- PR 性能比较使用 exact base SHA 的 compile-time、Pass profile 和 IR serialization cache；
+- 三类 cache 同时缺失时，poller 可先运行 base task 预热；
+- base task 不重复运行 FlagGems sample，失败也不阻断 candidate，但 candidate 会记录缺少基线的 warning；
+- cache 按 `<sha>/<backend-profile>` 隔离。
 
-- `delivery-summary.txt`；
-- 前端 wheel、安装和 smoke 日志；
-- 后端 rebuild、discovery、smoke/JIT 日志；
-- FlagGems 日志、选中算子和 JSON/CSV/Markdown 汇总；
-- 编译时间、Pass profiling、IR 序列化数据；
-- PR base/head 对比报告。
+当前完成端到端验证的 backend profile 是 **Sophgo CModel**。其他后端仍需要各自的容器、测试命令、性能基线和页面数据，不能直接视为已经达到同等验证状态。
 
-#### 4.6.2 receiver
+### 5.3 GitHub 状态语义
 
-`receive-local-ci-result.yml` 使用 `scripts/local_ci/results/bridge_gitee_to_github_status.py` 按 task ref 和 SHA 轮询结果。默认每 60 秒检查一次，单次 receiver 最长等待 20400 秒；当前 workflow 最多允许 6 次续接。
-
-结果完成后，receiver：
-
-- 把 overall 状态写回原始 GitHub commit；
-- 在 GitHub Actions 中按 Overall、Frontend smoke、Backend smoke/JIT、FlagGems、Compile-time、Pass profiling 和 IR serialization 展示阶段结果；
-- 给每个阶段提供 Gitee artifacts 链接；
-- 对主分支 push 或手动 full 任务触发 Backend Status Pages 刷新。
-
-### 4.7 GitHub Pages 状态页面
-
-`.github/workflows/backend-status-pages.yml` 已实现静态状态页面构建和部署。GitHub Actions 从 Gitee `local-ci-results` 读取最新有效结果，通过 `scripts/dashboard/sync_gitee_results.py` 转换为页面数据，然后部署 `dashboard/`。
-
-当前页面数据包含两类视图：
-
-1. 最近一次手动 full 算子测试，支持搜索、状态筛选、失败阶段筛选、异常项查看、分页以及 CSV/Excel 下载。
-2. 后端健康状态和性能摘要，包括 smoke、编译时间、Pass profiling 和 IR 序列化。
-
-页面是纯静态站点。Gitee token 只在 GitHub Actions 同步步骤中使用，不会进入浏览器端文件。PR 只校验页面和数据契约，不部署；指定分支 push、手动运行以及对应 Local CI 结果完成后可以触发部署。
-
-#### 4.7.1 数据契约、数据模式与刷新规则
-
-浏览器固定读取 `dashboard/data/manifest.json`，再由 manifest 指向以下数据文件：
-
-| 数据 | schema / 作用 |
-| --- | --- |
-| `full-test.json/.csv` | `triton-anchor-full-test/v1`，最近一次有效手动 full 任务的逐算子结果 |
-| `backend-status.json` | `triton-anchor-backend-status-list/v1`，各后端最近一次符合条件的主分支健康状态 |
-| `performance.json` | `triton-anchor-performance-summary/v1`，编译时间、Pass 热点和 IR 序列化摘要 |
-
-全量算子状态包括 `passed`、`failed`、`timeout` 和 `unknown`，并保留失败阶段、耗时、测试时间和结果链接。后端总体状态包括 `success`、`warning`、`failure`、`pending`、`stale` 和 `unknown`。下载 CSV 使用 UTF-8 BOM；当前筛选结果可在浏览器端导出为 `.xlsx`，不需要把凭据或服务端逻辑放进页面。
-
-页面支持三种数据模式：
-
-- `mock`：仓库内演示数据，仅用于 PR 和前端契约校验；
-- `mixed`：后端状态和性能已从 Gitee 同步，但尚无有效手动 full 结果，逐算子区域继续使用演示数据；
-- `live`：逐算子、后端状态和性能三部分均来自实际 Local CI 结果。
-
-生产同步默认从两类独立结果流取数：手动全量算子结果来自 `runs/ci_full/ci_full_<branch>/`，后端健康和性能来自主分支 push 的 `runs/ci_push/`。PR 结果继续保留在历史目录并用于 PR 判定，但不会覆盖公开页面的主分支性能基线。缺少某类性能文件时页面显示不可用，不会把 mock 数据标记为 live。
-
-`backend-status-pages.yml` 在 PR 中只执行页面与数据契约校验；指定分支 push、手动触发，或 receiver 收到主分支/full 结果后才同步 Gitee 并部署。同步或契约校验失败时，本次部署失败，上一版成功页面仍保持在线。正式访问地址以仓库 `Settings -> Pages` 和 workflow deployment environment 输出为准，不在文档中硬编码。
-
-当前 manifest 只展示 `sophgo-cmodel`，与已经完成端到端验证的 Sophgo CModel profile 一致；`backend-status` 使用列表型契约，后续后端具备独立有效结果后，可增加 backend 记录和 `display.backend_ids`，无需改变现有页面入口协议。
-
-## 5. 配置方式
-
-### 5.1 GitHub Secrets
-
-| Secret | 作用 |
-| --- | --- |
-| `GITEE_TOKEN` | GitHub 向 Gitee 推送 task ref，以及 receiver/Pages 读取结果 |
-| `PREBUILT_DOWNLOAD_TOKEN` | 手动 full smoke 下载私有预构建依赖 |
-
-Secret 不应写入仓库、task ref 或普通日志。
-
-### 5.2 GitHub Variables
-
-常用变量包括：
-
-- Gitee 结果仓库：`GITEE_RESULTS_OWNER`、`GITEE_RESULTS_REPO`、`GITEE_RESULTS_REPO_URL`、`GITEE_RESULTS_BRANCH`、`GITEE_RESULTS_WEB_URL`、`GITEE_USERNAME`；
-- Local CI 状态与路由：`LOCAL_CI_CONTEXT`、`LOCAL_CI_FALLBACK_WORKER_BRANCH`、`LOCAL_CI_FALLBACK_PR_ENABLED`、`LOCAL_CI_FALLBACK_PUSH_ENABLED`、`LOCAL_CI_RECEIVER_WAIT_SECONDS`、`LOCAL_CI_RECEIVER_MAX_ATTEMPTS`；
-- Pages 数据源：`DASHBOARD_SOURCE_BRANCH`、`DASHBOARD_FULL_TEST_SOURCE_BRANCH`、`LOCAL_CI_BACKEND_PROFILE`；
-- 构建依赖和后端：LLVM、PPL、Sophgo backend、torch_tpu 和 FlagGems 相关变量。
-
-`GITEE_RESULTS_OWNER` 表示仓库所有者，`GITEE_USERNAME` 表示 token 对应的认证用户名，两者可以不同。例如结果仓库属于组织、token 属于个人账号时，owner 使用组织名，username 使用个人账号。Receiver、Pages 和 dispatcher 始终继续运行精确的 Worker revision，不再通过可配置 ref 跳回默认分支。
-
-两个 fallback 开关未配置时均默认为 `true`。PR 开关只控制目标分支缺少 manifest 时是否创建新的代管任务；push 开关只控制 fallback Worker 是否代跑其他分支的手动 push 请求。关闭开关不会停止已有 receiver、取消清理或 fallback Worker 自身任务。
-
-### 5.3 本地 `config.env`
-
-从模板生成服务器配置：
-
-```bash
-cp scripts/local_ci/config.example.env /path/to/local-ci/config.env
-```
-
-最重要的配置项为：
-
-```bash
-LOCAL_CI_SCRIPT_DIR=/path/to/trusted/triton-anchor/scripts/local_ci
-LOCAL_CI_STATE_DIR=/path/to/local-ci-state
-LOCAL_CI_CONTAINER=anchor-sophgo-ci-prod
-LOCAL_CI_WORKSPACE_HOST=/path/to/workspace
-
-GITEE_POLL_ALL_BRANCHES=1
-GITEE_BRANCHES=""
-
-WORKSPACE=/workspace
-ANCHOR_DIR=/workspace/triton-anchor
-BACKEND_PATH=/workspace/triton-sophgo-backend
-BACKEND_ENVSETUP_ARGS=PIO_CMODEL
-BACKEND_TEST_COMMAND="python3 tests/test_smoke.py && python3 tests/test_jit.py"
-```
-
-以上示例值是当前 **Sophgo CModel** runner profile，不是所有后端共用的固定值。新后端应维护独立的配置文件，并同步调整容器、后端路径及命令、FlagGems 用例集合、性能 kernel/阈值、结果 context 和 Pages backend 标识；不能直接沿用 Sophgo 的白名单和性能基线。
-
-`ANCHOR_DIR` 每次任务都会被递归删除并重新 clone，因此必须是专用目录，不能与 backend、FlagGems、LLVM、PPL 或 artifact 目录重叠。
-
-`config.example.env` 的更新不会覆盖服务器已有 `config.env`。配置变化后需要重启 poller；可信脚本目录中的代码变化会在下一次任务生成新快照时生效。
-
-生产环境推荐保持 `GITEE_POLL_ALL_BRANCHES=1`，由 poller 发现所有符合 `GITEE_BRANCH_INCLUDE_REGEX` 的 `ci/*` 任务。若关闭全分支发现，必须显式设置 `GITEE_BRANCHES`；不存在固定任务分支兜底。`GITEE_BRANCH` 表示某次实际 task ref，只能由 poller 注入给 runner。手工调用 runner、Bridge 或 Dashboard 同步脚本时，也必须显式提供 source/task 分支参数。
-
-## 6. 使用方式
-
-### 6.1 开发者提交 PR
-
-创建 PR 后，无需手动执行常规 CI：
-
-1. 基础 CI、构建预检和公共 API 兼容性自动运行。
-2. Local CI dispatch 将 PR test merge、head 和 base 的精确 SHA 推送到 Gitee。
-3. 本地 poller 在 test merge checkout 上执行前端、后端、FlagGems 和性能检查。
-4. Required commit status 写在 PR Merge-Result SHA 上并保持 pending，直到 receiver 取得本地结果；主状态描述显示 `Merge <12位SHA>`，`expected_head_sha` 只用于授权和过期校验。
-5. 如检测到 Breaking Change，兼容性检查失败，并在 PR 下通知作者。
-
-PR 有新提交或 base 更新时触发新的 test merge ref，同一个 PR task ref 更新为新的 tested SHA，旧结果不会被当作当前合并结果。
-
-如果冲突、draft 或早期路由错误导致尚无可用 Merge-Result，Gateway 只在 PR head 写 `${LOCAL_CI_CONTEXT}/routing` 诊断状态，不把 Required Local CI context 回退到 head。
-
-### 6.2 分支 push
-
-push 到 Local CI 监听的分支后，任务写入 `ci/push/<分支>`。主要分支的完成结果可以更新 Pages 的后端状态和性能摘要。
-
-### 6.3 手动运行 full FlagGems
-
-在 GitHub Actions 中选择 `Dispatch Local CI via Gitee`：
-
-1. 点击 `Run workflow`；
-2. 填写 source branch，必要时填写 commit SHA；
-3. 将 `flaggems_mode` 设为 `full`；
-4. 任务将写入 `ci/full/<分支>`，使用独立的 `/full` status context；
-5. 完成后刷新 full 算子结果页面。
-
-### 6.4 手动运行容器化 smoke
-
-在 GitHub Actions 中选择 `Delivery CI`，设置 `run_full_smoke=true`，再选择 backend profile 和依赖参数。该任务在 GitHub runner 的 Docker 环境中执行，不会调用本地 poller。
-
-### 6.5 启动本地 poller
-
-从可信 runner checkout 的仓库根目录执行一次扫描：
-
-```bash
-LOCAL_CI_CONFIG=/path/to/local-ci/config.env \
-  bash scripts/local_ci/poll_gitee_and_run.sh --once
-```
-
-持续轮询：
-
-```bash
-LOCAL_CI_CONFIG=/path/to/local-ci/config.env \
-LOCAL_CI_POLL_INTERVAL=60 \
-  bash scripts/local_ci/poll_gitee_and_run.sh
-```
-
-长期运行建议使用 systemd 或其他进程管理器托管 poller，以便开机启动、异常重启和集中查看日志。
-
-## 7. 状态含义与问题定位
-
-### 7.1 GitHub 状态
+正常 PR 的主状态写入 `tested_sha`，即 Merge-Result SHA。PR head 只用于授权、Codex diff 和过期检查。
 
 | 状态 | 含义 |
 | --- | --- |
-| `pending` | 任务已投递，本地尚未发布最终结果 |
-| `success` | 必须阶段通过；可能存在性能 warning，需查看详细报告 |
+| `pending` | 任务已投递，本地 CI 尚未发布最终结果 |
+| `success` | 必选阶段通过；可能仍有性能 warning |
 | `failure` | 构建、smoke/JIT、FlagGems 或 benchmark 执行失败 |
-| `error` | dispatch、receiver、凭据或结果协议发生异常，或超过最大等待次数 |
+| `error` | 路由、dispatch、receiver、凭据、结果协议或等待超时异常 |
 
-GitHub commit status 没有 warning 状态，因此性能 warning 会映射为 success，同时在描述和 Gitee 对比报告中保留 warning 信息。
+当 merge conflict 或早期路由失败导致没有可用 Merge-Result 时，Gateway 才在 PR head 写 `<context>/routing` 诊断状态。
 
-### 7.2 常见定位顺序
+### 5.4 Dashboard
 
-1. 查看 GitHub Actions 中失败的 workflow 和 Job Summary。
-2. 如果 Local CI 一直 pending，检查 Gitee task ref 是否存在且 SHA 正确。
-3. 检查本地 poller 是否运行，以及 `LOCAL_CI_STATE_DIR` 下的日志和 lock。
-4. 检查容器是否存在、名称是否与 `LOCAL_CI_CONTAINER` 一致。
-5. 查看对应 run 目录和 Gitee `local-ci-results` 中的 `delivery-summary.txt`。
-6. 根据阶段查看 `frontend-smoke.log`、`backend-rebuild.log`、`backend-smoke-jit.log`、`flaggems.log` 或性能报告。
-7. Pages 不更新时，检查 receiver 是否触发 `backend-status-pages.yml`，以及数据契约测试和 Gitee 同步步骤。
+Dashboard 从 Gitee `local-ci-results` 同步最新有效结果，并由指定 Pages 来源分支部署。页面主要展示：
 
-## 8. 安全性与可靠性
+1. 最近一次手动 full FlagGems 算子结果；
+2. 指定分支的后端健康状态；
+3. 编译时间、Pass profile 和 IR serialization 摘要；
+4. 搜索、筛选、失败阶段查看和 CSV/Excel 导出。
 
-- GitHub 不需要主动连接本地服务器，本地服务器只主动读取 Gitee。
-- PR 代码不在具有 Gitee 写权限的 GitHub dispatch runner 上执行。
-- 本地容器默认不接收可写 Gitee token；私有 relay 应使用只读容器 token。
-- CI 控制脚本来自固定可信目录，与待测 PR 代码分离。
-- 每次任务 fresh-clone 精确 tested SHA；PR tested SHA 来自 GitHub test merge commit，并清除旧前端安装和构建产物。
-- task ref、SHA、run ID 和结果目录相互关联，receiver 不接受其他 SHA 的旧结果。
-- API 通知 workflow 会再次校验 artifact schema 和 head SHA，避免过期结果通知当前 PR。
-- Pages 在 GitHub Actions 中读取 token，浏览器只接收静态 JSON/CSV/HTML。
-- receiver 支持长任务续接；并发组会取消同一任务的旧调度或旧接收器。
+数据模式包括：
 
-## 9. 代码索引
+- `mock`：仓库演示数据；
+- `mixed`：后端和性能已同步，但没有有效 full 结果；
+- `live`：full、后端状态和性能均来自实际 Local CI。
 
-| 类别 | 位置 |
+只有 `LOCAL_CI_PAGES_BRANCH` 的 push 或 full 结果可以部署生产页面。跨分支 fallback push 不刷新 Dashboard。
+
+### 5.5 主要 workflow 和模块入口
+
+| 功能 | 文件或目录 |
 | --- | --- |
-| GitHub workflows | `.github/workflows/` |
-| 公共 API 范围 | `api_contract/public_api.json` |
-| API 比较脚本 | `scripts/api_contract/` |
-| 通用构建和 smoke 脚本 | `scripts/ci/` |
-| Local CI 调度入口 | `scripts/local_ci/poll_gitee_and_run.sh` |
-| Local CI 编排 helper | `scripts/local_ci/orchestration/` |
-| 确定性 CI、FlagGems 和性能脚本 | `scripts/local_ci/deterministic_ci/` |
-| Codex AI CI | `scripts/local_ci/codex_ai/` |
-| 结果发布和 GitHub bridge | `scripts/local_ci/results/` |
-| Local CI 共享协议 | `scripts/local_ci/shared/` |
-| Local CI 配置模板 | `scripts/local_ci/config.example.env` |
-| Pages 数据同步脚本 | `scripts/dashboard/` |
-| Pages 静态站点与数据契约测试 | `dashboard/`、`python/triton_anchor/tests/test_dashboard_contract.py`、`python/triton_anchor/tests/test_dashboard_sync.py` |
-| 前端安装 smoke | `tests/test_smoke.py` |
-| 纯 Python 测试 | `python/triton_anchor/tests/` |
-| CI 统一说明 | `docs/ci_guide_zh.md` |
+| Router/Worker Gateway | `.github/workflows/ci-gateway.yml` |
+| Worker 能力声明 | `.github/ci-gateway-manifest.json` |
+| Basic CI | `.github/workflows/ci_basic.yml` |
+| Delivery CI | `.github/workflows/delivery-ci.yml` |
+| Public API Compatibility | `.github/workflows/api-compat.yml` |
+| API Breaking Notification | `.github/workflows/api-breaking-notify.yml` |
+| Security Gate | `.github/workflows/security-gate.yml` |
+| Local CI 投递 | `.github/workflows/dispatch-local-ci.yml` |
+| Local CI 结果接收 | `.github/workflows/receive-local-ci-result.yml` |
+| Dashboard/Pages | `.github/workflows/backend-status-pages.yml` |
+| Local CI contract 手动预检 | `.github/workflows/local_ci.yml` |
+| 本地 poller | `scripts/local_ci/poll_gitee_and_run.sh` |
+| 容器编排 | `scripts/local_ci/orchestration/` |
+| 确定性 runner | `scripts/local_ci/deterministic_ci/` |
+| Codex AI | `scripts/local_ci/codex_ai/` |
+| 结果发布与 bridge | `scripts/local_ci/results/` |
+| 共享协议 | `scripts/local_ci/shared/` |
 
-## 10. 当前状态
+### 5.6 关键配置
 
-当前已完成并接入主流程的能力包括：
+GitHub 侧：
 
-- GitHub 基础 lint、格式检查、纯 Python 单元测试和覆盖率；
-- CI 脚本预检、性能契约测试和手动容器化 full smoke；
-- 公共 API 兼容性检测、Breaking Change 阻断和作者通知；
-- PR、push 和手动 full 的 Local CI 调度；
-- 固定可信脚本快照、fresh-clone、前端重装和后端 rebuild；
-- 前端 smoke、后端 smoke/JIT 和 FlagGems sample/full；
-- 编译时间、Pass profiling 和 IR 序列化性能监测；
-- Gitee 结果保存、GitHub 分阶段状态回写；
-- GitHub Pages 数据同步、契约检查和静态页面部署；
-- 支持继续增加 backend profile 的公共任务协议、结果模型和 Pages 列表型数据契约。
+| 类型 | 配置 | 作用 |
+| --- | --- | --- |
+| Secret | `GITEE_TOKEN` | Worker 写任务、receiver/Pages 读结果 |
+| Secret | `PREBUILT_DOWNLOAD_TOKEN` | 手动 full smoke 下载私有预构建依赖 |
+| Variable | `GITEE_RESULTS_OWNER` / `GITEE_RESULTS_REPO` | 结果仓库 owner 和名称 |
+| Variable | `GITEE_USERNAME` | token 对应的认证账号 |
+| Variable | `LOCAL_CI_FALLBACK_WORKER_BRANCH` | fallback Worker 分支 |
+| Variable | `LOCAL_CI_FALLBACK_PR_ENABLED` | 是否代管无 manifest PR |
+| Variable | `LOCAL_CI_FALLBACK_PUSH_ENABLED` | 是否允许维护者手动代管 push |
+| Variable | `LOCAL_CI_PAGES_BRANCH` | 唯一生产 Dashboard 来源分支 |
+| Variable | `DASHBOARD_SOURCE_BRANCH` / `DASHBOARD_FULL_TEST_SOURCE_BRANCH` | Dashboard 读取的 push/full 任务来源 |
+| Environment | `local-ci-fork-approval` | 外部 fork 审批 |
+| Environment | `github-pages` | Pages 部署边界 |
 
-当前完成完整环境配置、用例整理和端到端运行验证的是 **Sophgo CModel**。文档中的“多后端”表示架构和配置边界支持继续扩展，并不表示其他厂商后端已经通过同等验证。新后端接入完成的判定应至少包括：独立 runner profile、后端 rebuild 与 smoke/JIT、该后端 FlagGems 全量探测及 sample 白名单、性能基线、独立状态 context，以及 Pages 结果展示。
+本地服务器从模板创建真实配置：
+
+```bash
+cp scripts/local_ci/config.example.env /home/localci/local_ci/config.env
+```
+
+典型启动方式：
+
+```bash
+LOCAL_CI_CONFIG=/home/localci/local_ci/config.env \
+  bash scripts/local_ci/poll_gitee_and_run.sh --once
+```
+
+持续运行时应使用 systemd 或其他进程管理器，以便开机启动、失败重启和集中查看日志。
+
+### 5.7 常见排查顺序
+
+1. 查看 GitHub Actions，确认问题发生在 Router、Basic CI、Security Gate、dispatcher、receiver、Pages 还是 API Compatibility；
+2. Local CI 长时间 `pending` 时，检查 Gitee 对应 `ci/*` task ref 和 SHA；
+3. 检查 poller 是否运行，以及 `LOCAL_CI_STATE_DIR` 中的 lock、runner 快照和任务日志；
+4. 检查本地容器、workspace、Python venv、LLVM、PPL 和 backend 路径；
+5. 在 `local-ci-results` 中按 PR 的 head/Merge-Result 或 push SHA 查找 `latest.txt`、manifest、summary 和 result；
+6. 按阶段查看前端、后端、FlagGems、性能和 Codex 产物；
+7. Pages 未更新时，检查 receiver 是否请求 `mode=pages`，并核对 Pages branch、Environment 和 Dashboard source refs。
+
+### 5.8 修改 CI 时的最低验证集
+
+修改 Local CI、结果协议、Codex AI 或 Gateway 后，至少在 Linux 环境执行：
+
+```bash
+bash -n scripts/local_ci/poll_gitee_and_run.sh
+python -m compileall -q scripts/local_ci
+
+python -m pytest \
+  scripts/local_ci/codex_ai/tests \
+  scripts/local_ci/tests/test_module_layout.py \
+  scripts/local_ci/results/tests \
+  -v --tb=short
+
+PYTHONPATH=python:scripts/local_ci python -m pytest \
+  python/triton_anchor/tests/test_dashboard_contract.py \
+  python/triton_anchor/tests/test_dashboard_sync.py \
+  python/triton_anchor/tests/test_compile_time_regression.py \
+  python/triton_anchor/tests/test_pass_profile_regression.py \
+  python/triton_anchor/tests/test_ir_serialization_regression.py \
+  -v --tb=short
+
+git diff --check
+```
+
+涉及 Docker、symlink、`/tmp`、容器权限或编码差异时，还需要在 Linux/Docker 环境验证。无法执行的检查应在提交说明中记录原因、风险和替代验证，不能直接省略必选检查。
+
+## 6. 总结
+
+triton-anchor CI 的核心逻辑可以归纳为：
+
+1. GitHub 负责事件、权限、路由、快速检查、安全门禁和结果展示；
+2. Gitee 负责隔离 GitHub 与本地服务器之间的任务和结果传递；
+3. 本地服务器负责真实编译、后端、算子和性能验证；
+4. PR 测试当前 Merge-Result，并通过 SHA 冻结和 receiver 重验避免旧结果误写；
+5. Codex AI 在确定性 CI 之后解释改动、风险和验证缺口，不替代传统门禁；
+6. 当前已有审批、去重、锁和过期检查等基础防护，生产部署仍应补充有界队列、并发限制、配额和熔断机制。
