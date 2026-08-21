@@ -200,6 +200,17 @@ REQUIRED_RESULT_FILES = (
     "result.json",
 )
 
+SKIPPED_STAGE_STATUS_KEYS = (
+    "frontend_build_status",
+    "frontend_smoke_status",
+    "backend_rebuild_status",
+    "backend_smoke_jit_status",
+    "flaggems_status",
+    "compile_time_status",
+    "pass_profile_status",
+    "ir_serialization_status",
+)
+
 
 def parse_summary_value(summary_path: Path, key: str) -> str:
     if not summary_path.is_file():
@@ -247,6 +258,7 @@ def build_publish_manifest(
             "tested_sha_kind": parse_summary_value(summary_path, "tested_sha_kind"),
             "actual_checkout_sha": parse_summary_value(summary_path, "actual_checkout_sha"),
             "run_id": parse_summary_value(summary_path, "run_id"),
+            "execution_mode": parse_summary_value(summary_path, "execution_mode"),
         },
     }
     (target_dir / "publish-manifest.json").write_text(
@@ -505,6 +517,18 @@ def write_fallback_results(run_dir: Path, target_dir: Path, args: argparse.Names
 
     artifact_dir_text = discover_artifact_dir(run_dir / "local-ci.log") or "unavailable"
     tested_sha_kind = "pr_merge" if args.source_branch.startswith("ci/pr-") else "commit"
+    execution_mode = "full"
+    result_json = run_dir / "result.json"
+    if result_json.is_file() and tested_sha_kind == "pr_merge":
+        try:
+            result_document = json.loads(result_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            result_document = {}
+        if (
+            isinstance(result_document, dict)
+            and result_document.get("execution_mode") == "codex_only"
+        ):
+            execution_mode = "codex_only"
     summary_lines = [
         "schema: triton-anchor-local-ci/v3",
         f"status: {args.exit_code}",
@@ -514,10 +538,15 @@ def write_fallback_results(run_dir: Path, target_dir: Path, args: argparse.Names
         f"actual_checkout_sha: unavailable",
         f"branch: {args.source_branch}",
         f"run_id: {args.run_id}",
+        f"execution_mode: {execution_mode}",
         f"artifact_dir: {artifact_dir_text}",
         "note: artifact directory was unavailable; published host-side local-ci logs.",
         f"copied_files: {', '.join(copied) if copied else 'none'}",
     ]
+    if execution_mode == "codex_only":
+        summary_lines.extend(
+            f"{status_key}: skipped" for status_key in SKIPPED_STAGE_STATUS_KEYS
+        )
     (target_dir / "delivery-summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
     copied.append("delivery-summary.txt")
     missing_expected = [

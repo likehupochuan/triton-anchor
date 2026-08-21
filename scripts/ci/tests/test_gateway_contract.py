@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -45,6 +48,25 @@ def workflow_dispatch_inputs(text: str) -> set[str]:
     return names
 
 
+def workflow_step_script(text: str, name: str) -> str:
+    marker = f"      - name: {name}\n"
+    start = text.index(marker)
+    body_start = text.index("        run: |\n", start) + len("        run: |\n")
+    body_end = text.index("\n      - name:", body_start)
+    return "\n".join(
+        line[10:] if line.startswith("          ") else line
+        for line in text[body_start:body_end].splitlines()
+    )
+
+
+def commit(repo: Path, message: str) -> str:
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", message], cwd=repo, check=True)
+    return subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+    ).strip()
+
+
 class GatewayV3ContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -54,6 +76,7 @@ class GatewayV3ContractTests(unittest.TestCase):
         cls.dispatcher = (ROOT / ".github/workflows/dispatch-local-ci.yml").read_text()
         cls.receiver = (ROOT / ".github/workflows/receive-local-ci-result.yml").read_text()
         cls.pages = (ROOT / ".github/workflows/backend-status-pages.yml").read_text()
+        cls.poller = (ROOT / "scripts/local_ci/poll_gitee_and_run.sh").read_text()
 
     def test_contract_v3_interface(self) -> None:
         self.assertEqual(workflow_dispatch_inputs(self.gateway), CONTRACT_INPUTS)
@@ -88,6 +111,94 @@ class GatewayV3ContractTests(unittest.TestCase):
         self.assertIn(
             "description_truncated:(($description|length)>8000)",
             self.dispatcher,
+        )
+
+    def test_dispatch_classifies_only_safe_documentation_changes_as_codex_only(
+        self,
+    ) -> None:
+        script = workflow_step_script(self.dispatcher, "Classify PR execution mode")
+        cases = (
+            ("docs/guide.md", False, "codex_only"),
+            ("README.md", False, "codex_only"),
+            ("README", False, "full"),
+            ("LICENSE", False, "full"),
+            ("NOTICE", False, "full"),
+            ("python/triton_anchor/example.py", False, "full"),
+            (".github/workflows/ci.yml", False, "full"),
+            (
+                "scripts/local_ci/codex_ai/prompts/codex_ai_success.md",
+                False,
+                "full",
+            ),
+            ("docs/example.md", True, "full"),
+        )
+        for path, rename_code, expected in cases:
+            with self.subTest(path=path, rename_code=rename_code):
+                with tempfile.TemporaryDirectory() as directory:
+                    repo = Path(directory)
+                    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+                    subprocess.run(
+                        ["git", "config", "user.name", "local-ci-test"],
+                        cwd=repo,
+                        check=True,
+                    )
+                    subprocess.run(
+                        [
+                            "git",
+                            "config",
+                            "user.email",
+                            "local-ci-test@example.invalid",
+                        ],
+                        cwd=repo,
+                        check=True,
+                    )
+                    (repo / "README.md").write_text("base\n", encoding="utf-8")
+                    source = repo / "python/triton_anchor/example.py"
+                    source.parent.mkdir(parents=True)
+                    source.write_text("VALUE = 1\n", encoding="utf-8")
+                    base_sha = commit(repo, "base")
+
+                    destination = repo / path
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if rename_code:
+                        source.rename(destination)
+                    else:
+                        destination.write_text("changed\n", encoding="utf-8")
+                    head_sha = commit(repo, "candidate")
+
+                    output = repo / "github-output"
+                    env = os.environ.copy()
+                    env.update(
+                        {
+                            "BASE_SHA": base_sha,
+                            "HEAD_SHA": head_sha,
+                            "GITHUB_OUTPUT": str(output),
+                        }
+                    )
+                    subprocess.run(
+                        ["bash", "-c", script], cwd=repo, env=env, check=True
+                    )
+                    self.assertEqual(
+                        output.read_text(encoding="utf-8").strip(),
+                        f"execution_mode={expected}",
+                    )
+
+    def test_codex_only_mode_skips_deterministic_ci_but_runs_codex_review(self) -> None:
+        self.assertIn('execution_mode="full"', self.poller)
+        self.assertIn(
+            "Skipping deterministic Local CI for documentation-only PR",
+            self.poller,
+        )
+        self.assertIn(
+            '"${execution_mode}" == "codex_only"',
+            self.poller,
+        )
+        self.assertIn("run_codex_ai_ci_for_run", self.poller)
+
+    def test_receiver_accepts_explicitly_skipped_stage_results(self) -> None:
+        self.assertIn(
+            'case "${status}" in pass|success|warning|skipped) exit 0 ;; esac',
+            self.receiver,
         )
 
     def test_external_fork_requires_live_maintainer_authorization(self) -> None:
