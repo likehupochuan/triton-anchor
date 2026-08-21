@@ -343,7 +343,7 @@ size_t linearize(ArrayRef<unsigned> multiDim, ArrayRef<unsigned> shape,
                  ArrayRef<unsigned> order);
 
 Value addStringToModule(Location loc, ConversionPatternRewriter &rewriter,
-                        StringRef key, StringRef content);
+                        StringRef key, StringRef content, unsigned addrSpace = 0);
 
 // Given an elemId which represents the index of an element from the list of
 // elements that are in the thread's registers (i.e. total of

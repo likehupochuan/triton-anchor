@@ -1972,6 +1972,9 @@ FANTWmmaEncodingAttr::getWMMARepForOperands(ArrayRef<int64_t> operandShape,
   if (elemType.isF16() || elemType.isBF16()) {
     if (opIdx ==0) operandTileShape[1] = 32;
     else operandTileShape[0] = 32;
+  } else if (elemType.isInteger(8)) {
+    if (opIdx ==0) operandTileShape[1] = 64;
+    else operandTileShape[0] = 64;
   }
 
   auto warpsPerCTA = getWarpsPerCTA();
