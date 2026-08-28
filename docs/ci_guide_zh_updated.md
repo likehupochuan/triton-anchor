@@ -1,8 +1,6 @@
-# triton-anchor CI 说明（重构更新版）
+# triton-anchor CI 说明（重构版）
 
 多分支 Gateway、Local CI 与 AI 辅助审查说明
-
-本文档在原重构版基础上补充版本 profile、Worker 健康监测、资源限制与本地保留治理；原文件 `docs/ci_guide_zh.md` 保留不变。
 
 ## 1. CI 现在做了哪些工作
 
@@ -170,9 +168,7 @@ Dispatcher 将以下信息写入 Gitee：
 
 #### 步骤 6：本地 poller 执行确定性 Local CI
 
-本地 poller 主动扫描允许的 `ci/*` ref，完成锁、去重、runner 快照和任务目录准备。它先从可信提交读取 `triton/cmake/llvm-hash.txt`，再从 `/home/localci/local_ci/profiles/<llvm-hash>.env` 选择服务器维护的版本 profile。未知 hash、缺失 profile、升级 PR 改变 hash 或 profile 配置不完整都会明确失败，不回退到其他 LLVM 或 Sophgo 环境。
-
-普通代码任务随后在选定 profile 的容器中按固定顺序执行：
+本地 poller 主动扫描允许的 `ci/*` ref，完成锁、去重、runner 快照和任务目录准备，并根据可信提交声明的 LLVM 版本标识选择本地服务器维护的版本 profile；无法匹配时明确失败。普通代码任务按固定顺序在选定容器中执行：
 
 ```text
 精确 checkout tested SHA
@@ -187,7 +183,7 @@ Dispatcher 将以下信息写入 Gitee：
   -> 生成 summary 和 result.json
 ```
 
-所有 profile 都要求前端 build 和前端 smoke。`RUN_BACKEND_STAGES=true` 时，后端 rebuild、后端 smoke/JIT、FlagGems 和性能阶段按既有 required 规则执行；frontend-only profile 将这些阶段统一记录为 `skipped`。docs-only PR 使用 `codex_only` 模式，不运行确定性构建，但仍生成本轮明确的 skipped 状态和 Codex advisory。
+所有 profile 都要求前端 build 和前端 smoke；后端阶段由 profile 的 `RUN_BACKEND_STAGES` 控制，frontend-only profile 将其记录为 `skipped`。docs-only PR 使用 `codex_only` 模式，不运行确定性构建。
 
 #### 步骤 7：Codex AI 进行补充审查
 
@@ -385,26 +381,25 @@ CI 需要同时防范以下风险：
 | full 任务手动触发 | 完整 FlagGems 和 full smoke 不作为每次 PR 的默认重型任务 |
 | sample 与 baseline 分层 | 常规 PR 运行 sample；性能 baseline 可复用并按 SHA/profile 隔离 |
 | metadata 长度限制 | PR title 最多 500 字符，description 最多 8000 字符，防止异常元数据无限膨胀 |
-| 总运行时间上限 | 普通任务默认 6 小时，`ci/full/*` 默认 48 小时，超时按基础设施错误结束 |
-| 输出与发布预算 | 限制单日志、单 artifact 文件、单任务 artifact 和单次 Gitee 发布大小 |
-| Codex 容器配额 | 临时容器设置 CPU、内存、swap 和 PID cgroup 上限 |
-| 本地保留策略 | 每日只在任务轮次之间清理过期 run、runner 快照、受管 artifact 和 Codex Docker 残留 |
-| 健康快照 | fail-open 记录 poller、活动任务、容器和存储事实，不改变 Local CI 门禁结果 |
 
-这些机制能够限制单任务资源和长期磁盘增长，并抑制重复执行、旧任务回写和未授权外部任务；当前 poller 仍保持全局串行。
+这些机制能够抑制重复执行、旧任务回写和未授权外部任务，但对“大量不同 PR 同时涌入”的场景，仍需要部署侧的容量控制。
 
-### 4.4 尚未实施的队列治理
+### 4.4 建议补强的队列和资源保护
 
-以下能力仍未成为 Gateway Contract 或本地调度协议：
+当前文档和流程中没有把全局队列上限、单用户速率限制和资源熔断定义为完整协议。生产部署建议补充以下措施，并将其作为后续 CI 治理工作：
 
 1. **限制并发数**：按后端 profile 设置本地最大并发，重型后端默认串行或小并发运行；
 2. **设置有界队列**：限制 pending 任务总数，超过上限时停止 dispatch 或返回明确的 `queued/throttled` 状态；
 3. **按 PR 合并任务**：同一 PR 只保留最新 tested SHA，旧 SHA 在进入容器前直接丢弃；
 4. **按账号和来源限流**：对外部贡献者、同一 fork 或同一时间窗口设置任务配额；
-5. **熔断和降级**：磁盘、Gitee、后端或结果发布异常时暂停接收新任务，保留 Basic CI 等 GitHub 快速检查；
-6. **保护手动重型入口**：`ci/full/*`、full smoke 和跨分支 fallback push 仅向维护者开放。
+5. **队列 TTL**：长时间未开始、PR 已关闭或 SHA 已过期的任务自动回收；
+6. **资源配额**：限制单任务 CPU、内存、磁盘、运行时间、日志大小和 artifact 大小；
+7. **熔断和降级**：磁盘、Gitee、后端或结果发布异常时暂停接收新任务，保留 Basic CI 等 GitHub 快速检查；
+8. **监控与告警**：监控队列长度、等待时间、失败率、磁盘、容器和 token 错误；
+9. **保留策略**：按时间和数量清理旧 workspace、runner 快照、日志和非关键 artifact；
+10. **保护手动重型入口**：`ci/full/*`、full smoke 和跨分支 fallback push 仅向维护者开放。
 
-队列 TTL、任务等待年龄、自动过期状态和按时间删除 task ref 明确不在当前实施范围。现有 PR 关闭、draft、force-push 取消和新鲜度校验保持不变。
+推荐的处理顺序是：先在 Router/dispatcher 处做授权和限流，再在 poller 处做有界队列、并发控制和过期回收，最后由容器运行时执行资源上限。只在本地服务器末端限流，仍会造成 Gitee task ref 和 GitHub receiver 的堆积。
 
 ### 4.5 安全配置检查表
 
@@ -469,12 +464,12 @@ runs/ci_full/ci_full_<branch>/<sha>/<run-id>/
 
 ### 5.4 Dashboard
 
-Dashboard 从 Gitee `local-ci-results` 同步最新有效结果，并由指定 Pages 来源分支部署。页面主要展示：
+Dashboard 从 Gitee `local-ci-results` 同步最新有效结果，从 Worker 健康状态仓库读取健康快照，并由指定 Pages 来源分支部署。页面主要展示：
 
 1. 最近一次手动 full FlagGems 算子结果；
 2. 指定分支的后端健康状态；
 3. 编译时间、Pass profile 和 IR serialization 摘要；
-4. Worker 心跳、活动任务、容器资源、目录大小及其占磁盘总量比例；
+4. 本地服务器上的 Worker 运行状态；
 5. 搜索、筛选、失败阶段查看和 CSV/Excel 导出。
 
 数据模式包括：
@@ -484,8 +479,6 @@ Dashboard 从 Gitee `local-ci-results` 同步最新有效结果，并由指定 P
 - `live`：full、后端状态和性能均来自实际 Local CI。
 
 只有 `LOCAL_CI_PAGES_BRANCH` 的 push 或 full 结果可以部署生产页面。跨分支 fallback push 不刷新 Dashboard。
-
-Worker 健康数据不经过 GitHub workflow 定时搬运。本地 health timer 将完整 `worker-health.json` 发布到公开仓库 `likehupochuan/triton-anchor-worker-health` 的 `race-org-localci` 分支，Dashboard 在页签打开时通过 Gitee Contents API 每五分钟读取一次。快照发布失败只导致页面显示未知或离线，不会影响任务执行和 GitHub status。
 
 ### 5.5 主要 workflow 和模块入口
 
@@ -532,20 +525,6 @@ GitHub 侧：
 ```bash
 cp scripts/local_ci/config.example.env /home/localci/local_ci/config.env
 ```
-
-RACE Worker 的关键部署值为：
-
-```bash
-GITEE_OWNER=race-org
-GITEE_RESULTS_OWNER=race-org
-LOCAL_CI_STATE_DIR=/home/localci/local_ci/local-ci-state
-LOCAL_CI_WORKSPACE_HOST=/home/localci/local_ci/workspace
-LOCAL_CI_PROFILE_DIR=/home/localci/local_ci/profiles
-GITEE_WORKER_HEALTH_REPO_URL=https://gitee.com/likehupochuan/triton-anchor-worker-health.git
-GITEE_WORKER_HEALTH_BRANCH=race-org-localci
-```
-
-每个已接受 LLVM hash 都必须有对应的 `<hash>.env` profile。普通/full 总时限、Codex cgroup、输出预算、保留天数和受管 artifact 根目录统一在同一 `config.env` 中配置；真实 token 不进入仓库。
 
 典型启动方式：
 
