@@ -434,7 +434,7 @@ size_t linearize(ArrayRef<unsigned> multiDim, ArrayRef<unsigned> shape,
 }
 
 Value addStringToModule(Location loc, ConversionPatternRewriter &rewriter,
-                        StringRef key, StringRef content) {
+                        StringRef key, StringRef content, unsigned addrSpace) {
   auto moduleOp = rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
   auto ctx = moduleOp.getContext();
   unsigned stringNumber = 0;
@@ -455,7 +455,7 @@ Value addStringToModule(Location loc, ConversionPatternRewriter &rewriter,
     global = rewriter.create<LLVM::GlobalOp>(
         UnknownLoc::get(ctx), globalType,
         /*isConstant=*/true, LLVM::Linkage::Internal, stringConstName,
-        rewriter.getStringAttr(contentStr));
+        rewriter.getStringAttr(contentStr), /*alignment=*/1, addrSpace);
   }
 
   Value zero = i32_val(0);
@@ -463,7 +463,7 @@ Value addStringToModule(Location loc, ConversionPatternRewriter &rewriter,
   Value globalPtr = rewriter.create<LLVM::AddressOfOp>(
       UnknownLoc::get(ctx), globalPtrType, global.getSymName());
   Value stringStart =
-      gep(ptr_ty(ctx), i8_ty, globalPtr, SmallVector<Value>({zero}));
+      gep(globalPtrType, i8_ty, globalPtr, SmallVector<Value>({zero}));
   return stringStart;
 }
 

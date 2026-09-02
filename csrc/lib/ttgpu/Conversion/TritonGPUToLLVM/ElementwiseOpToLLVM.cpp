@@ -744,6 +744,28 @@ protected:
   const TargetInfoBase &targetInfo;
 };
 
+struct FpToFpOpConversion
+    : ElementwiseOpConversionBase<triton::FpToFpOp, FpToFpOpConversion> {
+  using Base =
+      ElementwiseOpConversionBase<triton::FpToFpOp, FpToFpOpConversion>;
+  using Base::Base;
+  using Adaptor = typename Base::OpAdaptor;
+  SmallVector<Value> createDestOps(triton::FpToFpOp op, OpAdaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
+    auto srcElemTy =
+        this->getTypeConverter()->convertType(getElementType(op.getSrc()));
+    unsigned targetBits = elemTy.getIntOrFloatBitWidth();
+    unsigned sourceBits = srcElemTy.getIntOrFloatBitWidth();
+    if (targetBits == sourceBits)
+      return {operands[0][0]};
+    if (targetBits > sourceBits)
+      return {rewriter.create<LLVM::FPExtOp>(loc, elemTy, operands[0][0])};
+    return {rewriter.create<LLVM::FPTruncOp>(loc, elemTy, operands[0][0])};
+  }
+};
+
 } // namespace
 
 void mlir::triton::populateMinMaxFOpToLLVMPattern(
@@ -794,6 +816,7 @@ void mlir::triton::populateElementwiseOpToLLVMPatterns(
   POPULATE_UNARY_OP(math::PowFOp, math::PowFOp)
   POPULATE_UNARY_OP(math::TanhOp, math::TanhOp)
   POPULATE_UNARY_OP(math::TruncOp, math::TruncOp)
+  POPULATE_UNARY_OP(math::AbsFOp, math::AbsFOp)
 #undef POPULATE_UNARY_OP
 
 #define POPULATE_BINARY_OP(SRC_OP, DST_OP)                                     \
@@ -836,7 +859,10 @@ void mlir::triton::populateElementwiseOpToLLVMPatterns(
                                               benefit);
   patterns.add<ElementwiseInlineAsmOpConversion>(typeConverter, benefit);
   patterns.add<AbsIOpConversion>(typeConverter, axisInfoAnalysis, benefit);
-  patterns.add<AbsFOpConversion>(typeConverter, axisInfoAnalysis, benefit);
+  // math::AbsFOp is not processed here; it is handled in MathToFTVM to ensure
+  // that __ocml_fabs_bf16 works
+  // patterns.add<AbsFOpConversion>(typeConverter, axisInfoAnalysis, benefit);
   patterns.add<IndexCastOpLowering>(typeConverter, axisInfoAnalysis, benefit);
   patterns.add<SelectOpConversion>(typeConverter, axisInfoAnalysis, benefit);
+  patterns.add<FpToFpOpConversion>(typeConverter, axisInfoAnalysis, benefit);
 }

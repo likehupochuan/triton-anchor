@@ -1261,12 +1261,6 @@ void init_triton_ir(py::module &&m) {
              return self.create<ExperimentalDescriptorLoadOp>(
                  type, desc_ptr, indices, cacheModifier, evictionPolicy);
            })
-      .def("create_tma_load",
-           [](TritonOpBuilder &self, Value &desc_ptr, Type type,
-              bool isMatrixA) -> Value {
-             return self.create<TMALoadOp>(
-                 type, desc_ptr, isMatrixA);
-           })
       .def("create_descriptor_store",
            [](TritonOpBuilder &self, Value &desc_ptr, Value value,
               std::vector<Value> &indices) -> void {

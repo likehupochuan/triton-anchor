@@ -491,21 +491,18 @@ static bool supportFANTWMMAGranularity(Type a, int m, int n, int k) {
   if (a.isF32())
     return m % 16 == 0 && n % 16 == 0 && k % 16 == 0;
 
+  if (a.isInteger(8))
+    return m % 16 == 0 && n % 16 == 0 && k % 64 == 0;
+
   return false;
 }
 
 static bool supportWMMATypes(Type a, Type b, Type c, Type d) {
   if (a != b || c != d)
     return false;
-  auto aWidth = a.getIntOrFloatBitWidth();
-  auto cWidth = c.getIntOrFloatBitWidth();
-  if (a.isIntOrIndex()) {
-    if (!c.isIntOrIndex())
-      return false;
-    bool aValid = aWidth <= 8;
-    bool cValid = cWidth <= 32;
-    return aValid && cValid;
-  } else if (isa<FloatType>(a) && isa<FloatType>(c)) {
+  if (a.isInteger(8)) {
+    return c.isInteger(32);
+  } else if (isa<FloatType>(a)) {
     if (a.isBF16())
       return c.isBF16() || c.isF32();
     if (a.isF16())

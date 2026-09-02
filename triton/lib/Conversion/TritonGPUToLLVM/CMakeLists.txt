@@ -5,6 +5,7 @@ if(TTGPU)
     "${CMAKE_SOURCE_DIR}/csrc/lib/ttgpu/Conversion/TritonGPUToLLVM/TypeConverter.cpp"
     "${CMAKE_SOURCE_DIR}/csrc/lib/ttgpu/Conversion/TritonGPUToLLVM/Utility.cpp"
     "${CMAKE_SOURCE_DIR}/csrc/lib/ttgpu/Conversion/TritonGPUToLLVM/ElementwiseOpToLLVM.cpp"
+    "${CMAKE_SOURCE_DIR}/csrc/lib/ttgpu/Conversion/TritonGPUToLLVM/PrintOpToLLVM.cpp"
   )
 else()
   set(TRITON_GPU_LLVM_TTGPU 
@@ -13,6 +14,7 @@ else()
     TypeConverter.cpp
     Utility.cpp
     ElementwiseOpToLLVM.cpp
+    PrintOpToLLVM.cpp
   )
 endif()
 
@@ -36,7 +38,7 @@ add_triton_library(TritonGPUToLLVM
     FuncOpToLLVM.cpp
     SPMDOpToLLVM.cpp
     DecomposeUnsupportedConversions.cpp
-    PrintOpToLLVM.cpp
+    # PrintOpToLLVM.cpp
 
     DEPENDS
     TritonGPUConversionPassIncGen

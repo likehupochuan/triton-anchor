@@ -1138,25 +1138,6 @@ def TT_ExperimentalDescriptorLoadOp : TT_Op<"experimental_descriptor_load", [
     }];
 }
 
-def TT_TMALoadOp : TT_Op<"tma_load", [
-  MemoryEffects<[MemRead<GlobalMemory>]>]> {
-    let summary = "Load from gmem to register";
-    let description = [{
-      This operation will be lowered to TMA builtin func on targets supporting it.
-    }];
-    let arguments = (
-      ins
-      TT_PtrType:$desc_ptr,
-      DefaultValuedAttr<BoolAttr, "true">:$isMatrixA
-    );
-
-    let results = (outs TT_Type:$result);
-
-    let assemblyFormat = [{
-      $desc_ptr `[` $isMatrixA `]`
-      attr-dict `:` qualified(type($desc_ptr)) `->` type($result)
-    }];
-}
 
 def TT_ExperimentalDescriptorStoreOp : TT_Op<"experimental_descriptor_store", [
   MemoryEffects<[MemWrite<GlobalMemory>]>]> {
