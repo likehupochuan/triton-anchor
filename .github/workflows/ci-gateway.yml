@@ -1,5 +1,6 @@
 name: CI Gateway
-run-name: "CI v4 | ${{ inputs.mode || github.event_name }} | PR ${{ inputs.pr_number || github.event.pull_request.number || '0' }}"
+run-name: >-
+  CI v4 | ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'service' && 'service' || github.event_name == 'workflow_dispatch' && inputs.mode == 'run' && (inputs.action == 'closed' || inputs.action == 'converted_to_draft') && 'cancel' || github.event_name == 'workflow_dispatch' && inputs.mode == 'run' && 'run' || 'route' }} | ${{ (inputs.pr_number != '' && inputs.pr_number != '0' && format('PR {0}', inputs.pr_number)) || (github.event.pull_request.number && format('PR {0}', github.event.pull_request.number)) || (inputs.mode == 'service' && 'receiver') || format('branch {0}', inputs.source_branch || github.ref_name) }}
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, edited, closed, converted_to_draft, labeled, unlabeled]
