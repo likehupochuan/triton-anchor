@@ -11,6 +11,7 @@ Architecture:
   Layer 2.5 — AnchorIR Spec      (core invariant: dual-track dialect whitelist)
 """
 
+# Keep the public package version explicit for release and compatibility checks.
 __version__ = "0.1.3"
 
 from .hw_capability import (
