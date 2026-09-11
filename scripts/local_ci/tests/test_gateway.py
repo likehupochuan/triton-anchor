@@ -638,6 +638,120 @@ README only
         (directory / "artifacts/report.txt").write_text("ok")
         self.assertEqual(g.read_result(path, self.task, None)[0], result)
 
+    def test_receiver_finishes_as_soon_as_its_result_arrives(self):
+        control = self.store(g.CONTROL_BRANCH)
+        g.enqueue(self.task, self.gh, control, self.source)
+        results = self.store(g.RESULTS_BRANCH)
+        result = self.result()
+
+        def arrive(_seconds):
+            results.put(
+                {f"runs/{self.task['task_id']}/{result['run_id']}/result.json": result}
+            )
+
+        with patch.object(g.time, "sleep", side_effect=arrive) as sleep:
+            self.assertEqual(
+                g.receive_result(self.gh, str(self.remote), self.task["task_id"]),
+                "ready",
+            )
+        sleep.assert_called_once_with(g.RECEIVER_POLL_SECONDS)
+        self.assertIsNone(control.get(f"cancel/{self.task['task_id']}.json"))
+
+    def test_receiver_stops_immediately_when_task_is_obsolete(self):
+        control = self.store(g.CONTROL_BRANCH)
+        g.enqueue(self.task, self.gh, control, self.source)
+        self.gh.pull["head"]["sha"] = "e" * 40
+        with patch.object(g.time, "sleep") as sleep:
+            self.assertEqual(
+                g.receive_result(self.gh, str(self.remote), self.task["task_id"]),
+                "obsolete",
+            )
+        sleep.assert_not_called()
+
+    def test_receiver_continuations_are_bounded_and_keep_the_same_task(self):
+        control = self.store(g.CONTROL_BRANCH)
+        g.enqueue(self.task, self.gh, control, self.source)
+        before = git(control.root, "rev-parse", "HEAD")
+        request = self.gh.request
+        dispatched = []
+
+        def dispatch(path, method="GET", data=None):
+            if method == "POST":
+                self.assertEqual(path, "actions/workflows/ci-gateway.yml/dispatches")
+                dispatched.append(data)
+                return None
+            return request(path, method, data)
+
+        for round_number in range(1, g.RECEIVER_MAX_ROUNDS + 1):
+            elapsed = [0]
+
+            def advance(seconds):
+                elapsed[0] += seconds
+
+            with (
+                self.subTest(round_number=round_number),
+                patch.object(self.gh, "request", side_effect=dispatch),
+                patch.object(g, "RECEIVER_WAIT_SECONDS", 1),
+                patch.object(g.time, "monotonic", side_effect=lambda: elapsed[0]),
+                patch.object(g.time, "sleep", side_effect=advance),
+            ):
+                if round_number < g.RECEIVER_MAX_ROUNDS:
+                    self.assertEqual(
+                        g.receive_result(
+                            self.gh, str(self.remote), self.task["task_id"], round_number
+                        ),
+                        "continued",
+                    )
+                else:
+                    with self.assertRaisesRegex(ValueError, "timed out"):
+                        g.receive_result(
+                            self.gh, str(self.remote), self.task["task_id"], round_number
+                        )
+        self.assertEqual(
+            dispatched,
+            [
+                {"ref": "main", "inputs": {
+                    "mode": "receive", "task_id": self.task["task_id"],
+                    "receiver_round": str(round_number),
+                }}
+                for round_number in (2, 3)
+            ],
+        )
+        self.assertEqual(self.gh.statuses[-1][1], "error")
+        control.refresh()
+        self.assertEqual(git(control.root, "rev-parse", "HEAD"), before)
+        self.assertIsNone(control.get(f"cancel/{self.task['task_id']}.json"))
+
+    def test_receiver_retries_transient_transport_without_another_task(self):
+        control = self.store(g.CONTROL_BRANCH)
+        g.enqueue(self.task, self.gh, control, self.source)
+        results = self.store(g.RESULTS_BRANCH)
+        result = self.result()
+        results.put(
+            {f"runs/{self.task['task_id']}/{result['run_id']}/result.json": result}
+        )
+        before = git(control.root, "rev-parse", "HEAD")
+        store = g.GitStore
+        attempts = []
+
+        def connect(*args, **kwargs):
+            attempts.append(args)
+            if len(attempts) == 1:
+                raise OSError("temporary Gitee connection failure")
+            return store(*args, **kwargs)
+
+        with (
+            patch.object(g, "GitStore", side_effect=connect),
+            patch.object(g.time, "sleep") as sleep,
+        ):
+            self.assertEqual(
+                g.receive_result(self.gh, str(self.remote), self.task["task_id"]),
+                "ready",
+            )
+        sleep.assert_called_once_with(g.RECEIVER_POLL_SECONDS)
+        control.refresh()
+        self.assertEqual(git(control.root, "rev-parse", "HEAD"), before)
+
     def test_closed_pr_finishes_pending_checks_without_dispatched_task(self):
         gh = g.GitHub(g.REPOSITORY, token="fixture")
         writes = []
@@ -791,7 +905,7 @@ README only
 
 
 class WorkflowStructureTests(unittest.TestCase):
-    def test_workflow_gates_and_receiver_schedule(self):
+    def test_workflow_gates_and_task_driven_receiver(self):
         import yaml
 
         worker_text = (ROOT / ".github/workflows/ci-gateway.yml").read_text()
@@ -812,12 +926,28 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertEqual(jobs["review-card"]["permissions"]["statuses"], "write")
         self.assertNotIn("schedule", data["on"])
         self.assertIn("worker_revision_sha", data["on"]["workflow_dispatch"]["inputs"])
-        receiver = yaml.load(
-            (ROOT / ".github/workflows/ci-receiver.yml").read_text(),
-            Loader=yaml.BaseLoader,
+        self.assertFalse((ROOT / ".github/workflows/ci-receiver.yml").exists())
+        self.assertIn("receive", data["on"]["workflow_dispatch"]["inputs"]["mode"]["options"])
+        self.assertIn("inputs.mode == 'receive'", jobs["receive"]["if"])
+        self.assertGreater(
+            int(jobs["receive"]["timeout-minutes"]) * 60, g.RECEIVER_WAIT_SECONDS
         )
-        self.assertEqual(set(receiver["on"]), {"schedule", "workflow_dispatch"})
-        self.assertEqual(receiver["jobs"]["receive"]["timeout-minutes"], "10")
+        self.assertNotIn("environment", jobs["receive"])
+        self.assertEqual(jobs["publish"]["needs"], "receive")
+        self.assertIn("needs.receive.outputs.state == 'ready'", jobs["publish"]["if"])
+        self.assertEqual(jobs["publish"]["environment"], "github-pages")
+        self.assertEqual(jobs["publish"]["concurrency"]["cancel-in-progress"], "false")
+        self.assertIn("inputs.task_id", data["concurrency"]["group"])
+        self.assertIn("inputs.mode != 'receive'", data["concurrency"]["cancel-in-progress"])
+        enqueue_steps = jobs["enqueue"]["steps"]
+        dispatch = enqueue_steps[-1]
+        self.assertTrue(enqueue_steps[-2]["run"].endswith("gateway.py enqueue"))
+        self.assertNotIn("if", dispatch)
+        self.assertIn("mode: 'receive'", dispatch["with"]["script"])
+        self.assertEqual(dispatch["env"]["TASK_ID"], "${{ needs.prepare.outputs.task_id }}")
+        for step in jobs["publish"]["steps"]:
+            if "pages@" in step.get("uses", "") or "pages-artifact@" in step.get("uses", ""):
+                self.assertEqual(step["if"], "steps.dashboard.outputs.changed == 'true'")
         self.assertEqual(
             set(g.REQUIRED_CONTEXTS),
             {"local-ci/basic", "local-ci/api", "local-ci/security", "local-ci/summary"},

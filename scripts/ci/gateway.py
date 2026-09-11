@@ -29,6 +29,7 @@ from agent_ci.protocol import (
     PREINSTALLED_SUBMODULES,
     TASK_SCHEMA,
     RESULT_SCHEMA as RESULT_SCHEMA,
+    ID,
     IDENTITY_FIELDS,
     SHA,
     canonical,
@@ -46,6 +47,9 @@ RESULTS_BRANCH = "local-ci-results"
 REPOSITORY = os.getenv("GITHUB_REPOSITORY", "likehupochuan/triton-anchor")
 REPOSITORIES = {"likehupochuan/triton-anchor", "anteloper-c/triton-anchor"}
 MARKER = "<!-- triton-anchor-local-ci -->"
+RECEIVER_WAIT_SECONDS = 5 * 3600 + 40 * 60
+RECEIVER_POLL_SECONDS = 60
+RECEIVER_MAX_ROUNDS = 3
 
 CHECK_NAMES = {
     "basic": "local-ci/basic",
@@ -910,6 +914,91 @@ def read_result(path: Path, task: dict, results: GitStore) -> tuple[dict, str]:
     return result, hashlib.sha256(raw).hexdigest()
 
 
+def receive_result(
+    gh: GitHub, url: str, task_id: str, round_number: int = 1
+) -> str:
+    """Wait for one frozen task; only a bounded continuation creates another run."""
+    if not ID.fullmatch(task_id) or not 1 <= round_number <= RECEIVER_MAX_ROUNDS:
+        raise ValueError(
+            "Receiver requires a valid task_id and round between 1 and 3"
+        )
+    deadline = time.monotonic() + RECEIVER_WAIT_SECONDS
+    control = results = None
+    try:
+        while True:
+            try:
+                if control is None:
+                    control = GitStore(url, CONTROL_BRANCH)
+                else:
+                    control.refresh()
+                task = validate_task(control.get(f"tasks/{task_id}.json"))
+                if (
+                    task["task_id"] != task_id
+                    or task["repository"] != gh.repository
+                ):
+                    raise ValueError(
+                        "Receiver task identity does not match the request"
+                    )
+                if not current_task(gh, control, task):
+                    return "obsolete"
+                if results is None:
+                    results = GitStore(url, RESULTS_BRANCH)
+                else:
+                    results.refresh()
+                path = latest_result(task, results)
+                if path:
+                    read_result(path, task, results)
+                    return "ready"
+            except (OSError, RuntimeError) as error:
+                if (
+                    isinstance(error, GitHubAPIError)
+                    and error.code < 500
+                    and error.code != 429
+                ):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise ValueError(
+                        "Local CI receiver transport failed until the waiting deadline; "
+                        f"retry receive for task {task_id}. The server task was not cancelled."
+                    ) from None
+                print(
+                    f"Receiver transport unavailable ({type(error).__name__}); retrying"
+                )
+            else:
+                if time.monotonic() >= deadline:
+                    if round_number < RECEIVER_MAX_ROUNDS:
+                        gh.request(
+                            "actions/workflows/ci-gateway.yml/dispatches",
+                            "POST",
+                            {
+                                "ref": "main",
+                                "inputs": {
+                                    "mode": "receive",
+                                    "task_id": task_id,
+                                    "receiver_round": str(round_number + 1),
+                                },
+                            },
+                        )
+                        return "continued"
+                    gh.status(
+                        task,
+                        "error",
+                        "Local CI receiver timed out; retry receive without rebuilding",
+                    )
+                    raise ValueError(
+                        f"Local CI receiver timed out after {RECEIVER_MAX_ROUNDS} rounds; "
+                        f"retry receive for task {task_id}. The server task was not cancelled."
+                    )
+            time.sleep(
+                min(RECEIVER_POLL_SECONDS, max(0, deadline - time.monotonic()))
+            )
+    finally:
+        if results is not None:
+            results.close()
+        if control is not None:
+            control.close()
+
+
 def result_links(results: GitStore, path: Path, result: dict) -> tuple[str, dict]:
     base = results.url.removesuffix(".git").rstrip("/")
     if not base.startswith("https://gitee.com/"):
@@ -1124,6 +1213,7 @@ def main() -> int:
             "approval",
             "enqueue",
             "cancel",
+            "receive",
             "collect",
             "api",
             "security",
@@ -1131,6 +1221,10 @@ def main() -> int:
         ),
     )
     parser.add_argument("--task", type=Path, default=Path("task.json"))
+    parser.add_argument("--task-id", default=os.getenv("RECEIVER_TASK_ID", ""))
+    parser.add_argument(
+        "--round", type=int, default=int(os.getenv("RECEIVER_ROUND") or 1)
+    )
     parser.add_argument(
         "--repository", default=os.getenv("GITHUB_REPOSITORY", REPOSITORY)
     )
@@ -1265,6 +1359,9 @@ def main() -> int:
         raise ValueError(
             "Configure GITEE_RESULTS_REPO_URL with the actual HTTPS Gitee repository"
         )
+    if args.command == "receive":
+        output("receiver_state", receive_result(gh, url, args.task_id, args.round))
+        return 0
     control = GitStore(url, CONTROL_BRANCH)
     try:
         if args.command == "cancel":

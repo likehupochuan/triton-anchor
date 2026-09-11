@@ -1,5 +1,5 @@
 name: CI Gateway
-run-name: Local CI gateway | ${{ inputs.pr_number || github.event.pull_request.number || github.ref_name }}
+run-name: Local CI ${{ inputs.mode || 'request' }} | ${{ inputs.task_id || inputs.pr_number || github.event.pull_request.number || github.ref_name }}
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, edited, closed, converted_to_draft, labeled, unlabeled]
@@ -9,8 +9,10 @@ on:
     inputs:
       mode:
         type: choice
-        options: [request, run]
+        options: [request, run, receive]
         default: request
+      task_id: {type: string, default: ''}
+      receiver_round: {type: choice, options: ['1', '2', '3'], default: '1'}
       pr_number: {type: string, default: '0'}
       source_branch: {type: string, default: ''}
       requested_sha: {type: string, default: ''}
@@ -19,8 +21,8 @@ on:
       full: {type: boolean, default: false}
 permissions: {}
 concurrency:
-  group: local-ci-${{ inputs.mode || github.event_name }}-${{ inputs.pr_number != '0' && inputs.pr_number || github.event.pull_request.number || inputs.source_branch || github.ref_name }}
-  cancel-in-progress: true
+  group: ${{ inputs.mode == 'receive' && format('local-ci-receive-{0}', inputs.task_id) || format('local-ci-{0}-{1}', inputs.mode || github.event_name, inputs.pr_number != '0' && inputs.pr_number || github.event.pull_request.number || inputs.source_branch || github.ref_name) }}
+  cancel-in-progress: ${{ inputs.mode != 'receive' }}
 jobs:
   route:
     if: >-
@@ -93,6 +95,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {contents: read, pull-requests: write, statuses: write}
     outputs:
+      task_id: ${{ steps.task.outputs.task_id }}
       task_digest: ${{ steps.task.outputs.task_digest }}
       tested_sha: ${{ steps.task.outputs.tested_sha }}
       head_sha: ${{ steps.task.outputs.head_sha }}
@@ -193,7 +196,7 @@ jobs:
       always() && needs.review-card.outputs.eligible == 'true' &&
       (needs.prepare.outputs.external_fork != 'true' || needs.approve-external-fork.result == 'success')
     runs-on: ubuntu-latest
-    permissions: {contents: read, pull-requests: write, statuses: write, checks: write}
+    permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: write}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -220,10 +223,21 @@ jobs:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
         run: python3 trusted/scripts/ci/gateway.py enqueue
+      - name: Start the receiver for this published task
+        uses: actions/github-script@v7
+        env:
+          TASK_ID: ${{ needs.prepare.outputs.task_id }}
+        with:
+          retries: 3
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo, workflow_id: 'ci-gateway.yml', ref: 'main',
+              inputs: {mode: 'receive', task_id: process.env.TASK_ID, receiver_round: '1'}
+            });
   validate-worker:
     if: >-
       (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
-      github.event_name == 'workflow_dispatch' && inputs.mode != 'request'
+      github.event_name == 'workflow_dispatch' && inputs.mode == 'run'
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -233,3 +247,113 @@ jobs:
         run: |
           test "$GITHUB_REF_NAME" = local-ci-unified
           test "$GITHUB_SHA" = "$WORKER_SHA"
+
+  receive:
+    if: >-
+      (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
+      github.event_name == 'workflow_dispatch' && inputs.mode == 'receive'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions: {contents: read, pull-requests: read, statuses: write, actions: write}
+    outputs:
+      state: ${{ steps.wait.outputs.receiver_state }}
+      control_sha: ${{ steps.control.outputs.sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
+      RECEIVER_TASK_ID: ${{ inputs.task_id }}
+      RECEIVER_ROUND: ${{ inputs.receiver_round }}
+    steps:
+      - name: Resolve local-ci-unified control revision
+        id: control
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {data: branch} = await github.rest.repos.getBranch({...context.repo, branch: 'local-ci-unified'});
+            core.setOutput('sha', branch.commit.sha);
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.control.outputs.sha }}
+          persist-credentials: false
+          submodules: false
+      - name: Wait for this task or continue within the round limit
+        id: wait
+        run: python3 scripts/ci/gateway.py receive
+  publish:
+    needs: receive
+    if: needs.receive.outputs.state == 'ready'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: local-ci-publish
+      cancel-in-progress: false
+    environment: github-pages
+    permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: write, pages: write, id-token: write}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.receive.outputs.control_sha }}
+          persist-credentials: false
+          submodules: false
+      - name: Prepare business dashboard
+        run: |
+          mkdir -p _site
+          cp -R dashboard/. _site/
+      - name: Receive results and update PRs
+        id: collect
+        run: python3 scripts/ci/gateway.py collect
+      - name: Check whether dashboard content changed
+        id: dashboard
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const next = JSON.parse(fs.readFileSync('_site/data/tasks.json', 'utf8'));
+            let previous;
+            try {
+              const {data: page} = await github.rest.repos.getPages(context.repo);
+              const url = new URL('data/tasks.json', page.html_url);
+              url.searchParams.set('run', context.runId);
+              const response = await fetch(url, {headers: {'Cache-Control': 'no-cache'}});
+              if (response.status !== 404) {
+                if (!response.ok) throw new Error('Cannot read the published dashboard: HTTP ' + response.status);
+                previous = await response.json();
+              }
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            const content = data => JSON.stringify({schema: data?.schema, tasks: data?.tasks});
+            core.setOutput('changed', content(previous) !== content(next));
+      - uses: actions/configure-pages@v5
+        if: steps.dashboard.outputs.changed == 'true'
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.dashboard.outputs.changed == 'true'
+        with: {path: _site}
+      - uses: actions/deploy-pages@v4
+        if: steps.dashboard.outputs.changed == 'true'
+      - name: Surface incomplete receiver operations
+        if: steps.collect.outputs.receiver_errors != '0'
+        run: exit 1
+      - name: Retry incomplete publication within the receiver round limit
+        if: failure() && inputs.receiver_round != '3'
+        uses: actions/github-script@v7
+        env:
+          TASK_ID: ${{ inputs.task_id }}
+          RECEIVER_ROUND: ${{ inputs.receiver_round }}
+        with:
+          retries: 3
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo, workflow_id: 'ci-gateway.yml', ref: 'main',
+              inputs: {
+                mode: 'receive', task_id: process.env.TASK_ID,
+                receiver_round: String(Number(process.env.RECEIVER_ROUND) + 1)
+              }
+            });
