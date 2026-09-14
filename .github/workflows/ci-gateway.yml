@@ -1,5 +1,6 @@
 name: CI Gateway
-run-name: Local CI ${{ inputs.mode || 'request' }} | ${{ inputs.task_id || inputs.pr_number || github.event.pull_request.number || github.ref_name }}
+run-name: >-
+  ${{ inputs.run_title || (inputs.pr_number != '' && inputs.pr_number != '0' && format('PR #{0}', inputs.pr_number)) || (github.event.pull_request.number && format('PR #{0}', github.event.pull_request.number)) || (inputs.task_id && format('Task {0}', inputs.task_id)) || format('Branch {0}', inputs.source_branch || github.ref_name) }} | ${{ inputs.mode == 'run' && 'dispatch' || inputs.mode || 'request' }}${{ inputs.mode == 'receive' && format(' {0}', inputs.receiver_round) || '' }}
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, edited, closed, converted_to_draft, labeled, unlabeled]
@@ -19,12 +20,14 @@ on:
       worker_revision_sha: {type: string, default: ''}
       action: {type: string, default: ''}
       full: {type: boolean, default: false}
+      run_title: {type: string, default: '', description: 'Display identity passed between stages; normally leave empty'}
 permissions: {}
 concurrency:
   group: ${{ inputs.mode == 'receive' && format('local-ci-receive-{0}', inputs.task_id) || format('local-ci-{0}-{1}', inputs.mode || github.event_name, inputs.pr_number != '0' && inputs.pr_number || github.event.pull_request.number || inputs.source_branch || github.ref_name) }}
   cancel-in-progress: ${{ inputs.mode != 'receive' }}
 jobs:
   route:
+    name: Route CI request
     if: >-
       (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
       (github.event_name != 'workflow_dispatch' || inputs.mode == 'request')
@@ -56,19 +59,23 @@ jobs:
             const controlRef = 'local-ci-unified';
             const {data: release} = await github.rest.repos.getBranch({owner, repo, branch: controlRef});
             const revision = release.commit.sha;
+            const requestedSha = pull?.head.sha || process.env.INPUT_SHA || (context.eventName === 'push' ? context.sha : '');
+            const subject = pull ? `PR #${pull.number}` : `Branch ${branch}`;
+            const runTitle = requestedSha ? `${subject} | h:${requestedSha.slice(0, 7)}` : subject;
             await github.rest.actions.createWorkflowDispatch({
               owner, repo, workflow_id: 'ci-gateway.yml', ref: controlRef,
               inputs: {
                 mode: 'run',
                 pr_number: String(pull?.number || process.env.INPUT_PR || '0'),
                 source_branch: branch,
-                requested_sha: pull?.head.sha || process.env.INPUT_SHA || (context.eventName === 'push' ? context.sha : ''),
+                requested_sha: requestedSha, run_title: runTitle,
                 worker_revision_sha: revision, action: context.eventName === 'workflow_dispatch' ? 'manual' : context.payload.action || '',
                 full: process.env.INPUT_FULL || 'false'
               }
             });
 
   receive:
+    name: Receive local CI result
     if: >-
       (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
       github.event_name == 'workflow_dispatch' && inputs.mode == 'receive'
@@ -102,6 +109,7 @@ jobs:
         id: wait
         run: python3 scripts/ci/gateway.py receive
   publish:
+    name: Publish CI results
     needs: receive
     if: needs.receive.outputs.state == 'ready'
     runs-on: ubuntu-latest
@@ -164,6 +172,7 @@ jobs:
         env:
           TASK_ID: ${{ inputs.task_id }}
           RECEIVER_ROUND: ${{ inputs.receiver_round }}
+          RUN_TITLE: ${{ inputs.run_title }}
         with:
           retries: 3
           script: |
@@ -171,7 +180,8 @@ jobs:
               ...context.repo, workflow_id: 'ci-gateway.yml', ref: 'main',
               inputs: {
                 mode: 'receive', task_id: process.env.TASK_ID,
-                receiver_round: String(Number(process.env.RECEIVER_ROUND) + 1)
+                receiver_round: String(Number(process.env.RECEIVER_ROUND) + 1),
+                run_title: process.env.RUN_TITLE
               }
             });
   deploy-dashboard:
