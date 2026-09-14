@@ -81,7 +81,7 @@ GitHub 接收器只回写仍对应当前 PR 的结果。已关闭任务终止待
 
 ## 部署与验证
 
-填写实际镜像、路径、Gitee 与 Codex 配置后，以普通 CI 用户执行：
+填写实际镜像、路径、Gitee 与 Codex 配置后，已有控制 checkout 可直接运行正式安装器：
 
 ```bash
 python3 scripts/local_ci/prepare/install.py \
@@ -89,7 +89,7 @@ python3 scripts/local_ci/prepare/install.py \
   --credentials-env /absolute/path/credentials.env --apply
 ```
 
-安装入口准备环境并启动 Worker、控制仓更新和必要维护定时器；不需要工具服务或独立调度控制台。
+空服务器使用[服务器准备](prepare/README.md)中的独立引导脚本和经审核的精确控制提交 SHA 自动创建 checkout，再调用同一正式安装器。安装入口准备环境并启动 Worker、控制仓更新和必要维护定时器；不需要工具服务或独立调度控制台。
 详见 [服务器准备](prepare/README.md)、[维护](maintenance/README.md)
 与 [GitHub 配置](../ci/README.md)。网关自动解析控制分支提交；服务器每约五分钟从配置的 Gitee `control_anchor` 镜像仅快进更新干净 checkout，任务执行期间不会切换控制版本。
 
