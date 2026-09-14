@@ -18,7 +18,7 @@ LLVM、后端、环境脚本及产物目录。原生 shell 运行前按 context 
 使用对应任务 venv。容器内禁止用系统自带的 Python 执行构建、安装、测试或辅助脚本。
 `PYTHON_BIN`、`VIRTUAL_ENV` 和 PATH 已指向 candidate 的 CI venv，Bash 启动时会恢复该选择。
 原生命令优先使用 `"$PYTHON_BIN" -m pytest`、`"$PYTHON_BIN" -m pip`；不要使用
-`/usr/bin/python3`、`sudo pip` 或 `pip --user`。切换 base 时按 base-context 的 `python_bin`
+`/usr/bin/python3` 或 `pip --user`。切换 base 时按 base-context 的 `python_bin`
 同步设置 `PYTHON_BIN`、`VIRTUAL_ENV` 和 PATH。必要时检查 `sys.executable`、`sys.prefix`
 及关键依赖版本。基础工具会做自己的环境初始化，不会自动执行下一阶段。
 
