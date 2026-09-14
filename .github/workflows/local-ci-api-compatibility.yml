@@ -1,4 +1,4 @@
-name: Public API Compatibility
+name: Local CI / API Compatibility
 on:
   workflow_call:
     inputs:

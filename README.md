@@ -7,7 +7,7 @@
 <!-- badges -->
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
-  <a href="../../actions/workflows/ci_basic.yml"><img src="https://img.shields.io/badge/CI-GitHub_Actions-2088FF?logo=githubactions&logoColor=white" alt="CI"></a>
+  <a href="../../actions/workflows/ci-gateway.yml"><img src="https://img.shields.io/badge/CI-GitHub_Actions-2088FF?logo=githubactions&logoColor=white" alt="CI"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10%2B-3776ab.svg" alt="Python 3.9+"></a>
   <a href="ROADMAP.md"><img src="https://img.shields.io/badge/Status-v0.1-orange.svg" alt="Status"></a>
 </p>
@@ -320,7 +320,7 @@ triton-anchor/
 │   ├── tools/                   #   构建、安装、测试与性能工具入口
 │   └── tests/                   #   必要的 CI 行为回归
 ├── .github/                     # GitHub 配置
-│   ├── workflows/ci_basic.yml   #   基础 CI（lint + 单元测试）
+│   ├── workflows/               #   Local CI 编排、功能检查与维护任务
 │   └── ISSUE_TEMPLATE/          #   Issue 模板（Feature Request / Bug Report）
 ├── ROADMAP.md                   # 项目路线图
 ├── CMakeLists.txt               # CMake 顶层构建
@@ -495,7 +495,7 @@ pytest tests/ -v
 
 ### 9.3 CI
 
-项目已配置 [GitHub Actions Basic CI](.github/workflows/ci_basic.yml)，每次 push / PR 自动运行：
+项目已配置 [Local CI 编排工作流](.github/workflows/ci-gateway.yml)，在受支持的 push / PR 事件中调用按功能拆分的检查：
 
 | Job | 内容 | 矩阵 |
 |-----|------|------|

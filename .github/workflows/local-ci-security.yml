@@ -1,4 +1,4 @@
-name: Security Gate
+name: Local CI / Security
 on:
   workflow_call:
     inputs:

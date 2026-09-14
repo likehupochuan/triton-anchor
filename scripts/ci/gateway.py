@@ -37,6 +37,7 @@ from agent_ci.protocol import (
     digest,
     metadata_digest,
     is_legacy_task,
+    result_task_prefix,
     validate_task,
     validate_result,
     within,
@@ -959,7 +960,10 @@ def current_task(gh: GitHub, control: GitStore, task: dict) -> bool:
 
 
 def latest_result(task: dict, results: GitStore) -> Path | None:
-    paths = sorted((results.root / "runs" / task["task_id"]).glob("*/result.json"))
+    paths = sorted((results.root / result_task_prefix(task)).glob("*/result.json"))
+    if not paths:
+        # Read results published before the event/branch/PR directory migration.
+        paths = sorted((results.root / "runs" / task["task_id"]).glob("*/result.json"))
     return paths[-1] if paths else None
 
 

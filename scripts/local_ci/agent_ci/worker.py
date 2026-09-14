@@ -300,12 +300,19 @@ class Worker:
             self.heartbeat(runtime="disk_budget_exceeded")
             return
         self.relay.refresh()
+        waiting_revision = ""
         for task in self.relay.tasks():
             if self.stop_event.is_set():
                 break
             if is_legacy_task(task):
                 continue
             try:
+                current_revision = getattr(
+                    self.manager, "current_control_revision", lambda: None
+                )()
+                if current_revision and task.get("worker_revision_sha") != current_revision:
+                    waiting_revision = task.get("worker_revision_sha", "")
+                    continue
                 self.process(task)
                 if not any(
                     (self.state_dir / "runs" / task["task_id"]).glob("*/state.json")
@@ -322,7 +329,14 @@ class Worker:
                     task.get("task_id", "invalid"), "task_error", {"error": str(exc)}
                 )
                 self.heartbeat(error=str(exc))
-        self.heartbeat()
+        if waiting_revision:
+            self.heartbeat(
+                control_revision=current_revision,
+                requested_control_revision=waiting_revision,
+                control_update="required",
+            )
+        else:
+            self.heartbeat()
 
 
 def main(argv=None):
@@ -354,14 +368,18 @@ def main(argv=None):
 
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)
-        while not worker.stop_event.is_set():
-            try:
-                worker.scan()
-            except Exception as exc:
-                worker.heartbeat(error=str(exc))
-            if args.once:
-                break
-            worker.stop_event.wait(worker.config.get("poll_interval_seconds", 60))
+        with (worker.state_dir / "control.lock").open("w") as control_lock:
+            while not worker.stop_event.is_set():
+                fcntl.flock(control_lock, fcntl.LOCK_SH)
+                try:
+                    worker.scan()
+                except Exception as exc:
+                    worker.heartbeat(error=str(exc))
+                finally:
+                    fcntl.flock(control_lock, fcntl.LOCK_UN)
+                if args.once:
+                    break
+                worker.stop_event.wait(worker.config.get("poll_interval_seconds", 60))
     return 0
 
 

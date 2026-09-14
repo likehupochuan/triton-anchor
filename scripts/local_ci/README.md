@@ -7,7 +7,7 @@ Poller 负责准备对应环境、停止失效任务和交付结果。源码和�
 
 ```mermaid
 flowchart TD
-  A[GitHub：PR 校验 → Basic CI → API 兼容性 → Security Gate] --> B[approval review card → 按需人工审批]
+  A[GitHub：PR 校验 → Basic Checks → API Compatibility → Security] --> B[approval review card → 按需人工审批]
   B --> C[GitHub → Gitee：冻结被测提交、base/head 与 PR 信息，投递任务]
   C --> D[Local Poller：校验任务，准备 Triton / LLVM / 后端环境]
   D --> E[Codex：PR 信息校验，解析意图与影响范围]
@@ -69,8 +69,10 @@ state_dir/
 └── work/<task>/<run>/        # 临时任务目录，结束后清理
 ```
 
-状态仅区分准备、执行、待发布、已发布。结果与所选文件一次提交到 Gitee 的
-`runs/<task>/<run>/`，不使用 Release 附件或额外交付索引。单文件 2 MiB、总计 10 MiB、
+状态仅区分准备、执行、待发布、已发布。宿主机仍使用 `runs/<task>/<run>/` 保存私有状态；
+公开结果与所选文件按事件、目标分支和任务一次提交到 Gitee：PR 使用
+`runs/pr/branch-<目标分支>/pr-<PR号>/<task>/<run>/`，push/manual 使用
+`runs/push/branch-<目标分支>/<task>/<run>/`（分支名中的 `/` 会 URL 编码）。不使用 Release 附件或额外交付索引。单文件 2 MiB、总计 10 MiB、
 最多 20 文件，超出时保留本机并注明；本机完整日志默认保留 30 天。
 任务与结果格式只有固定名称，不带版本号；旧格式记录跳过，历史文件不会重新执行。
 
@@ -87,9 +89,9 @@ python3 scripts/local_ci/prepare/install.py \
   --credentials-env /absolute/path/credentials.env --apply
 ```
 
-安装入口准备环境并启动 Worker 与必要维护定时器；不需要工具服务或独立调度控制台。
+安装入口准备环境并启动 Worker、控制仓更新和必要维护定时器；不需要工具服务或独立调度控制台。
 详见 [服务器准备](prepare/README.md)、[维护](maintenance/README.md)
-与 [GitHub 配置](../ci/README.md)。网关自动解析控制分支提交，服务器部署对应干净版本。
+与 [GitHub 配置](../ci/README.md)。网关自动解析控制分支提交；服务器每约五分钟从配置的 Gitee `control_anchor` 镜像仅快进更新干净 checkout，任务执行期间不会切换控制版本。
 
 本地行为回归：
 

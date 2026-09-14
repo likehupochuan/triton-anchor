@@ -420,6 +420,10 @@ class EnvironmentManager:
             )
         return sha
 
+    def current_control_revision(self):
+        """Expose the installed revision so the Worker can await its updater."""
+        return self._control_revision()
+
     def _control_snapshot(self, revision):
         return snapshot_control(
             self.config["control_root"],

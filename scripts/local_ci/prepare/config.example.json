@@ -3,6 +3,8 @@
   "state_dir": "/home/SET_ACTUAL_CI_USER/.local/state/triton-anchor-local-ci",
   "control_root": "/opt/local-ci/control/triton-anchor",
   "container_control_root": "/opt/local-ci/control",
+  "control_repo_url": "https://gitee.com/SET_ACTUAL_ORG/control_anchor.git",
+  "control_branch": "local-ci-unified",
   "worker_id": "SET_ACTUAL_WORKER_ID",
   "gitee_repo_url": "",
   "gitee_username": "",

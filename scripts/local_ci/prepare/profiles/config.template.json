@@ -3,6 +3,8 @@
   "state_dir": "",
   "control_root": "",
   "container_control_root": "/opt/local-ci/control",
+  "control_repo_url": "",
+  "control_branch": "local-ci-unified",
   "worker_id": "",
   "gitee_repo_url": "",
   "gitee_username": "",

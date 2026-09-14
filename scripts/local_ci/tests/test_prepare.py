@@ -554,6 +554,8 @@ def test_rendered_worker_units_do_not_include_watchdog(tmp_path):
     assert not any("watchdog" in name for name in units)
     assert "triton-anchor-local-ci-health.timer" in units
     assert "triton-anchor-local-ci-retention.timer" in units
+    assert "triton-anchor-local-ci-control-update.timer" in units
+    assert "control_update.py" in units["triton-anchor-local-ci-control-update.service"]
 
 
 def test_install_failure_does_not_start_services(tmp_path):

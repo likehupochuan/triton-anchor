@@ -68,6 +68,7 @@ def render_units(
         f"Environment={quoted('DOCKER_HOST=' + runtime.get('endpoint', ''))}\nUnsetEnvironment=DOCKER_CONTEXT DOCKER_TLS_VERIFY DOCKER_CERT_PATH\n"
     )
     worker = f"{python} {quoted(str(root / 'agent_ci/worker.py'))} --config {quoted(str(config_path))}"
+    control_update = f"{python} {quoted(str(root / 'prepare/control_update.py'))} --config {quoted(str(config_path))} --apply"
     health = f"{python} {quoted(str(root / 'maintenance/health.py'))} --config {quoted(str(config_path))} --publish"
     retention = f"{python} {quoted(str(root / 'maintenance/retention.py'))} --config {quoted(str(config_path))} --apply"
     units = {
@@ -78,6 +79,10 @@ def render_units(
         + common
         + f"ExecStart={health}\nTimeoutStartSec=10min\n",
         "triton-anchor-local-ci-health.timer": "[Unit]\nDescription=Refresh Local CI health independently of poller\n\n[Timer]\nOnBootSec=1min\nOnUnitActiveSec=5min\nRandomizedDelaySec=15\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n",
+        "triton-anchor-local-ci-control-update.service": "[Unit]\nDescription=Fast-forward the Local CI control checkout from Gitee\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\n"
+        + common
+        + f"ExecStart={control_update}\nTimeoutStartSec=10min\n",
+        "triton-anchor-local-ci-control-update.timer": "[Unit]\nDescription=Keep the Local CI control checkout current\n\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=5min\nRandomizedDelaySec=30\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n",
     }
     units["triton-anchor-local-ci-retention.service"] = (
         "[Unit]\nDescription=Expire Local CI result evidence by upload age\n\n[Service]\nType=oneshot\n"

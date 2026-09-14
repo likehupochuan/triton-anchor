@@ -995,7 +995,11 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertIn("security", jobs["review-card"]["needs"])
         self.assertIn("review-card", jobs["approve-external-fork"]["needs"])
         self.assertIn("approve-external-fork", jobs["enqueue"]["needs"])
-        for name in ("ci_basic.yml", "api-compat.yml", "security-gate.yml"):
+        for name in (
+            "local-ci-basic-checks.yml",
+            "local-ci-api-compatibility.yml",
+            "local-ci-security.yml",
+        ):
             workflow = yaml.load(
                 (ROOT / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader
             )

@@ -144,7 +144,11 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
     services = []
     for name in config.get(
         "monitor_services",
-        ["triton-anchor-local-ci.service", "triton-anchor-local-ci-health.timer"],
+        [
+            "triton-anchor-local-ci.service",
+            "triton-anchor-local-ci-health.timer",
+            "triton-anchor-local-ci-control-update.timer",
+        ],
     ):
         if not isinstance(name, str) or not __import__("re").fullmatch(
             r"[A-Za-z0-9_.@-]+\.(service|timer)", name

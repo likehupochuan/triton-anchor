@@ -1,7 +1,7 @@
 # ──────────────────────────────────────────────────────────────
 # triton-anchor  Upstream Triton Watch
 # ──────────────────────────────────────────────────────────────
-name: Upstream Triton Watch
+name: Maintenance / Upstream Triton Watch
 
 on:
   schedule:

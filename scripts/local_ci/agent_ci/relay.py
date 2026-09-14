@@ -15,6 +15,7 @@ from .protocol import (
     PREINSTALLED_SUBMODULES,
     ContractError,
     current_key,
+    result_task_prefix,
     within,
     validate_result,
 )
@@ -357,7 +358,7 @@ class GitRelay:
         result = validate_result(json.loads(raw), task)
         if result["run_id"] != run_id:
             raise ContractError("Sealed result run differs from publication request")
-        prefix = f"runs/{task['task_id']}/{run_id}"
+        prefix = f"{result_task_prefix(task)}/{run_id}"
         files = {f"{prefix}/result.json": raw}
         total = 0
         for artifact in result["artifacts"]:

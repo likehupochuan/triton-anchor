@@ -20,6 +20,6 @@
 
 4. 先手工运行一次该流水线，确认能读取 `snapshot/<worker>/worker-health.json` 并能创建/关闭测试 Issue，再启用定时触发。源完全不可读时命令以非零状态退出，交由 Gitee Go 报告 watchdog 自身故障。
 
-结果和选择上传的文件保存在 Gitee 的 `runs/<task_id>/<run_id>/`。本地清理不改写远端结果。磁盘可用空间不足或结果存储超出配置预算时，Worker 暂停接收新任务。
+结果和选择上传的文件按事件与目标分支保存在 Gitee 的 `runs/pr/...` 或 `runs/push/...`，其中 PR 目录包含 `pr-<PR号>`。本地清理不改写远端结果。磁盘可用空间不足或结果存储超出配置预算时，Worker 暂停接收新任务。
 
 可单独运行 `python3 scripts/local_ci/maintenance/<入口>.py --config <配置>`。health 加 `--publish` 发布快照；watchdog 加 `--sync-issues` 同步 Issues；retention 默认预览，加 `--apply` 执行清理。各入口均支持 `--help`。

@@ -155,3 +155,35 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
     assert calls == 1 and uploads == 2
     assert worker.journal.task(task["task_id"])["phase"] == "published"
     assert worker.journal.task(task["task_id"])["run_id"] == row["run_id"]
+
+
+def test_task_waits_for_automatic_control_update(tmp_path):
+    task = manifest()
+
+    class Relay:
+        def refresh(self):
+            pass
+
+        def tasks(self):
+            return [task]
+
+    class Manager:
+        def generations(self):
+            return {}
+
+        def collect_retired(self):
+            pass
+
+        def current_control_revision(self):
+            return "f" * 40
+
+    worker = Worker(
+        {"state_dir": str(tmp_path), "simulation": True},
+        relay=Relay(),
+        manager=Manager(),
+        driver=object(),
+    )
+    worker.scan()
+    assert worker.journal.tasks() == []
+    health = json.loads((tmp_path / "health/worker.json").read_text())
+    assert health["control_update"] == "required"

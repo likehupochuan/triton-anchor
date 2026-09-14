@@ -7,7 +7,13 @@ from unittest.mock import patch
 import pytest
 
 from agent_ci.delivery import MAX_FILE_BYTES, seal_result
-from agent_ci.protocol import ContractError, TASK_SCHEMA, metadata_digest, task_id
+from agent_ci.protocol import (
+    ContractError,
+    TASK_SCHEMA,
+    metadata_digest,
+    result_task_prefix,
+    task_id,
+)
 from agent_ci.relay import GitRelay
 
 
@@ -141,10 +147,20 @@ def test_git_result_and_selected_file_commit_together_and_retry_is_idempotent(tm
     branch = relay.results_branch
     count = subprocess.check_output(["git", "rev-list", "--count", branch], cwd=remote).strip()
     assert count == b"1"
-    prefix = f"{branch}:runs/{task()['task_id']}/{result['run_id']}"
+    prefix = f"{branch}:{result_task_prefix(task())}/{result['run_id']}"
     published = json.loads(subprocess.check_output(["git", "show", prefix + "/result.json"], cwd=remote))
     assert published == result
     assert subprocess.check_output(["git", "show", prefix + "/artifacts/report.txt"], cwd=remote) == b"ok"
     (tmp_path / "sealed/artifacts/report.txt").write_text("changed")
     with pytest.raises(ContractError):
         relay.publish_result(task(), result["run_id"], tmp_path / "sealed")
+
+
+def test_result_directory_distinguishes_event_branch_and_pr_number():
+    pull_request = task()
+    pull_request["target_branch"] = "release/3.0"
+    assert result_task_prefix(pull_request).startswith(
+        "runs/pr/branch-release%2F3.0/pr-7/"
+    )
+    push = {**pull_request, "event_kind": "push", "pr_number": 0}
+    assert result_task_prefix(push).startswith("runs/push/branch-release%2F3.0/")

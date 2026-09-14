@@ -17,6 +17,7 @@ from pathlib import Path
 LOCAL_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(LOCAL_ROOT))
 from prepare.artifacts import NAME_RE, SHA_RE, safe_source
+from prepare.control_update import validate_control_source
 from prepare.runtime_probe import (
     runtime_status,
     probe_runtime,
@@ -116,6 +117,19 @@ def check_configuration(
         )
     source("gitee_repo_url", config.get("gitee_repo_url"))
     source("health_repo_url", config.get("health_repo_url"))
+    try:
+        validate_control_source(config.get("control_repo_url"))
+        check("control_repo_url", True, "Credential-free Gitee control mirror configured")
+    except (ValueError, RuntimeError) as exc:
+        check("control_repo_url", False, str(exc))
+    control_branch = config.get("control_branch", "local-ci-unified")
+    check(
+        "control_branch",
+        isinstance(control_branch, str)
+        and bool(control_branch)
+        and not re.search(r"[\x00-\x20~^:?*\\\[]", control_branch),
+        "Configure the trusted Gitee control branch; default is local-ci-unified",
+    )
     profiles = config.get("profiles", {})
     check(
         "profiles",

@@ -7,6 +7,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 TASK_SCHEMA = "triton-anchor-local-ci-task"
 RESULT_SCHEMA = "triton-anchor-local-ci"
@@ -64,6 +65,25 @@ def current_key(task: dict) -> str:
         else f"branch:{task['target_branch']}"
     )
     return hashlib.sha256(f"{task['repository']}:{subject}".encode()).hexdigest()
+
+
+def result_task_prefix(task: dict) -> str:
+    """Return the readable, traversal-safe Gitee directory for one task."""
+    branch = task.get("target_branch")
+    if not isinstance(branch, str) or not branch or any(
+        ord(character) < 32 or ord(character) == 127 for character in branch
+    ):
+        raise ContractError("Invalid result target branch")
+    encoded = quote(branch, safe="")
+    if len(encoded) > 180:
+        encoded = "sha256-" + hashlib.sha256(branch.encode()).hexdigest()
+    branch_directory = "branch-" + encoded
+    pr_number = task.get("pr_number")
+    if type(pr_number) is not int or pr_number < 0:
+        raise ContractError("Invalid result PR number")
+    if pr_number:
+        return f"runs/pr/{branch_directory}/pr-{pr_number}/{task['task_id']}"
+    return f"runs/push/{branch_directory}/{task['task_id']}"
 
 
 def is_legacy_task(task: dict) -> bool:
