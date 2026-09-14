@@ -12,7 +12,7 @@ python3 scripts/local_ci/prepare/install.py \
   --credentials-env /absolute/path/credentials.env --apply
 ```
 
-安装器读取私有 `KEY=value` 凭据文件，值含空格时使用引号；文件必须属于 CI 用户且权限为 600。所有 profile 使用顶层 `image` 指定的同一个镜像 digest，分支差异由只读依赖挂载和环境变量提供，不再构建派生镜像。安装器检查依赖与基础工具是否可用，实测 Rootless Docker 资源限制，然后安装并启动 Worker、health、watchdog、retention 用户服务和定时器。已有 units 会备份，可用 `--rollback <备份目录> --apply` 恢复。机器需要已有的 Rootless Docker 用户服务和持久用户会话。
+安装器读取私有 `KEY=value` 凭据文件，值含空格时使用引号；文件必须属于 CI 用户且权限为 600。所有 profile 使用顶层 `image` 指定的同一个镜像 digest，分支差异由只读依赖挂载和环境变量提供，不再构建派生镜像。安装器检查依赖与基础工具是否可用，实测 Rootless Docker 资源限制，然后安装并启动 Worker、health、retention 用户服务和定时器。watchdog 由 Gitee health 仓库的定时流水线执行；升级安装时会停用并删除旧的同机 watchdog units。已有 units 会备份，可用 `--rollback <备份目录> --apply` 恢复。机器需要已有的 Rootless Docker 用户服务和持久用户会话。
 
 不加 `--apply` 输出安装计划；`--render-dir <目录>` 保存 units。`preflight.py --config <配置> --configuration-only` 可单独检查配置；`--probe-runtime` 实测已准备环境。依赖更新时可运行 `rotate.py --config <配置> --profile <名称>`，登记并探测新的依赖环境，不构建镜像。环境准备不再执行完整 Wheel 构建、安装或 smoke；被测源码的验证在正式任务中完成，单独更新控制代码不会触发环境重校验。以上入口均支持 `--help`。
 

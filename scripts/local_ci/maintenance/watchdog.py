@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Same-host independent watchdog: public Gitee snapshot to Gitee observation."""
+"""External watchdog: public Gitee snapshots to Gitee incident Issues."""
 
 from __future__ import annotations
 import argparse
@@ -7,13 +7,15 @@ import base64
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from prepare.artifacts import atomic_json
-from maintenance.health import publish_snapshot, public_snapshot
+from maintenance.gitee_issues import GiteeIssueError, repository_coordinates, sync_issues
+from maintenance.health import public_snapshot
 
 SCHEMA = "triton-anchor-local-ci-watchdog"
 
@@ -39,7 +41,8 @@ def evaluate(
 ):
     now = now or datetime.now(timezone.utc)
     previous = previous or {"active": {}, "history": []}
-    observed, unknown, workers = {}, set(), []
+    unreadable = set(document.get("unreadable_workers", []))
+    observed, unknown, workers = {}, set(unreadable), []
     source_error = bool(document.get("source_error"))
     expected = document.get("expected_workers", [])
     if source_error:
@@ -86,7 +89,7 @@ def evaluate(
                 incident("task_no_progress")
     if not source_error:
         seen = {w["worker_id"] for w in workers}
-        for ident in set(expected) - seen:
+        for ident in set(expected) - seen - unreadable:
             unknown.add(ident)
             observed[ident + ":snapshot_stale"] = {
                 "key": ident + ":snapshot_stale",
@@ -111,78 +114,92 @@ def evaluate(
             active[key] = prior
         else:
             history.append({"at": at, "key": key, "transition": "recovered"})
+    source_state = "unknown" if source_error else "partial" if unreadable else "readable"
     return {
         "schema": SCHEMA,
         "updated_at": at,
-        "source_state": "unknown" if source_error else "readable",
+        "source_state": source_state,
+        "unreadable_workers": sorted(worker for worker in unreadable if worker),
+        "unknown_workers": sorted(worker for worker in unknown if worker),
         "active": active,
         "history": history[-100:],
         "worker_health": workers,
-        "healthy": not active and not source_error,
+        "healthy": not active and not unknown and not source_error,
     }
 
 
-def read_snapshot(config):
-    parsed = urllib.parse.urlparse(config["health_repo_url"])
+def configured_workers(config):
+    workers = config.get("health_workers")
+    if workers is None:
+        workers = [config.get("worker_id", "local-ci")]
     if (
-        parsed.scheme != "https"
-        or parsed.hostname != "gitee.com"
-        or parsed.username
-        or parsed.password
+        not isinstance(workers, list)
+        or not workers
+        or len(set(workers)) != len(workers)
+        or not all(isinstance(row, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", row) for row in workers)
     ):
-        raise ValueError("Watchdog reads a public HTTPS Gitee repository")
-    repo = parsed.path.removesuffix(".git").strip("/")
-    branch = "snapshot/" + config.get("worker_id", "local-ci")
-    url = (
-        "https://gitee.com/api/v5/repos/"
-        + repo
-        + "/contents/worker-health.json?"
-        + urllib.parse.urlencode({"ref": branch})
-    )
-    try:
-        with urllib.request.urlopen(url, timeout=30) as response:
-            value = json.load(response)
-        if value.get("encoding") == "base64":
-            value = json.loads(base64.b64decode(value["content"]))
-        return {
-            "workers": [value],
-            "expected_workers": [config.get("worker_id", "local-ci")],
-        }
-    except (OSError, ValueError):
-        return {
-            "source_error": True,
-            "expected_workers": [config.get("worker_id", "local-ci")],
-        }
+        raise ValueError("health_workers must be a non-empty list of unique safe worker IDs")
+    return workers
+
+
+def read_snapshot(config):
+    owner, name = repository_coordinates(config["health_repo_url"])
+    repo = owner + "/" + name
+    expected, workers, unreadable, missing = configured_workers(config), [], [], []
+    for worker_id in expected:
+        branch = "snapshot/" + worker_id
+        url = (
+            "https://gitee.com/api/v5/repos/"
+            + repo
+            + "/contents/worker-health.json?"
+            + urllib.parse.urlencode({"ref": branch})
+        )
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:
+                value = json.load(response)
+            if value.get("encoding") == "base64":
+                value = json.loads(base64.b64decode(value["content"]))
+            if value.get("schema") != "triton-anchor-worker-health":
+                raise ValueError("Unexpected worker health schema")
+            if value.get("worker_id") != worker_id:
+                raise ValueError("Worker health snapshot is on the wrong branch")
+            workers.append(value)
+        except urllib.error.HTTPError as exc:
+            (missing if exc.code == 404 else unreadable).append(worker_id)
+        except (OSError, ValueError):
+            unreadable.append(worker_id)
+    return {
+        "workers": workers,
+        "expected_workers": expected,
+        "unreadable_workers": unreadable,
+        "source_error": bool(unreadable) and not workers and not missing,
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--input")
-    parser.add_argument("--publish", action="store_true")
+    parser.add_argument("--sync-issues", action="store_true")
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text())
-    local = Path(config["state_dir"]) / "health/watchdog.json"
-    previous = json.loads(local.read_text()) if local.exists() else None
     document = (
         json.loads(Path(args.input).read_text())
         if args.input
         else read_snapshot(config)
     )
     state = evaluate(
-        document, previous, stale_seconds=config.get("health_stale_seconds", 1200)
+        document, stale_seconds=config.get("health_stale_seconds", 1200)
     )
-    atomic_json(local, state)
-    if args.publish:
-        try:
-            publish_snapshot(config, state, branch="watchdog", filename="watchdog.json")
-            local.with_name("watchdog-pending.json").unlink(missing_ok=True)
-        except (OSError, ValueError, RuntimeError):
-            atomic_json(local.with_name("watchdog-pending.json"), state)
-            raise
+    if args.sync_issues:
+        state["issue_sync"] = sync_issues(config, state)
     print(json.dumps(state, ensure_ascii=False, indent=2))
-    return 0
+    return 2 if state["unreadable_workers"] else 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, GiteeIssueError) as exc:
+        print(f"External Local CI watchdog failed: {exc}", file=sys.stderr)
+        raise SystemExit(1)
