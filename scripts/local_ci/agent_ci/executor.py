@@ -109,7 +109,7 @@ class DockerExecutor:
     def environment(self, variant="candidate"):
         root = Path("/task") / variant
         env = {str(k): str(v) for k, v in self.generation.get("env", {}).items()}
-        jobs = str(self.config.get("max_jobs", 8))
+        jobs = str(self.config.get("max_jobs", 12))
         env.update(
             ANCHOR_DIR=str(root / "checkout"),
             LOCAL_CI_TASK_ROOT=str(root),

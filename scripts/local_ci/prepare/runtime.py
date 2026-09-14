@@ -15,7 +15,6 @@ import shutil
 import signal
 import stat
 import subprocess
-import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -30,7 +29,6 @@ from .artifacts import (
     fingerprint,
     file_digest,
     safe_source,
-    extract_verified_archive,
 )
 from .dependency_mounts import (
     dependency_mounts,
@@ -95,6 +93,29 @@ def validate_branch_profiles(config):
                 "chains and profile overrides are forbidden"
             )
     return dict(mappings)
+
+
+def shared_image(config):
+    """Resolve one immutable runtime image for every branch/profile."""
+    images = {p["image"] for p in config.get("profiles", {}).values() if p.get("image")}
+    if config.get("image"):
+        images.add(config["image"])
+    if len(images) != 1 or not IMAGE_RE.fullmatch(next(iter(images), "")):
+        raise EnvironmentError("Configure one shared image digest; profile images must agree")
+    return next(iter(images))
+
+
+def validate_shared_profile(profile):
+    if profile.get("llvm", {}).get("mode") != "mount":
+        raise EnvironmentError("Shared image requires prebuilt LLVM in a versioned read-only mount")
+    if any(profile.get(k) for k in ("archives", "repositories", "prepare_commands")):
+        raise EnvironmentError(
+            "Move profile archives/repositories to versioned read-only mounts and "
+            "image preparation commands to the shared image recipe"
+        )
+
+
+IDLE_COMMAND = ["-c", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done"]
 
 
 class EnvironmentManager:
@@ -335,8 +356,8 @@ class EnvironmentManager:
             raise EnvironmentError(
                 "Trusted profile and exact LLVM revision are required"
             )
-        if not IMAGE_RE.fullmatch(profile.get("image", "")):
-            raise EnvironmentError("Foundation image must use an immutable digest")
+        profile["image"] = shared_image(self.config)
+        validate_shared_profile(profile)
         if profile.get("backend_enabled") and str(
             profile.get("triton_version", "")
         ).split(".")[:2] != ["3", "0"]:
@@ -352,9 +373,9 @@ class EnvironmentManager:
         if revision != profile["llvm_hash"]:
             if revision in llvm.get("revisions", {}):
                 llvm.update(llvm["revisions"][revision])
-            elif llvm.get("mode") != "source":
+            else:
                 raise EnvironmentError(
-                    "New LLVM requires a trusted archive or source recipe"
+                    "New LLVM requires a configured versioned read-only mount"
                 )
         llvm.pop("revisions", None)
         # Content is verified at deployment and image validation. Task startup
@@ -408,21 +429,15 @@ class EnvironmentManager:
         )
 
     def _recipe_digest(self, profile):
-        dependency_recipe = {
-            k: v
-            for k, v in profile.items()
+        # Dependency-environment identity, never a Docker build recipe.
+        recipe = {
+            k: v for k, v in profile.items()
             if k not in {"control_revision", "validation_commands", "daily_calendar"}
         }
-        builder = [
-            file_digest(Path(__file__).parent / name)
-            for name in ("Dockerfile", "image_prepare.py", "profiles/slim/enable_flaggems.py")
-        ]
-        return fingerprint([dependency_recipe, self.uids, self.gids, builder])
+        return fingerprint(["shared-image-mounted-v1", recipe, self.uids, self.gids])
 
     def _validation_digest(self, profile):
-        return fingerprint(
-            [profile["control_revision"], profile.get("validation_commands", {})]
-        )
+        return self._recipe_digest(profile)
 
     def _download(self, source, digest):
         safe_source(source, "Dependency")
@@ -450,124 +465,35 @@ class EnvironmentManager:
             temp.unlink(missing_ok=True)
         return target
 
-    def _checkout(self, source, sha, target):
-        safe_source(source, "Repository")
-        if not SHA_RE.fullmatch(sha):
-            raise EnvironmentError("Repository commit must be exact")
-        self._run(
-            [
-                "git",
-                "-c",
-                "core.hooksPath=/dev/null",
-                "clone",
-                "--no-checkout",
-                "--",
-                source,
-                str(target),
-            ]
-        )
-        self._run(
-            [
-                "git",
-                "-C",
-                str(target),
-                "-c",
-                "core.hooksPath=/dev/null",
-                "checkout",
-                "--detach",
-                sha,
-            ]
-        )
-        if (
-            self._run(["git", "-C", str(target), "rev-parse", "HEAD"]).decode().strip()
-            != sha
-        ):
-            raise EnvironmentError("Repository commit mismatch")
-
-    def _build_context(self, profile, root):
-        payload = root / "payload"
-        (payload / "deps").mkdir(parents=True)
-        llvm, sha = profile["llvm"], profile["requested_llvm_hash"]
-        if llvm["mode"] == "archive":
-            if llvm.get("commit") != sha:
-                raise EnvironmentError("LLVM archive provenance mismatch")
-            archive = self._download(
-                llvm.get("archive", llvm.get("url", "")), llvm.get("sha256", "")
-            )
-            extract_verified_archive(
-                archive,
-                payload / "deps" / ("llvm-" + sha),
-                llvm["sha256"],
-                llvm.get("strip_components", 1),
-            )
-        elif llvm["mode"] == "source":
-            target = payload / "deps/llvm-source"
-            self._checkout(llvm["repository"], sha, target)
-            for patch in llvm.get("patches", []):
-                path = Path(patch["path"])
-                if not path.is_absolute() or file_digest(path) != patch["sha256"]:
-                    raise EnvironmentError("LLVM patch checksum mismatch")
-                self._run(["git", "-C", str(target), "apply", "--check", str(path)])
-                self._run(["git", "-C", str(target), "apply", str(path)])
-        elif llvm["mode"] == "mount":
-            validate_mounted_llvm(profile, profile.get("mounts", []))
-        else:
-            raise EnvironmentError("LLVM mode must be archive, source or mount")
-        for entry in dependency_mounts(self.config, profile):
-            (payload / "deps" / Path(entry["target"]).name).mkdir()
-        for name, entry in profile.get("archives", {}).items():
-            if not NAME_RE.fullmatch(name):
-                raise EnvironmentError("Unsafe dependency name")
-            archive = self._download(
-                entry.get("archive", entry.get("url", "")), entry.get("sha256", "")
-            )
-            extract_verified_archive(
-                archive,
-                payload / "deps" / name,
-                entry["sha256"],
-                entry.get("strip_components", 1),
-            )
-        for name, entry in profile.get("repositories", {}).items():
-            if not NAME_RE.fullmatch(name) or name == "deps":
-                raise EnvironmentError("Unsafe repository directory")
-            self._checkout(entry["repository"], entry["commit"], payload / name)
-        shutil.copyfile(
-            Path(__file__).with_name("image_prepare.py"), root / "image_prepare.py"
-        )
-        shutil.copyfile(Path(__file__).with_name("Dockerfile"), root / "Dockerfile")
-        shutil.copyfile(
-            Path(__file__).parent / "profiles/slim/enable_flaggems.py",
-            payload / "enable_flaggems.py",
-        )
+    def _runtime_environment(self, profile):
         env, old = {}, profile.get("workspace_container", "/workspace")
         for key, value in profile.get("env", {}).items():
             if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key) or any(
-                x in key
-                for x in ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "CODEX_HOME")
+                x in key for x in ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "CODEX_HOME")
             ):
-                raise EnvironmentError("Credentials cannot enter image recipes")
+                raise EnvironmentError("Credentials cannot enter runtime profiles")
             env[key] = (
-                "/opt/local-ci/runtime" + value[len(old) :]
+                "/opt/local-ci/runtime" + value[len(old):]
                 if isinstance(value, str) and value.startswith(old + "/")
                 else str(value)
             )
+        sha = profile["requested_llvm_hash"]
         env.update(
-            WORKSPACE="/opt/local-ci/runtime",
+            WORKSPACE="/task",
             LLVM_BUILD_DIR="/opt/local-ci/runtime/deps/llvm-" + sha,
             LLVM_SYSPATH="/opt/local-ci/runtime/deps/llvm-" + sha,
             LOCAL_CI_LLVM_HASH=sha,
             LOCAL_CI_TRITON_VERSION=profile["triton_version"],
             RUN_BACKEND_STAGES="true" if profile.get("backend_enabled") else "false",
         )
-        atomic_json(
-            root / "image-recipe.json",
-            {
-                "llvm": profile["llvm"],
-                "env": env,
-                "build_jobs": profile.get("build_jobs", 8),
-                "prepare_commands": profile.get("prepare_commands", []),
-            },
-        )
+        if profile.get("backend_enabled"):
+            for key in ("BACKEND_PATH", "PPL_ROOT", "FLAGGEMS_CLONE_DIR"):
+                value = Path(env.get(key, "/missing"))
+                if not any(
+                    value == Path(m["target"]) or Path(m["target"]) in value.parents
+                    for m in profile.get("mounts", [])
+                ):
+                    raise EnvironmentError(key + " must be provided by a read-only dependency mount")
         return env
 
     def _stop_owned(self, ident, attempt=None, kind="task"):
@@ -588,25 +514,7 @@ class EnvironmentManager:
         return dict(verified=True, stopped=True, remaining=[])
 
     def _validate_image(self, ident, profile, env):
-        order = [
-            "environment",
-            "frontend_build",
-            "frontend_install",
-            "frontend_smoke",
-        ]
-        if profile.get("backend_enabled"):
-            order += ["backend_build", "backend_install", "backend_smoke"]
-        commands = profile.get("validation_commands", {})
-        if not set(order).issubset(commands) or any(
-            not isinstance(x, list)
-            or not x
-            or not all(isinstance(arg, str) and arg for arg in x)
-            or Path(x[0]).name in {"true", ":"}
-            for x in commands.values()
-        ):
-            raise EnvironmentError(
-                "Image release needs actual frontend/backend validation commands"
-            )
+        # Lightweight environment probe only: no Wheel build/install/smoke.
         control = self._control_snapshot(profile["control_revision"])
         container = (
             self._docker(
@@ -614,7 +522,9 @@ class EnvironmentManager:
                 "--name",
                 "local-ci-validate-" + uuid.uuid4().hex,
                 "--user",
-                "0:0",
+                f"{self.uids['task']}:{self.gids['task']}",
+                "--read-only", "--network", "none",
+                "--tmpfs", "/tmp:rw,nosuid,nodev,exec,mode=1777",
                 "--label",
                 "local-ci.owner=" + self.owner,
                 "--label",
@@ -624,7 +534,7 @@ class EnvironmentManager:
                 *mount_arguments(
                     dependency_mounts(self.config, profile, verify_content=True)
                 ),
-                ident,
+                "--entrypoint", "/bin/sh", ident, *IDLE_COMMAND,
             )
             .decode()
             .strip()
@@ -678,19 +588,20 @@ class EnvironmentManager:
                     )
                 else:
                     self._docker(*prefix, seed, "-I", "-c", "import torch,torch_tpu")
-            for check in [*order, *sorted(set(commands) - set(order))]:
-                self._docker(*prefix, *commands[check])
+            self._docker(*prefix, "test", "-d", env["LLVM_BUILD_DIR"] + "/include")
+            self._docker(*prefix, "test", "-d", env["LLVM_BUILD_DIR"] + "/lib")
             dependency_mounts(self.config, profile, verify_content=True)
             verify_snapshot(control)
             return dict(
                 control_revision=profile["control_revision"],
-                checks=sorted(commands),
+                checks=["environment"],
                 imports="verified",
                 ppl=bool(profile.get("backend_enabled")),
             )
         finally:
             self._stop_owned(container, kind="image-validation")
             self._docker("rm", container, cancellable=False)
+            self._validation_container = None
             self._validation_container = None
 
     def _foundation_reference(self, profile):
@@ -795,63 +706,38 @@ class EnvironmentManager:
             self._image_log = logs / (release + ".log")
             self._image_log.touch(mode=0o600)
             row["log_path"] = str(self._image_log)
-            with tempfile.TemporaryDirectory(
-                prefix="build-", dir=self.directory
-            ) as directory:
-                root = Path(directory)
-                try:
-                    env = self._build_context(profile, root)
-                    foundation = self._foundation_reference(profile)
-                    self._docker(
-                        "build",
-                        "--pull=false",
-                        "--iidfile",
-                        str(root / "image.id"),
-                        "--label",
-                        "local-ci.owner=" + self.owner,
-                        "--label",
-                        "local-ci.kind=image",
-                        "--build-arg",
-                        "BASE_IMAGE=" + foundation,
-                        str(root),
-                    )
-                    self._foundation_reference(profile)
-                    image_id = (root / "image.id").read_text().strip()
-                    if not IMAGE_RE.fullmatch(image_id):
-                        raise EnvironmentError(
-                            "Build produced no immutable image identity"
-                        )
-                    row.update(image_id=image_id, env=env, state="validating")
-                    self._save(state)
-                    proof = self._validate_image(image_id, profile, env)
+            try:
+                env = self._runtime_environment(profile)
+                foundation = self._foundation_reference(profile)
+                image_id = self._inspect(foundation, True).get("Id", "")
+                if not IMAGE_RE.fullmatch(image_id):
+                    raise EnvironmentError("Shared image has no immutable identity")
+                row.update(image_id=image_id, shared_image=True, env=env, state="validating")
+                self._save(state)
+                proof = self._validate_image(image_id, profile, env)
+                row.update(
+                    state="ready", validated=True, validated_at=utc_now(),
+                    validation=proof, validation_digest=self._validation_digest(profile),
+                    environment_fingerprint=fingerprint([digest, image_id]),
+                )
+                if llvm_hash == self.config["profiles"][target_branch]["llvm_hash"]:
+                    previous = state["active_images"].get(target_branch)
+                    if previous and previous != release:
+                        state.setdefault("previous_images", {})[target_branch] = previous
+                    state["active_images"][target_branch] = release
+                self._save(state, "environment_ready", release_id=release)
+                return copy.deepcopy(row)
+            except BaseException:
+                row["state"] = "failed"
+                if getattr(self, "_validation_container", None):
                     row.update(
-                        state="ready",
-                        validated=True,
-                        validated_at=utc_now(),
-                        validation=proof,
-                        validation_digest=self._validation_digest(profile),
-                        environment_fingerprint=fingerprint([digest, image_id]),
+                        validation_container_id=self._validation_container,
+                        validation_cleanup_confirmed=False,
                     )
-                    if llvm_hash == self.config["profiles"][target_branch]["llvm_hash"]:
-                        previous = state["active_images"].get(target_branch)
-                        if previous:
-                            state.setdefault("previous_images", {})[target_branch] = (
-                                previous
-                            )
-                        state["active_images"][target_branch] = release
-                    self._save(state, "image_ready", release_id=release)
-                    return copy.deepcopy(row)
-                except BaseException:
-                    row["state"] = "failed"
-                    if getattr(self, "_validation_container", None):
-                        row.update(
-                            validation_container_id=self._validation_container,
-                            validation_cleanup_confirmed=False,
-                        )
-                    self._save(state, "image_failed", release_id=release)
-                    raise
-                finally:
-                    self._image_log = None
+                self._save(state, "environment_failed", release_id=release)
+                raise
+            finally:
+                self._image_log = None
 
     def rotate(self, target_branch):
         return self.ensure_image(
@@ -915,10 +801,10 @@ class EnvironmentManager:
                     "Rollback requires a validated image with the current dependency recipe"
                 )
             info = self._inspect(row["image_id"], True)
-            if (
-                info.get("Config", {}).get("Labels", {}).get("local-ci.owner")
-                != self.owner
-            ):
+            if row.get("shared_image"):
+                if info.get("Id") != self._inspect(profile["image"], True).get("Id"):
+                    raise EnvironmentError("Rollback shared image differs from configured digest")
+            elif info.get("Config", {}).get("Labels", {}).get("local-ci.owner") != self.owner:
                 raise EnvironmentError("Rollback image ownership differs")
             self._revalidate_image(row, profile, state)
             previous = state["active_images"].get(target_branch)
@@ -1032,7 +918,7 @@ class EnvironmentManager:
                         + ",target=/task/artifacts",
                         *control_mount_arguments(control),
                         *mount_arguments(handle["dependency_mounts"]),
-                        image["image_id"],
+                        "--entrypoint", "/bin/sh", image["image_id"], *IDLE_COMMAND,
                     )
                     .decode()
                     .strip()
@@ -1456,7 +1342,7 @@ class EnvironmentManager:
                     or not row.get("image_id")
                 ):
                     continue
-                if not any(
+                if not row.get("shared_image") and not any(
                     other != ident and item.get("image_id") == row["image_id"]
                     for other, item in state["images"].items()
                 ):

@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 import pytest
 from prepare import runtime_probe as probe, install, container_fs as fs
-from prepare.runtime import EnvironmentManager, identities
+from prepare.runtime import EnvironmentManager, identities, shared_image, validate_shared_profile
+from prepare.artifacts import tree_digest
 from prepare.artifacts import EnvironmentError
 
 LOCAL = Path(__file__).resolve().parents[1]
@@ -228,6 +229,94 @@ def test_only_one_nonroot_execution_identity():
     ):
         with pytest.raises(EnvironmentError):
             identities(config)
+
+
+def test_shared_image_rejects_different_profile_images_and_legacy_layers():
+    image = "sha256:" + "a" * 64
+    assert shared_image({"image": image, "profiles": {"a": {}, "b": {}}}) == image
+    assert shared_image({"profiles": {"a": {"image": image}, "b": {"image": image}}}) == image
+    with pytest.raises(EnvironmentError, match="one shared image"):
+        shared_image({"image": image, "profiles": {"a": {"image": "sha256:" + "b" * 64}}})
+    for profile in ({"llvm": {"mode": "source"}},
+                    {"llvm": {"mode": "mount"}, "prepare_commands": [["pip", "install", "x"]]}):
+        with pytest.raises(EnvironmentError):
+            validate_shared_profile(profile)
+
+
+def test_profiles_use_same_image_without_build_or_control_sha_revalidation(tmp_path):
+    cfg = config(tmp_path)
+    cfg["image"] = "sha256:" + "a" * 64
+    deps = tmp_path / "deps"
+    deps.mkdir(mode=0o755)
+    cfg["dependency_root"] = str(deps)
+    cfg["profiles"] = {}
+    for branch, digit, version in (("branch-a", "b", "3.3"), ("branch-b", "c", "3.6")):
+        llvm = deps / ("llvm-" + digit * 40)
+        llvm.mkdir(mode=0o755)
+        (llvm / "include").mkdir(mode=0o755)
+        (llvm / "lib").mkdir(mode=0o755)
+        cfg["profiles"][branch] = {
+            "name": branch, "llvm_hash": digit * 40, "triton_version": version,
+            "llvm": {"mode": "mount", "commit": digit * 40},
+            "backend_enabled": False,
+            "env": {"PYTHON_VENV_ACTIVATE": "/opt/venv/bin/activate"},
+            "mounts": [{"source": str(llvm), "target": "/opt/local-ci/runtime/deps/" + llvm.name,
+                        "read_only": True, "sha256": tree_digest(llvm)}],
+            # Old full-Wheel commands must never be executed at task startup.
+            "validation_commands": {"frontend_build": ["must-not-build-wheel"]},
+        }
+    manager = EnvironmentManager(cfg, cfg["state_dir"])
+    with (
+        patch.object(manager, "_daemon", return_value="daemon"),
+        patch.object(manager, "_control_revision", return_value="d" * 40) as revision,
+        patch.object(manager, "_inspect", return_value={"Id": cfg["image"]}),
+        patch.object(manager, "_docker") as docker,
+        patch.object(manager, "_validate_image", return_value={"checks": ["environment"]}) as probe,
+    ):
+        a = manager.ensure_image("branch-a", "b" * 40)
+        b = manager.ensure_image("branch-b", "c" * 40)
+        assert a["image_id"] == b["image_id"] == cfg["image"]
+        assert a["environment_fingerprint"] != b["environment_fingerprint"]
+        revision.return_value = "e" * 40
+        again = manager.ensure_image("branch-a", "b" * 40)
+        assert again["image_release_id"] == a["image_release_id"]
+        assert probe.call_count == 2
+        docker.assert_not_called()
+        state = manager._load()
+        state["active_images"].clear()
+        for row in state["images"].values():
+            row["created_at"] = "2000-01-01T00:00:00Z"
+        manager._save(state)
+        assert len(manager.collect_retired()["removed"]) == 2
+        docker.assert_not_called()  # Retiring profiles never deletes the shared image.
+
+
+def test_runtime_probe_does_not_execute_wheel_validation_commands(tmp_path):
+    cfg = config(tmp_path)
+    manager = EnvironmentManager(cfg, cfg["state_dir"])
+    profile = {"control_revision": "a" * 40, "mounts": [], "backend_enabled": False,
+               "validation_commands": {"frontend_build": ["must-not-build-wheel"]}}
+    commands = []
+    def docker(*args, **kwargs):
+        commands.append(args)
+        return b"container" if args[0] == "create" else b""
+    with (
+        patch.object(manager, "_control_snapshot", return_value={}),
+        patch("prepare.runtime.control_mount_arguments", return_value=[]),
+        patch("prepare.runtime.verify_control_mount"),
+        patch("prepare.runtime.verify_snapshot"),
+        patch.object(manager, "_inspect", return_value={}),
+        patch.object(manager, "_stop_owned"),
+        patch.object(manager, "_docker", side_effect=docker),
+    ):
+        proof = manager._validate_image("sha256:" + "a" * 64, profile,
+                                        {"LLVM_BUILD_DIR": "/llvm", "SEED_PYTHON": "/opt/venv/bin/python"})
+    assert proof["checks"] == ["environment"]
+    assert all("must-not-build-wheel" not in command for command in commands)
+    assert all("validate_environment.py" not in " ".join(command) for command in commands)
+    create = commands[0]
+    assert create[create.index("--user") + 1] == "11001:11001"
+    assert create[create.index("--entrypoint") + 1] == "/bin/sh"
 
 
 def test_task_mounts_expose_only_work_and_artifacts(tmp_path):

@@ -27,6 +27,12 @@
 
 GitHub required checks 必须实际配置并查询验证：`local-ci/basic`、`local-ci/api`、`local-ci/security`、`local-ci/summary`。前三项是 PR head 上的 Check Runs，summary 是 commit status，避免同一名称同时对应两种门禁。跳过和取消的前置检查按失败门禁处理。PR 关闭或转为草稿时，尚在等待审批或执行的状态会结束为取消；网络失败只重试发布封存结果，不重新执行测试。
 
+冻结新任务后立即将 summary 置为 pending，并为本任务排队三个前置 checks。Check Run 按完整 task ID 更新，其他任务的记录保留为历史；已完成任务的前置检查重跑会创建新记录。接收、取消和异常收尾在回写前核对最新前置 checks 的任务身份，防止新任务尚未投递到 Gitee 时，旧结果覆盖新门禁。审批拒绝、前置检查或投递失败由 `finalize-preflight` 结束等待状态；已成功投递的任务继续由接收器负责 summary。
+
+部署此状态修复时，`main` 路由文件的 `receive` job 也须包含 `checks: read`，供接收器核对任务身份；`local-ci-unified` 中的 prepare/finalize 使用 `checks: write`，审批验证使用 `checks: read`。
+
+Actions 的 `route`、`enqueue`、`receive`、`publish` 成功只表示相应调度或传输完成，不能替代 `local-ci/summary` 的测试结论。前置 checks 成功与服务器 `infra_error` 可以同时出现。旧版 `local-ci/sophgo-cmodel` 等 commit status 会留在历史提交上；新流程不再写入它们，也不将历史错误改写为通过。仓库门禁应只要求上面的四个当前 context。
+
 结果保存在 `runs/<task_id>/<run_id>/result.json`，所选日志与报告位于同目录的 `artifacts/`；一次 Git 提交同时发布结果和文件。单文件最多 2 MiB，合计最多 10 MiB，最多 20 个文件。超预算文件保留在 CI 主机并在结果中说明，不分片。上传响应丢失后重试相同提交内容，不产生重复结果或重新运行 Agent。
 
 接收器不修改 Gitee 结果。旧版 schema 保留为历史，新任务使用无版本号的 `triton-anchor-local-ci-task` 与 `triton-anchor-local-ci`。最低必检、PR 信息和架构审查在主机封存时汇总；缺失检查、审查或声称通过却不存在的证据文件均不能产生通过结果。

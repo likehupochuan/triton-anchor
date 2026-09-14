@@ -79,6 +79,16 @@ def changed_files(repo: Path, base: str, tested: str) -> list[dict]:
 
 def category(path: str) -> str:
     p = path.lower()
+    name = Path(p).name
+    if name in {"agents.md", "skill.md", "ai_ci_program.md"}:
+        return "control"
+    if p.endswith((".md", ".rst")) or p in {"license", "notice"} or (
+        p.startswith(("docs/", "assets/"))
+        and p.endswith((".txt", ".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif"))
+    ):
+        return "docs"
+    if p in {".gitignore", ".editorconfig"}:
+        return "control"
     if p.endswith("llvm-hash.txt"):
         return "llvm"
     if p.endswith("cmakelists.txt") or p.endswith(".cmake"):
@@ -100,12 +110,6 @@ def category(path: str) -> str:
             "scripts/api_contract/",
         )
     ):
-        if p.startswith("scripts/local_ci/prepare/") and (
-            "/profiles/" in p
-            or Path(p).name
-            in {"runtime.py", "image_prepare.py", "dockerfile", "config.example.json"}
-        ):
-            return "environment"
         return "control"
     parts = p.split("/")
     if (
@@ -130,8 +134,6 @@ def category(path: str) -> str:
         or Path(p).name in {"pytest.ini", "tox.ini"}
     ):
         return "test"
-    if p.endswith(("agents.md", "skill.md", "ai_ci_program.md")):
-        return "control"
     if p.startswith("api_contract/"):
         return "interface"
     if p.startswith("scripts/api_contract/"):
@@ -140,6 +142,15 @@ def category(path: str) -> str:
         return "packaging"
     if "requirements" in p or p.endswith((".lock", ".env")):
         return "environment"
+    if p in {
+        "python/triton_anchor/anchor_ir.py",
+        "python/triton_anchor/hw_capability.py",
+        "python/triton_anchor/adapters/base.py",
+        "python/triton_anchor/adapters/registry.py",
+        "python/triton_anchor/extensions/base.py",
+        "python/triton_anchor/extensions/registry.py",
+    }:
+        return "interface"
     if p.startswith(
         (
             "csrc/",
@@ -164,9 +175,13 @@ def category(path: str) -> str:
 
 
 def closure(checks: set[str]) -> set[str]:
-    result = set(checks)
-    for check in list(checks):
-        result |= closure(set(dependencies(check)))
+    result = set()
+    pending = list(checks)
+    while pending:
+        check = pending.pop()
+        if check not in result:
+            result.add(check)
+            pending.extend(dependencies(check))
     return result
 
 
@@ -184,6 +199,7 @@ def minimum_checks(
     groups: set[str] = set()
     test_paths: list[str] = []
     deleted_test = False
+    classification_evidence = []
     for item in changes:
         if (
             not isinstance(item, dict)
@@ -202,6 +218,11 @@ def minimum_checks(
         }:
             item_groups.add("environment")
         groups |= item_groups
+        classification_evidence.append({
+            "path": item["path"],
+            "old_path": item.get("old_path", item["path"]),
+            "categories": sorted(item_groups),
+        })
         if "test" in item_groups:
             if item.get("status", "").startswith("D"):
                 deleted_test = True
@@ -217,8 +238,13 @@ def minimum_checks(
     if runtime_groups & {"frontend", "interface", "packaging"}:
         checks |= FRONTEND
         recommended |= {"backend_smoke", "flaggems"}
+    if "interface" in runtime_groups:
+        checks.add("backend_smoke")
     if "compiler" in runtime_groups:
         checks |= FRONTEND | {"backend_tests", "backend_smoke", "flaggems"}
+        recommended |= {"compile_time", "pass_profile", "ir_serialization"}
+    if runtime_groups & {"environment", "llvm"}:
+        checks |= FRONTEND | {"control_plane", "backend_tests", "backend_smoke", "flaggems"}
         recommended |= {"compile_time", "pass_profile", "ir_serialization"}
     if "test" in runtime_groups:
         if "tests/test_smoke.py" in test_paths:
@@ -233,11 +259,12 @@ def minimum_checks(
             for path in test_paths
             if Path(path).name.startswith("test_") and path.endswith(".py")
         ]
-        if selectable and len(selectable) == len(test_paths) and not deleted_test:
+        if (
+            selectable and len(selectable) == len(test_paths) and not deleted_test
+            and runtime_groups <= {"test", "control"}
+        ):
             required_parameters["frontend_tests"] = {"paths": sorted(set(selectable))}
-    full_scope = full or bool(
-        runtime_groups & {"environment", "llvm", "performance", "unknown"}
-    )
+    full_scope = full or "unknown" in runtime_groups
     if full_scope:
         checks |= set(TOOLS)
         if backend_enabled:
@@ -246,7 +273,7 @@ def minimum_checks(
 
     if full_scope:
         level = "full"
-    elif "compiler" in runtime_groups:
+    elif runtime_groups & {"compiler", "environment", "llvm"}:
         level = "core"
     elif runtime_groups & {"frontend", "interface", "packaging"}:
         level = "frontend"
@@ -263,6 +290,7 @@ def minimum_checks(
     available_recommended = recommended_with_dependencies - all_required - unavailable
     return {
         "categories": sorted(groups),
+        "classification_evidence": classification_evidence,
         "impact": {
             "level": level,
             "classification": "risk_assessed"

@@ -93,7 +93,7 @@ jobs:
     needs: cancel-obsolete
     if: ${{ inputs.action != 'closed' && inputs.action != 'converted_to_draft' }}
     runs-on: ubuntu-latest
-    permissions: {contents: read, pull-requests: write, statuses: write}
+    permissions: {contents: read, pull-requests: write, statuses: write, checks: write}
     outputs:
       task_id: ${{ steps.task.outputs.task_id }}
       task_digest: ${{ steps.task.outputs.task_digest }}
@@ -120,6 +120,7 @@ jobs:
           EVENT_KIND: ${{ inputs.action == 'manual' && 'manual' || 'push' }}
         run: python3 scripts/ci/gateway.py prepare
       - uses: actions/upload-artifact@v4
+        if: ${{ always() && steps.task.outputs.task_id != '' }}
         with: {name: local-ci-task, path: task.json}
       - name: Validate required PR information
         env:
@@ -174,7 +175,7 @@ jobs:
     if: ${{ needs.review-card.outputs.eligible == 'true' && needs.prepare.outputs.external_fork == 'true' }}
     environment: local-ci-fork-approval
     runs-on: ubuntu-latest
-    permissions: {contents: read, pull-requests: read, actions: read}
+    permissions: {contents: read, pull-requests: read, actions: read, checks: read}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -234,6 +235,25 @@ jobs:
               ...context.repo, workflow_id: 'ci-gateway.yml', ref: 'main',
               inputs: {mode: 'receive', task_id: process.env.TASK_ID, receiver_round: '1'}
             });
+  finalize-preflight:
+    needs: [prepare, basic, api, security, review-card, approve-external-fork, enqueue]
+    if: ${{ always() && needs.prepare.outputs.task_id != '' && needs.enqueue.result != 'success' }}
+    runs-on: ubuntu-latest
+    permissions: {contents: read, pull-requests: read, statuses: write, checks: write}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.worker_revision_sha }}
+          persist-credentials: false
+          submodules: false
+      - uses: actions/download-artifact@v4
+        with: {name: local-ci-task}
+      - name: Finish checks after failed or cancelled preflight and dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_TASK_DIGEST: ${{ needs.prepare.outputs.task_digest }}
+          STAGES: '{"prepare":"${{ needs.prepare.result }}","basic":"${{ needs.basic.result }}","api":"${{ needs.api.result }}","security":"${{ needs.security.result }}","approval":"${{ needs.approve-external-fork.result }}","enqueue":"${{ needs.enqueue.result }}"}'
+        run: python3 scripts/ci/gateway.py finalize
   validate-worker:
     if: >-
       (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
@@ -254,7 +274,7 @@ jobs:
       github.event_name == 'workflow_dispatch' && inputs.mode == 'receive'
     runs-on: ubuntu-latest
     timeout-minutes: 350
-    permissions: {contents: read, pull-requests: read, statuses: write, actions: write}
+    permissions: {contents: read, pull-requests: read, statuses: write, actions: write, checks: read}
     outputs:
       state: ${{ steps.wait.outputs.receiver_state }}
       control_sha: ${{ steps.control.outputs.sha }}

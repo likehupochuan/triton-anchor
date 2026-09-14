@@ -46,6 +46,40 @@ class PolicyTests(unittest.TestCase):
         self.assertNotIn("flaggems", without["required_checks"])
         self.assertNotIn("flaggems", without["required_parameters"])
 
+    def test_documentation_and_control_do_not_trigger_product_builds(self):
+        for path in ("scripts/local_ci/prepare/README.md", "triton/README.md", "LICENSE", "assets/design.svg"):
+            self.assertEqual(self.classify(path)["required_checks"], ["control_plane"])
+        selected = self.classify("scripts/local_ci/prepare/runtime.py")
+        self.assertIn("control_plane", selected["required_checks"])
+        self.assertNotIn("frontend_build", selected["required_checks"])
+
+    def test_interface_checks_frontend_and_backend_smoke_without_full_operators(self):
+        selected = self.classify("python/triton_anchor/hw_capability.py")
+        self.assertIn("frontend_tests", selected["required_checks"])
+        self.assertIn("backend_smoke", selected["required_checks"])
+        self.assertNotIn("backend_tests", selected["required_checks"])
+        self.assertNotIn("flaggems", selected["required_checks"])
+
+    def test_llvm_changes_keep_correctness_and_recommend_performance(self):
+        selected = self.classify("triton/cmake/llvm-hash.txt")
+        self.assertIn("backend_tests", selected["required_checks"])
+        self.assertIn("flaggems", selected["required_checks"])
+        self.assertNotIn("compile_time", selected["required_checks"])
+        self.assertIn("compile_time", selected["recommended_checks"])
+        self.assertNotIn("flaggems", selected["required_parameters"])
+        self.assertEqual(selected["classification_evidence"][0]["categories"], ["llvm"])
+
+    def test_mixed_product_and_test_changes_do_not_narrow_product_suite(self):
+        selected = self.classify("python/triton_anchor/pipeline.py", "python/triton_anchor/tests/test_ir.py")
+        self.assertNotIn("frontend_tests", selected["required_parameters"])
+
+    def test_closure_visits_each_dependency_once(self):
+        from unittest.mock import patch
+        with patch.object(policy, "dependencies", wraps=policy.dependencies) as dependencies:
+            result = policy.closure(set(runner.TOOL_IDS))
+        self.assertEqual(result, set(runner.TOOL_IDS))
+        self.assertEqual(dependencies.call_count, len(runner.TOOL_IDS))
+
     def test_docs_are_lightweight_and_mixed_changes_union(self):
         self.assertEqual(
             self.classify("README.md")["required_checks"], ["control_plane"]

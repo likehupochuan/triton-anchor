@@ -23,7 +23,7 @@ from prepare.runtime_probe import (
     validate_runtime_config,
 )
 from prepare.dependency_mounts import dependency_mounts, validate_mounted_llvm
-from prepare.runtime import validate_branch_profiles
+from prepare.runtime import validate_branch_profiles, shared_image, validate_shared_profile
 
 
 def check_configuration(
@@ -63,8 +63,8 @@ def check_configuration(
     )
     check(
         "max_jobs",
-        type(config.get("max_jobs", 8)) is int and config.get("max_jobs", 8) > 0,
-        "Build parallelism defaults to 8 jobs and must be a positive integer",
+        type(config.get("max_jobs", 12)) is int and 1 <= config.get("max_jobs", 12) <= 64,
+        "Build parallelism defaults to 12 jobs and must be an integer in [1, 64]",
     )
     try:
         validate_runtime_config(config)
@@ -132,6 +132,11 @@ def check_configuration(
     except RuntimeError as exc:
         check("branch_profiles", False, str(exc))
     names = set()
+    try:
+        shared_image(config)
+        check("shared_image", True, "All branches use one immutable runtime image")
+    except RuntimeError as exc:
+        check("shared_image", False, str(exc))
     for branch, profile in profiles.items():
         prefix = f"profile:{branch}"
         name = profile.get("name", branch.replace("/", "-"))
@@ -153,7 +158,7 @@ def check_configuration(
             isinstance(backend, bool) and backend == triton_30,
             "Triton 3.0 must enable backend capability; other current versions must disable it",
         )
-        image = profile.get("image")
+        image = config.get("image") or profile.get("image")
         check(
             prefix + ":image",
             isinstance(image, str)
@@ -165,12 +170,11 @@ def check_configuration(
             "execution_user" not in profile and "existing_container" not in profile,
             "Task-container mode cannot adopt a persistent container or use the old shared execution_user",
         )
-        root = profile.get("workspace_root")
-        check(
-            prefix + ":workspace_root",
-            isinstance(root, str) and Path(root).is_absolute() and root != "/",
-            "Use an absolute logical source root for the trusted image recipe; this is not a persistent task workspace",
-        )
+        try:
+            validate_shared_profile(profile)
+            check(prefix + ":shared_profile", True, "Dependencies are supplied by read-only mounts")
+        except RuntimeError as exc:
+            check(prefix + ":shared_profile", False, str(exc))
         env = profile.get("env", {})
         seed = env.get("SEED_PYTHON") or env.get("PYTHON_VENV_ACTIVATE")
         check(
@@ -182,8 +186,8 @@ def check_configuration(
         mode = llvm.get("mode")
         check(
             prefix + ":llvm_mode",
-            mode in {"source", "archive", "mount"},
-            "LLVM requires an archive, source or verified read-only mount recipe",
+            mode == "mount",
+            "Prebuild LLVM and configure its versioned read-only mount",
         )
         try:
             mounts = dependency_mounts(config, profile, verify_content=True)
@@ -209,14 +213,7 @@ def check_configuration(
             )
         elif mode == "source":
             source(prefix + ":llvm_source", llvm.get("repository"))
-        required = {
-            "environment",
-            "frontend_build",
-            "frontend_install",
-            "frontend_smoke",
-        }
         if backend:
-            required.update({"backend_build", "backend_install", "backend_smoke"})
             backend_required = (
                 "BACKEND_PATH",
                 "BACKEND_PROFILE",
@@ -236,27 +233,15 @@ def check_configuration(
             )
             backend_path = Path(env.get("BACKEND_PATH") or ".")
             workspace_path = Path(profile.get("workspace_container", "/workspace"))
+            runtime_path = Path("/opt/local-ci/runtime/deps")
             check(
                 prefix + ":backend_workspace",
                 backend_path.is_absolute()
                 and backend_path != workspace_path
-                and backend_path.is_relative_to(workspace_path)
+                and (backend_path.is_relative_to(workspace_path) or backend_path.is_relative_to(runtime_path))
                 and ".." not in backend_path.parts,
-                "Backend source must be inside the image recipe logical container root for task-private copies",
+                "Backend source must refer to a read-only dependency for task-private copies",
             )
-        validations = profile.get("validation_commands", {})
-        check(
-            prefix + ":image_validation",
-            isinstance(validations, dict)
-            and required.issubset(validations)
-            and all(
-                isinstance(command, list)
-                and command
-                and all(isinstance(arg, str) for arg in command)
-                for command in validations.values()
-            ),
-            "Trusted image candidates must run required validation commands before promotion",
-        )
         env = profile.get("env", {})
         check(
             prefix + ":credential_boundary",

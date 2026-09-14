@@ -39,7 +39,7 @@
   "task_workspace_max_bytes": 107374182400,
   "cleanup_timeout_seconds": 60,
   "management_timeout_seconds": 600,
-  "max_jobs": 8,
+  "max_jobs": 12,
   "generation_retention_hours": 72,
   "minimum_free_bytes": 10737418240,
   "profiles": {
@@ -48,95 +48,105 @@
       "triton_version": "3.0",
       "llvm_hash": "10dc3a8e916d73291269e5e2b82dd22681489aa1",
       "backend_enabled": true,
-      "image": "",
-      "workspace_root": "/opt/local-ci/environments/triton-3.0",
       "workspace_container": "/workspace",
-      "build_jobs": 8,
       "llvm": {
-        "mode": "source",
-        "repository": "",
-        "patches": [],
-        "cmake_args": [
-          "-G",
-          "Ninja",
-          "-DCMAKE_BUILD_TYPE=Release",
-          "-DLLVM_ENABLE_ASSERTIONS=ON",
-          "-DLLVM_ENABLE_PROJECTS=mlir;clang;lld",
-          "-DLLVM_TARGETS_TO_BUILD=host;NVPTX;AMDGPU"
-        ]
+        "mode": "mount",
+        "commit": "10dc3a8e916d73291269e5e2b82dd22681489aa1"
       },
       "env": {
         "PYTHON_VENV_ACTIVATE": "/opt/venv/bin/activate",
         "BACKEND_PROFILE": "",
-        "BACKEND_PATH": "",
+        "BACKEND_PATH": "/opt/local-ci/runtime/deps/backend",
         "BACKEND_WHEEL_PATTERN": "",
         "BACKEND_ENVSETUP": "",
         "BACKEND_ENVSETUP_ARGS": "",
         "BACKEND_TEST_COMMAND": "",
         "EXPECTED_TRITON_BACKEND": "",
-        "PPL_ROOT": "",
-        "FLAGGEMS_CLONE_DIR": "",
-        "MAX_JOBS": "8",
+        "PPL_ROOT": "/opt/local-ci/runtime/deps/ppl",
+        "FLAGGEMS_CLONE_DIR": "/opt/local-ci/runtime/deps/flaggems",
+        "MAX_JOBS": "12",
         "BACKEND_TEST_PATHS": "tests"
       },
-      "repositories": {},
-      "mounts": [],
-      "devices": [],
-      "prepare_commands": [],
-      "validation_commands": {
-        "backend_install": [
-          "python3",
-          "/opt/local-ci/control/scripts/local_ci/prepare/validate_environment.py",
-          "backend_install"
-        ]
-      }
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-10dc3a8e916d73291269e5e2b82dd22681489aa1",
+          "read_only": true,
+          "sha256": ""
+        },
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/backend",
+          "read_only": true,
+          "sha256": ""
+        },
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/ppl",
+          "read_only": true,
+          "sha256": ""
+        },
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/flaggems",
+          "read_only": true,
+          "sha256": ""
+        }
+      ],
+      "devices": []
     },
     "triton_v3.3": {
       "name": "triton-3.3",
       "triton_version": "3.3",
       "llvm_hash": "a66376b0dc3b2ea8a84fda26faca287980986f78",
       "backend_enabled": false,
-      "image": "",
-      "workspace_root": "/opt/local-ci/environments/triton-3.3",
       "workspace_container": "/workspace",
-      "build_jobs": 8,
       "llvm": {
-        "mode": "source",
-        "repository": ""
+        "mode": "mount",
+        "commit": "a66376b0dc3b2ea8a84fda26faca287980986f78"
       },
       "env": {
         "PYTHON_VENV_ACTIVATE": "/opt/venv/bin/activate",
-        "MAX_JOBS": "8"
+        "MAX_JOBS": "12"
       },
-      "repositories": {},
-      "prepare_commands": [],
-      "validation_commands": {}
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-a66376b0dc3b2ea8a84fda26faca287980986f78",
+          "read_only": true,
+          "sha256": ""
+        }
+      ]
     },
     "triton_v3.6": {
       "name": "triton-3.6",
       "triton_version": "3.6",
       "llvm_hash": "a992f29451b9e140424f35ac5e20177db4afbdc0",
       "backend_enabled": false,
-      "image": "",
-      "workspace_root": "/opt/local-ci/environments/triton-3.6",
       "workspace_container": "/workspace",
-      "build_jobs": 8,
       "llvm": {
-        "mode": "source",
-        "repository": ""
+        "mode": "mount",
+        "commit": "a992f29451b9e140424f35ac5e20177db4afbdc0"
       },
       "env": {
         "PYTHON_VENV_ACTIVATE": "/opt/venv/bin/activate",
-        "MAX_JOBS": "8"
+        "MAX_JOBS": "12"
       },
-      "repositories": {},
-      "prepare_commands": [],
-      "validation_commands": {}
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-a992f29451b9e140424f35ac5e20177db4afbdc0",
+          "read_only": true,
+          "sha256": ""
+        }
+      ]
     }
   },
   "branch_profiles": {
     "CI_dev": "triton_v3.0"
   },
   "health_stale_seconds": 1200,
-  "evidence_max_bytes": 107374182400
+  "evidence_max_bytes": 107374182400,
+  "image": "",
+  "dependency_root": ""
 }

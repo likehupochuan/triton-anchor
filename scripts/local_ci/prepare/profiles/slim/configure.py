@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from prepare.artifacts import tree_digest
 from prepare.dependency_mounts import dependency_mounts
+from prepare.runtime import shared_image, validate_shared_profile
 
 
 def main():
@@ -19,6 +20,7 @@ def main():
     parser.add_argument("--config", required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--flaggems-source", required=True)
+    parser.add_argument("--flaggems-commit", required=True)
     args = parser.parse_args()
     if os.getuid() == 0:
         raise ValueError("Run as the ordinary CI user")
@@ -27,7 +29,7 @@ def main():
     config = json.loads(path.read_text())
     profile = config["profiles"]["triton_v3.0"]
     source = Path(args.flaggems_source).resolve(strict=True)
-    expected = profile["repositories"]["FlagGems"]["commit"]
+    expected = args.flaggems_commit
     actual = subprocess.check_output(
         ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
     ).strip()
@@ -36,6 +38,7 @@ def main():
     ):
         raise ValueError("FlagGems must be the configured clean pinned checkout")
     target = "/opt/local-ci/runtime/deps/flaggems"
+    profile["mounts"] = [m for m in profile.get("mounts", []) if m["target"] != target]
     profile["mounts"].append(
         {
             "source": str(source),
@@ -44,31 +47,18 @@ def main():
             "sha256": tree_digest(source),
         }
     )
-    del profile["repositories"]["FlagGems"]
-    profile["archives"].pop("codex-cli", None)
-    profile["image"] = args.image
+    config["image"] = args.image
+    for item in config["profiles"].values():
+        item.pop("image", None)
     profile["env"]["FLAGGEMS_CLONE_DIR"] = "/workspace/deps/flaggems"
     profile["env"]["BACKEND_TEST_COMMAND"] = (
         '"$PYTHON_BIN" tests/test_smoke.py && "$PYTHON_BIN" tests/test_jit.py && '
         '"$PYTHON_BIN" -I /opt/local-ci/control/scripts/local_ci/prepare/profiles/slim/validate_flaggems.py'
     )
-    profile["prepare_commands"] = [
-        [
-            "ln",
-            "-s",
-            "deps/llvm-" + profile["llvm_hash"],
-            "/opt/local-ci/runtime/llvm-release",
-        ],
-        ["ln", "-s", "deps/ppl", "/opt/local-ci/runtime/ppl-release"],
-        [
-            "/opt/venv/bin/python",
-            "-I",
-            "/opt/local-ci/runtime/enable_flaggems.py",
-            "--source",
-            target,
-        ],
-        ["git", "config", "--system", "--add", "safe.directory", target],
-    ]
+    # Dependencies must already be migrated; do not silently discard old recipes.
+    for item in config["profiles"].values():
+        validate_shared_profile(item)
+    shared_image(config)
     dependency_mounts(config, profile, verify_content=True)
     backup = path.with_name(
         "local-ci-before-slim-"

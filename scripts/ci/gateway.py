@@ -243,7 +243,7 @@ class GitHub:
         summary: str,
         url: str = "",
     ) -> bool:
-        """Upsert one readable merge-result Check Run owned by Local CI."""
+        """Update only this task's Check Run; preserve other tasks as history."""
         if not task["pr_number"]:
             return False
         if key not in CHECK_NAMES or status not in {
@@ -258,20 +258,18 @@ class GitHub:
             raise ValueError("Invalid CI Check Run conclusion")
         name = CHECK_NAMES[key]
         external_id = f"triton-anchor-local-ci:{key}:{task['task_id']}"
-        response = self.request(
-            f"commits/{task['head_sha']}/check-runs?check_name={quote(name, safe='')}&filter=latest&per_page=100"
-        )
-        runs = response.get("check_runs", []) if isinstance(response, dict) else []
+        runs = self.check_runs(task, key)
         owned = [
             run
             for run in runs
             if run.get("name") == name
-            and str(run.get("external_id", "")).startswith(
-                (f"triton-anchor-local-ci:{key}:", f"triton-anchor-ci-v4:{key}:")
-            )
+            and run.get("external_id") == external_id
             and (run.get("app") or {}).get("slug") == "github-actions"
         ]
         existing = max(owned, key=lambda run: int(run.get("id", 0)), default=None)
+        # A rerun must not reopen a completed check with its previous conclusion.
+        if existing and status != "completed" and existing.get("status") == "completed":
+            existing = None
         output_data = {"title": str(title)[:255], "summary": str(summary)[:65535]}
         desired_url = url or ""
         if existing and all(
@@ -301,6 +299,40 @@ class GitHub:
             self.request(
                 "check-runs", "POST", {**payload, "head_sha": task["head_sha"]}
             )
+        return True
+
+    def check_runs(self, task: dict, key: str) -> list[dict]:
+        runs = []
+        for page in range(1, 21):
+            response = self.request(
+                f"commits/{task['head_sha']}/check-runs?check_name="
+                f"{quote(CHECK_NAMES[key], safe='')}&filter=all&per_page=100&page={page}"
+            )
+            batch = response.get("check_runs", [])
+            runs.extend(batch)
+            if len(batch) < 100:
+                return runs
+        raise ValueError("Cannot determine Local CI ownership from incomplete checks")
+
+    def owns_preflight(self, task: dict) -> bool:
+        """A newly prepared task owns the gate even before its Gitee enqueue."""
+        if not task["pr_number"]:
+            return True
+        for key, name in CHECK_NAMES.items():
+            owned = [
+                row
+                for row in self.check_runs(task, key)
+                if row.get("name") == name
+                and (row.get("app") or {}).get("slug") == "github-actions"
+                and str(row.get("external_id", "")).startswith(
+                    (f"triton-anchor-local-ci:{key}:", f"triton-anchor-ci-v4:{key}:")
+                )
+            ]
+            latest = max(owned, key=lambda row: int(row["id"]), default=None)
+            if latest and latest.get("external_id") != (
+                f"triton-anchor-local-ci:{key}:{task['task_id']}"
+            ):
+                return False
         return True
 
     def finish_inactive_pr(self, pr_number: int) -> bool:
@@ -663,7 +695,7 @@ class GitStore:
 
 def enqueue(task: dict, gh: GitHub, control: GitStore, source: Path) -> None:
     validate_task(task)
-    if validate_pr_info(task) or not is_current(gh, task):
+    if validate_pr_info(task) or not is_current(gh, task) or not gh.owns_preflight(task):
         raise ValueError("PR information or task freshness no longer permits dispatch")
     checked_out = (
         subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source)
@@ -721,7 +753,7 @@ def enqueue(task: dict, gh: GitHub, control: GitStore, source: Path) -> None:
                 check=True,
                 capture_output=True,
             )
-    if not is_current(gh, task):
+    if not is_current(gh, task) or not gh.owns_preflight(task):
         raise ValueError("Task changed while publishing code refs")
     key = f"current/{current_key(task)}.json"
     previous = control.get(key)
@@ -781,6 +813,7 @@ def cancel_obsolete(gh: GitHub, control: GitStore, pr_number: int = 0) -> int:
                 pointer
                 and pointer["task_id"] == task["task_id"]
                 and not cancellation.get("github_notified")
+                and gh.owns_preflight(task)
             ):
                 gh.status(
                     task,
@@ -882,6 +915,38 @@ def publish_preflight_checks(
     return changed
 
 
+def begin_preflight(gh: GitHub, task: dict) -> None:
+    if not is_current(gh, task):
+        raise ValueError("Task changed before preflight initialization")
+    gh.status(task, "pending", "Local CI: running preflight checks", workflow_url())
+    for key, name in CHECK_NAMES.items():
+        gh.check(
+            task,
+            key,
+            "queued",
+            None,
+            f"{name}: queued",
+            f"Waiting for this task's preflight stage. Task `{task['task_id']}`.",
+            workflow_url(),
+        )
+
+
+def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
+    if not is_current(gh, task) or not gh.owns_preflight(task):
+        return
+    if stages.get("enqueue") == "success":
+        # The receiver owns summary after dispatch, possibly already completed.
+        return
+    publish_preflight_checks(gh, task, stages, False)
+    if any(stages.get(key) != "success" for key in ("prepare", *CHECK_NAMES)):
+        state, description = "failure", "Preflight failed or cancelled; see workflow"
+    elif task.get("external_fork") and stages.get("approval") != "success":
+        state, description = "error", "Local CI approval failed or cancelled; see workflow"
+    else:
+        state, description = "error", "Local CI dispatch/receiver startup failed; see workflow"
+    gh.status(task, state, description, workflow_url())
+
+
 def current_task(gh: GitHub, control: GitStore, task: dict) -> bool:
     pointer = control.get(f"current/{current_key(task)}.json")
     return bool(
@@ -889,6 +954,7 @@ def current_task(gh: GitHub, control: GitStore, task: dict) -> bool:
         and pointer.get("task_id") == task["task_id"]
         and not control.get(f"cancel/{task['task_id']}.json")
         and is_current(gh, task)
+        and gh.owns_preflight(task)
     )
 
 
@@ -1210,6 +1276,7 @@ def main() -> int:
             "prepare",
             "info",
             "card",
+            "finalize",
             "approval",
             "enqueue",
             "cancel",
@@ -1260,21 +1327,27 @@ def main() -> int:
         for key in ("task_id", "tested_sha", "head_sha", "base_sha", "external_fork"):
             output(key, task[key])
         output("task_digest", digest(task))
+        begin_preflight(gh, task)
         return 0
     if args.command == "sarif":
         failures = sarif_failures(args.source)
         print(f"CodeQL high/critical or error findings: {len(failures)}")
         return int(bool(failures))
-    if args.command in {"info", "card", "approval", "enqueue", "api", "security"}:
+    if args.command in {"info", "card", "finalize", "approval", "enqueue", "api", "security"}:
         task = load_task(args.task, os.getenv("EXPECTED_TASK_DIGEST", ""))
+    if args.command == "finalize":
+        finalize_preflight(gh, task, json.loads(args.stages))
+        return 0
     if args.command == "approval":
         validate_approval_environment(gh)
-        if not is_current(gh, task):
+        if not is_current(gh, task) or not gh.owns_preflight(task):
             raise ValueError("PR changed while waiting for approval")
         return 0
     if args.command == "security":
         return security_diff(args.source, task["base_sha"], task["tested_sha"])
     if args.command == "info":
+        if not is_current(gh, task) or not gh.owns_preflight(task):
+            raise ValueError("PR changed before information publication")
         errors = validate_pr_info(task)
         if errors:
             gh.status(task, "failure", "PR information is incomplete; see PR comment")
@@ -1283,7 +1356,7 @@ def main() -> int:
             )
         return int(bool(errors))
     if args.command == "card":
-        if not is_current(gh, task):
+        if not is_current(gh, task) or not gh.owns_preflight(task):
             if task["pr_number"]:
                 gh.finish_inactive_pr(task["pr_number"])
             raise ValueError("PR changed before preflight publication")
@@ -1408,10 +1481,22 @@ if __name__ == "__main__":
                 if pr:
                     pull = client.request(f"pulls/{pr}")
                     expected = os.getenv("REQUESTED_SHA") or pull["head"]["sha"]
+                    frozen = (
+                        load_task(Path("task.json"))
+                        if Path("task.json").is_file()
+                        else None
+                    )
                     if (
                         pull["state"] == "open"
                         and not pull["draft"]
                         and expected == pull["head"]["sha"]
+                        and (
+                            frozen is None
+                            or (
+                                is_current(client, frozen)
+                                and client.owns_preflight(frozen)
+                            )
+                        )
                     ):
                         context = {
                             "head_sha": expected,

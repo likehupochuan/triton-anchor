@@ -21,12 +21,19 @@ def execute(payload: dict) -> None:
     )
     selected = payload["parameters"].get("paths")
     if selected is None and regression_required:
+        # Dashboard-only changes need Node regressions, API tooling needs its
+        # own suite, and Local CI/gateway changes need Local CI regressions.
+        roots = set()
+        for path in changed:
+            if path.endswith((".md", ".rst", ".txt")):
+                continue
+            if path.startswith("scripts/api_contract/"):
+                roots.add("scripts/api_contract/tests")
+            elif not path.startswith("dashboard/"):
+                roots.add("scripts/local_ci/tests")
         selected = [
             name
-            for name in (
-                "scripts/local_ci/tests",
-                "scripts/api_contract/tests",
-            )
+            for name in sorted(roots)
             if (root / name).is_dir() and any((root / name).rglob("test_*.py"))
         ]
     dashboard_tests = []

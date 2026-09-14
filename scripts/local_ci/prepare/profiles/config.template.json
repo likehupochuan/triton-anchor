@@ -39,7 +39,7 @@
   "task_workspace_max_bytes": 107374182400,
   "cleanup_timeout_seconds": 60,
   "management_timeout_seconds": 600,
-  "max_jobs": 8,
+  "max_jobs": 12,
   "generation_retention_hours": 72,
   "minimum_free_bytes": 10737418240,
   "profiles": {
@@ -48,95 +48,105 @@
       "triton_version": "3.0",
       "llvm_hash": "",
       "backend_enabled": true,
-      "image": "",
-      "workspace_root": "",
       "workspace_container": "/workspace",
-      "build_jobs": 8,
       "llvm": {
-        "mode": "archive",
-        "archive": "",
-        "sha256": "",
-        "commit": "",
-        "strip_components": 1
+        "mode": "mount",
+        "commit": ""
       },
       "env": {
         "PYTHON_VENV_ACTIVATE": "",
         "BACKEND_PROFILE": "",
-        "BACKEND_PATH": "",
+        "BACKEND_PATH": "/opt/local-ci/runtime/deps/backend",
         "BACKEND_WHEEL_PATTERN": "",
         "BACKEND_ENVSETUP": "",
         "BACKEND_ENVSETUP_ARGS": "",
         "BACKEND_TEST_COMMAND": "",
         "EXPECTED_TRITON_BACKEND": "",
-        "PPL_ROOT": "",
-        "FLAGGEMS_CLONE_DIR": "",
-        "MAX_JOBS": "8",
+        "PPL_ROOT": "/opt/local-ci/runtime/deps/ppl",
+        "FLAGGEMS_CLONE_DIR": "/opt/local-ci/runtime/deps/flaggems",
+        "MAX_JOBS": "12",
         "BACKEND_TEST_PATHS": "tests"
       },
-      "repositories": {},
-      "mounts": [],
-      "devices": [],
-      "prepare_commands": [],
-      "validation_commands": {
-        "backend_install": [
-          "python3",
-          "/opt/local-ci/control/scripts/local_ci/prepare/validate_environment.py",
-          "backend_install"
-        ]
-      }
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-<exact-llvm-commit>",
+          "read_only": true,
+          "sha256": ""
+        },
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/backend",
+          "read_only": true,
+          "sha256": ""
+        },
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/ppl",
+          "read_only": true,
+          "sha256": ""
+        },
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/flaggems",
+          "read_only": true,
+          "sha256": ""
+        }
+      ],
+      "devices": []
     },
     "triton_v3.3": {
       "name": "triton-3.3",
       "triton_version": "3.3",
       "llvm_hash": "",
       "backend_enabled": false,
-      "image": "",
-      "workspace_root": "",
       "workspace_container": "/workspace",
-      "build_jobs": 8,
       "llvm": {
-        "mode": "archive",
-        "archive": "",
-        "sha256": "",
-        "commit": "",
-        "strip_components": 1
+        "mode": "mount",
+        "commit": ""
       },
       "env": {
         "PYTHON_VENV_ACTIVATE": "",
-        "MAX_JOBS": "8"
+        "MAX_JOBS": "12"
       },
-      "repositories": {},
-      "prepare_commands": [],
-      "validation_commands": {}
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-<exact-llvm-commit>",
+          "read_only": true,
+          "sha256": ""
+        }
+      ]
     },
     "triton_v3.6": {
       "name": "triton-3.6",
       "triton_version": "3.6",
       "llvm_hash": "",
       "backend_enabled": false,
-      "image": "",
-      "workspace_root": "",
       "workspace_container": "/workspace",
-      "build_jobs": 8,
       "llvm": {
-        "mode": "archive",
-        "archive": "",
-        "sha256": "",
-        "commit": "",
-        "strip_components": 1
+        "mode": "mount",
+        "commit": ""
       },
       "env": {
         "PYTHON_VENV_ACTIVATE": "",
-        "MAX_JOBS": "8"
+        "MAX_JOBS": "12"
       },
-      "repositories": {},
-      "prepare_commands": [],
-      "validation_commands": {}
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-<exact-llvm-commit>",
+          "read_only": true,
+          "sha256": ""
+        }
+      ]
     }
   },
   "branch_profiles": {
     "CI_dev": "triton_v3.0"
   },
   "health_stale_seconds": 1200,
-  "evidence_max_bytes": 107374182400
+  "evidence_max_bytes": 107374182400,
+  "image": "",
+  "dependency_root": ""
 }

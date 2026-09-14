@@ -280,6 +280,14 @@ def seed_venv(root, environment):
         if not source.is_absolute() or not source.is_dir():
             continue
         shutil.copytree(source, target, dirs_exist_ok=True, symlinks=False)
+    # Bind each task venv to its own profile's read-only source, never the image.
+    flaggems = environment.get("FLAGGEMS_CLONE_DIR")
+    (target / "local_ci_flaggems.pth").unlink(missing_ok=True)
+    if flaggems:
+        source = Path(flaggems)
+        if source.parent != Path("/opt/local-ci/runtime/deps") or not (source / "src").is_dir():
+            raise ValueError("FlagGems requires a mounted dependency with a src directory")
+        (target / "local_ci_flaggems.pth").write_text(str(source / "src") + "\n")
 
 
 def native_layout(root):
@@ -322,6 +330,13 @@ def prepare_workspace(params):
     for name in ("home", "tmp", "cache", "state"):
         (root / name).mkdir(exist_ok=True)
         own(root / name, data["uids"]["task"], data["gids"]["task"], 0o755)
+    flaggems = data.get("env", {}).get("FLAGGEMS_CLONE_DIR")
+    if flaggems:
+        write(
+            root / "home/.gitconfig",
+            ("[safe]\n\tdirectory = " + flaggems + "\n").encode(),
+            uid=data["uids"]["task"], gid=data["gids"]["task"], mode=0o644,
+        )
     return {
         **native_layout(root),
         "reused": reused,

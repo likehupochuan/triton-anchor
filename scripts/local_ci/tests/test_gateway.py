@@ -101,6 +101,9 @@ class FakeGitHub:
     def check(self, *_args, **_kwargs):
         return False
 
+    def owns_preflight(self, task):
+        return True
+
     def comment(self, task, content):
         if self.comments and self.comments[-1] == content:
             return False
@@ -752,6 +755,81 @@ README only
         control.refresh()
         self.assertEqual(git(control.root, "rev-parse", "HEAD"), before)
 
+    def test_check_updates_exact_task_without_relabeling_another_task(self):
+        gh = g.GitHub(g.REPOSITORY, token="fixture")
+        exact = {
+            "id": 11, "name": "local-ci/basic", "status": "queued",
+            "external_id": f"triton-anchor-local-ci:basic:{self.task['task_id']}",
+            "app": {"slug": "github-actions"},
+        }
+        other = {**exact, "id": 12, "external_id": "triton-anchor-local-ci:basic:other"}
+        writes = []
+
+        def request(path, method="GET", data=None):
+            if method == "GET":
+                self.assertIn("filter=all", path)
+                return {"check_runs": [exact, other]}
+            writes.append((path, data))
+            return {}
+
+        with patch.object(gh, "request", side_effect=request):
+            gh.check(self.task, "basic", "completed", "success", "Passed", "Evidence")
+            self.assertEqual(writes[-1][0], "check-runs/11")
+            exact["external_id"] = "triton-anchor-local-ci:basic:older"
+            gh.check(self.task, "basic", "queued", None, "Queued", "New task")
+            self.assertEqual(writes[-1][0], "check-runs")
+
+    def test_preflight_rerun_creates_new_check_after_completed_check(self):
+        gh = g.GitHub(g.REPOSITORY, token="fixture")
+        old = {
+            "id": 11, "name": "local-ci/basic", "status": "completed",
+            "conclusion": "success",
+            "external_id": f"triton-anchor-local-ci:basic:{self.task['task_id']}",
+            "app": {"slug": "github-actions"},
+        }
+        with patch.object(gh, "request", return_value={"check_runs": [old]}) as request:
+            gh.check(self.task, "basic", "queued", None, "Queued", "Rerun")
+        self.assertEqual(request.call_args.args[:2], ("check-runs", "POST"))
+        self.assertNotIn("conclusion", request.call_args.args[2])
+
+    def test_new_preflight_resets_summary_and_all_checks(self):
+        with patch.object(self.gh, "check") as check:
+            g.begin_preflight(self.gh, self.task)
+        self.assertEqual(self.gh.statuses[-1][1], "pending")
+        self.assertEqual([call.args[1] for call in check.call_args_list], list(g.CHECK_NAMES))
+        self.assertTrue(all(call.args[2:4] == ("queued", None) for call in check.call_args_list))
+
+    def test_new_preflight_blocks_old_result_before_new_gitee_enqueue(self):
+        control = self.store(g.CONTROL_BRANCH)
+        g.enqueue(self.task, self.gh, control, self.source)
+        results = self.store(g.RESULTS_BRANCH)
+        result = self.result()
+        results.put({f"runs/{self.task['task_id']}/{result['run_id']}/result.json": result})
+        gh = g.GitHub(g.REPOSITORY, token="fixture")
+        newer = {"id": 12, "name": "local-ci/basic", "status": "queued",
+                 "external_id": "triton-anchor-local-ci:basic:new-task",
+                 "app": {"slug": "github-actions"}}
+        before = len(self.gh.statuses)
+        with (
+            patch.object(gh, "request", return_value={"check_runs": [newer]}),
+            patch.object(self.gh, "owns_preflight", side_effect=gh.owns_preflight),
+        ):
+            self.assertEqual(g.collect_results(self.gh, control, results, self.root / "dashboard"), [])
+        self.assertEqual(len(self.gh.statuses), before)
+
+    def test_finalizer_closes_rejected_approval_without_overwriting_new_owner(self):
+        stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
+        stages.update(approval="failure", enqueue="skipped")
+        g.finalize_preflight(self.gh, self.task, stages)
+        self.assertEqual(self.gh.statuses[-1][1], "error")
+        self.assertIn("approval", self.gh.latest_statuses[self.task['task_id']][1])
+        before = len(self.gh.statuses)
+        with patch.object(self.gh, "owns_preflight", return_value=False):
+            g.finalize_preflight(self.gh, self.task, stages)
+        self.assertEqual(len(self.gh.statuses), before)
+        g.finalize_preflight(self.gh, self.task, {**stages, "enqueue": "success"})
+        self.assertEqual(len(self.gh.statuses), before)
+
     def test_closed_pr_finishes_pending_checks_without_dispatched_task(self):
         gh = g.GitHub(g.REPOSITORY, token="fixture")
         writes = []
@@ -924,6 +1002,12 @@ class WorkflowStructureTests(unittest.TestCase):
             self.assertEqual(set(workflow["on"]), {"workflow_call"})
         self.assertEqual(jobs["review-card"]["permissions"]["pull-requests"], "write")
         self.assertEqual(jobs["review-card"]["permissions"]["statuses"], "write")
+        self.assertEqual(jobs["prepare"]["permissions"]["checks"], "write")
+        self.assertEqual(jobs["approve-external-fork"]["permissions"]["checks"], "read")
+        self.assertEqual(jobs["receive"]["permissions"]["checks"], "read")
+        self.assertIn("always()", jobs["finalize-preflight"]["if"])
+        self.assertIn("approve-external-fork", jobs["finalize-preflight"]["needs"])
+        self.assertEqual(jobs["finalize-preflight"]["steps"][-1]["run"], "python3 scripts/ci/gateway.py finalize")
         self.assertNotIn("schedule", data["on"])
         self.assertIn("worker_revision_sha", data["on"]["workflow_dispatch"]["inputs"])
         self.assertFalse((ROOT / ".github/workflows/ci-receiver.yml").exists())

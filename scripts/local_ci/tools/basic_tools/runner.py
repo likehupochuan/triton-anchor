@@ -47,7 +47,7 @@ DEPENDENCIES = {
     "ir_serialization": ["backend_smoke"],
 }
 TOOL_IDS = tuple(DEPENDENCIES)
-DEFAULT_BUILD_JOBS = 2
+DEFAULT_BUILD_JOBS = 12
 MINIMUM_FRONTEND = (
     "environment",
     "frontend_build",
@@ -242,9 +242,7 @@ def plan(
             LLVM_BINARY_DIR=path_join(llvm, "bin"),
         )
     if "jobs" in allowed:
-        default_jobs = min(
-            DEFAULT_BUILD_JOBS, int(env.get("MAX_JOBS", DEFAULT_BUILD_JOBS))
-        )
+        default_jobs = int(env.get("MAX_JOBS", DEFAULT_BUILD_JOBS))
         jobs = bounded(params.get("jobs", default_jobs), "jobs", 1, 64)
         if params.get("build_mode", "fresh") not in {"fresh", "incremental"}:
             raise ValueError("build_mode must be fresh or incremental")

@@ -69,6 +69,21 @@ def test_selected_nodes_and_build_parameters():
             runner.plan("frontend_build", context(), {"jobs": jobs})
 
 
+@pytest.mark.parametrize("configured,explicit,expected", [
+    (None, None, 12), ("12", None, 12), ("24", None, 24),
+    ("4", None, 4), ("12", 32, 32),
+])
+def test_build_parallelism_respects_configuration(configured, explicit, expected):
+    ctx = context()
+    if configured is not None:
+        ctx["profile"]["tools"]["env"] = {"MAX_JOBS": configured}
+    spec = runner.plan("frontend_build", ctx, {} if explicit is None else {"jobs": explicit})
+    for command in spec["commands"]:
+        assert command["env"]["MAX_JOBS"] == str(expected)
+        assert command["env"]["CMAKE_BUILD_PARALLEL_LEVEL"] == str(expected)
+        assert command["env"]["NINJAFLAGS"] == f"-j{expected}"
+
+
 @pytest.mark.parametrize("source,passed", [
     ("def test_ok(): assert 1 + 1 == 2\n", True),
     ("def test_bad(): assert False\n", False),
