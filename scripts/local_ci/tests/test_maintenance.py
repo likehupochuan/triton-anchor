@@ -93,6 +93,85 @@ def test_health_whitelist_removes_nested_private_configuration():
     assert result["runtime"]["available"]
 
 
+def test_health_defaults_do_not_monitor_removed_control_update_timer(tmp_path):
+    manager = SimpleNamespace(health=lambda: {"images": [], "attempts": []})
+    shown = []
+
+    def show_service(argv, **kwargs):
+        shown.append(argv[3])
+        return SimpleNamespace(
+            returncode=0,
+            stdout="LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n",
+        )
+
+    with patch.object(health.subprocess, "run", side_effect=show_service):
+        snapshot = health.collect(
+            {"state_dir": str(tmp_path)}, now=1, manager=manager
+        )
+    assert "triton-anchor-local-ci-control-update.timer" not in shown
+    assert "triton-anchor-local-ci-control-update.service" in shown
+    assert snapshot["control_update"]["state"] == "idle"
+
+
+def test_health_reports_failed_pending_control_update(tmp_path):
+    manager = SimpleNamespace(health=lambda: {"images": [], "attempts": []})
+    request = tmp_path / "control-update/request.json"
+    request.parent.mkdir(parents=True)
+    request.write_text(
+        json.dumps(
+            {
+                "schema": "triton-anchor-local-ci-control-update-request",
+                "revision": "a" * 40,
+                "task_id": "b" * 64,
+                "requested_at": 10,
+            }
+        )
+    )
+    request.chmod(0o600)
+
+    def show_service(argv, **kwargs):
+        failed = argv[3] == "triton-anchor-local-ci-control-update.service"
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "LoadState=loaded\n"
+                + ("ActiveState=failed\nSubState=failed\nResult=exit-code\n" if failed else "ActiveState=active\nSubState=running\nResult=success\n")
+            ),
+        )
+
+    with patch.object(health.subprocess, "run", side_effect=show_service):
+        snapshot = health.collect(
+            {"state_dir": str(tmp_path)}, now=20, manager=manager
+        )
+    assert snapshot["control_update"] == {
+        "state": "failed",
+        "requested_revision": "a" * 40,
+        "task_id": "b" * 64,
+        "requested_at": "1970-01-01T00:00:10Z",
+    }
+
+
+def test_health_reports_worker_blocked_control_update(tmp_path):
+    worker = tmp_path / "health/worker.json"
+    worker.parent.mkdir(parents=True)
+    worker.write_text(
+        json.dumps(
+            {
+                "heartbeat_at": 10,
+                "pid": os.getpid(),
+                "control_update": "blocked",
+            }
+        )
+    )
+    manager = SimpleNamespace(health=lambda: {"images": [], "attempts": []})
+    snapshot = health.collect(
+        {"state_dir": str(tmp_path), "monitor_services": []},
+        now=20,
+        manager=manager,
+    )
+    assert snapshot["control_update"]["state"] == "blocked"
+
+
 def snapshot(now):
     return {
         "worker_id": "worker-1",

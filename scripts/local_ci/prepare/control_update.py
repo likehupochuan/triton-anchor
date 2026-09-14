@@ -21,6 +21,7 @@ from prepare.artifacts import SHA_RE, atomic_json, safe_source, utc_now
 
 
 UPDATE_SCHEMA = "triton-anchor-local-ci-control-update"
+REQUEST_SCHEMA = "triton-anchor-local-ci-control-update-request"
 WORKER_SERVICE = "triton-anchor-local-ci.service"
 
 
@@ -102,12 +103,155 @@ def _restart_worker() -> None:
     )
 
 
+def _noop() -> None:
+    pass
+
+
+def update_request_path(config: dict) -> Path:
+    return Path(config["state_dir"]) / "control-update/request.json"
+
+
+def update_request_lock_path(config: dict) -> Path:
+    return Path(config["state_dir"]) / "control-update/request.lock"
+
+
+def read_update_request(path: Path) -> dict:
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("Control update request must be a regular file")
+    metadata = path.stat()
+    if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+        raise ValueError("Control update request must be private to the CI user")
+    request = json.loads(path.read_text())
+    revision = request.get("revision") if isinstance(request, dict) else None
+    task_id = request.get("task_id") if isinstance(request, dict) else None
+    if (
+        not isinstance(request, dict)
+        or request.get("schema") != REQUEST_SCHEMA
+        or not isinstance(revision, str)
+        or not SHA_RE.fullmatch(revision)
+        or not isinstance(task_id, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", task_id)
+    ):
+        raise ValueError("Control update request is invalid")
+    return request
+
+
+def oldest_forward_request(
+    config: dict,
+    current_revision: str,
+    requests: list[dict],
+    *,
+    allow_local: bool = False,
+) -> dict:
+    """Select the oldest requested descendant using the trusted control history."""
+    if not isinstance(current_revision, str) or not SHA_RE.fullmatch(current_revision):
+        raise ValueError("Current control revision must be an exact commit")
+    if not requests:
+        raise ValueError("At least one control update request is required")
+    grouped: dict[str, list[dict]] = {}
+    for request in requests:
+        revision = request.get("revision") if isinstance(request, dict) else None
+        task_id = request.get("task_id") if isinstance(request, dict) else None
+        if (
+            not isinstance(revision, str)
+            or not SHA_RE.fullmatch(revision)
+            or not isinstance(task_id, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", task_id)
+        ):
+            raise ValueError("Control update candidate is invalid")
+        grouped.setdefault(revision, []).append(request)
+    root = Path(config["control_root"])
+    state_dir = Path(config["state_dir"])
+    source = validate_control_source(
+        config.get("control_repo_url"), allow_local=allow_local
+    )
+    branch = config.get("control_branch", "local-ci-unified")
+    if (
+        not isinstance(branch, str)
+        or not branch
+        or re.search(r"[\x00-\x20~^:?*\\\[]", branch)
+    ):
+        raise ValueError("control_branch is not a safe Git branch name")
+    if not root.is_dir() or root.is_symlink():
+        raise ValueError("control_root must be an existing dedicated directory")
+    environment = _environment(state_dir)
+    head = _git(root, ["rev-parse", "HEAD^{commit}"], environment).stdout.strip()
+    if head != current_revision:
+        raise ValueError("Worker control revision changed during request selection")
+    _git(
+        root,
+        [
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--force",
+            source,
+            f"refs/heads/{branch}:refs/local-ci/control-order",
+        ],
+        environment,
+    )
+    tip = _git(
+        root, ["rev-parse", "refs/local-ci/control-order^{commit}"], environment
+    ).stdout.strip()
+
+    forward_revisions = []
+    revisions = tuple(grouped)
+    for revision in revisions:
+        present = _git(
+            root,
+            ["cat-file", "-e", f"{revision}^{{commit}}"],
+            environment,
+            check=False,
+        )
+        on_branch = _git(
+            root,
+            ["merge-base", "--is-ancestor", revision, tip],
+            environment,
+            check=False,
+        )
+        if present.returncode or on_branch.returncode:
+            continue
+        forward = _git(
+            root,
+            ["merge-base", "--is-ancestor", current_revision, revision],
+            environment,
+            check=False,
+        )
+        if forward.returncode == 0:
+            forward_revisions.append(revision)
+
+    if not forward_revisions:
+        raise ValueError("Waiting tasks have no usable forward control revision")
+
+    oldest = []
+    for revision in forward_revisions:
+        if all(
+            revision == other
+            or _git(
+                root,
+                ["merge-base", "--is-ancestor", revision, other],
+                environment,
+                check=False,
+            ).returncode
+            == 0
+            for other in forward_revisions
+        ):
+            oldest.append(revision)
+    if len(oldest) != 1:
+        raise ValueError("Waiting control revisions do not form one forward history")
+    return min(
+        grouped[oldest[0]], key=lambda row: (row["captured_at"], row["task_id"])
+    )
+
+
 def update_control(
     config: dict,
     *,
     apply: bool = False,
     allow_local: bool = False,
+    expected_revision: str | None = None,
     restart_worker: Callable[[], None] = _restart_worker,
+    on_success: Callable[[], None] = _noop,
 ) -> dict:
     """Update only a clean checkout and never cross a non-fast-forward boundary."""
     import fcntl
@@ -122,6 +266,13 @@ def update_control(
         raise ValueError("control_branch is not a safe Git branch name")
     if not root.is_dir() or root.is_symlink():
         raise ValueError("control_root must be an existing dedicated directory")
+    if expected_revision is not None and (
+        not isinstance(expected_revision, str)
+        or not SHA_RE.fullmatch(expected_revision)
+    ):
+        raise ValueError("Requested control revision must be an exact commit")
+    if apply and expected_revision is None:
+        raise ValueError("Applied control update requires an exact requested revision")
     state_dir.mkdir(parents=True, exist_ok=True)
     environment = _environment(state_dir)
     if _git(root, ["rev-parse", "--is-inside-work-tree"], environment).stdout.strip() != "true":
@@ -140,13 +291,15 @@ def update_control(
     ).stdout.split()
     if len(remote) < 2 or not SHA_RE.fullmatch(remote[0]):
         raise ValueError("Configured control branch did not resolve to one commit")
-    target = remote[0]
+    remote_revision = remote[0]
+    target = expected_revision or remote_revision
     result = {
         "schema": UPDATE_SCHEMA,
         "checked_at": utc_now(),
         "branch": branch,
         "previous_revision": current,
         "revision": target,
+        "remote_revision": remote_revision,
         "changed": False,
         "restarted": False,
         "applied": apply,
@@ -171,7 +324,7 @@ def update_control(
         if dirty:
             raise ValueError("control_root changed while waiting for the update lock")
         result["previous_revision"] = current
-        if target != current:
+        if target != current or expected_revision is not None:
             _git(
                 root,
                 [
@@ -187,26 +340,49 @@ def update_control(
             fetched = _git(
                 root, ["rev-parse", "refs/local-ci/control-update^{commit}"], environment
             ).stdout.strip()
-            if fetched != target:
-                raise RuntimeError("Control branch moved during fetch; retry next timer run")
+            if fetched != remote_revision:
+                raise RuntimeError("Control branch moved during fetch; retry the update")
+            if expected_revision is not None:
+                present = _git(
+                    root,
+                    ["cat-file", "-e", f"{target}^{{commit}}"],
+                    environment,
+                    check=False,
+                )
+                on_branch = _git(
+                    root,
+                    ["merge-base", "--is-ancestor", target, fetched],
+                    environment,
+                    check=False,
+                )
+                if present.returncode or on_branch.returncode:
+                    raise ValueError(
+                        "Requested control revision is not reachable from the configured branch"
+                    )
             ancestor = _git(
                 root, ["merge-base", "--is-ancestor", current, target], environment, check=False
             )
             if ancestor.returncode:
                 raise ValueError("control_repo_url would replace history; only fast-forward updates are allowed")
-            _git(root, ["checkout", "--quiet", "--detach", target], environment)
-            if _git(root, ["rev-parse", "HEAD^{commit}"], environment).stdout.strip() != target:
-                raise RuntimeError("Control checkout did not reach the fetched commit")
-            result["changed"] = True
+            if target != current:
+                _git(root, ["checkout", "--quiet", "--detach", target], environment)
+                if (
+                    _git(root, ["rev-parse", "HEAD^{commit}"], environment)
+                    .stdout.strip()
+                    != target
+                ):
+                    raise RuntimeError("Control checkout did not reach the fetched commit")
+                result["changed"] = True
 
         try:
             marker = json.loads(marker_path.read_text())
         except (FileNotFoundError, OSError, ValueError):
             marker = {}
-        if marker.get("revision") != target:
+        if result["changed"] or marker.get("revision") != target:
             restart_worker()
             result["restarted"] = True
             atomic_json(marker_path, {**result, "restarted_at": utc_now()})
+        on_success()
         result["state"] = "updated" if result["changed"] else "current"
     return result
 
@@ -214,13 +390,48 @@ def update_control(
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
+    revision = parser.add_mutually_exclusive_group()
+    revision.add_argument("--expected-revision")
+    revision.add_argument("--request-file")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.apply and os.geteuid() == 0:
             raise ValueError("Control update must run as the ordinary CI user")
         config = json.loads(Path(args.config).read_text())
-        print(json.dumps(update_control(config, apply=args.apply), indent=2))
+        request_path = None
+        request = None
+        if args.request_file:
+            request_path = Path(os.path.abspath(args.request_file))
+            configured_request = Path(os.path.abspath(update_request_path(config)))
+            if request_path != configured_request:
+                raise ValueError("Control update request must use the configured state path")
+            request = read_update_request(request_path)
+
+        def clear_completed_request() -> None:
+            if not request_path or not request:
+                return
+            import fcntl
+
+            request_lock = update_request_lock_path(config)
+            request_lock.parent.mkdir(parents=True, exist_ok=True)
+            with request_lock.open("w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                if request_path.exists():
+                    current = read_update_request(request_path)
+                    if all(
+                        current.get(field) == request.get(field)
+                        for field in ("task_id", "revision")
+                    ):
+                        request_path.unlink()
+
+        result = update_control(
+            config,
+            apply=args.apply,
+            expected_revision=request["revision"] if request else args.expected_revision,
+            on_success=clear_completed_request if request else _noop,
+        )
+        print(json.dumps(result, indent=2))
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"Local CI control update failed: {exc}", file=sys.stderr)

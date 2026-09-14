@@ -1,5 +1,6 @@
 """Task lifecycle: execute once, stop before collecting, retry publication only."""
 
+import fcntl
 import hashlib
 import json
 from pathlib import Path
@@ -7,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from agent_ci.protocol import TASK_SCHEMA, atomic_json, metadata_digest, task_id
-from agent_ci.worker import Worker
+from agent_ci.worker import Worker, scan_once, trigger_control_update
 
 
 def manifest():
@@ -31,6 +32,20 @@ def manifest():
         "captured_at": "2026-09-11T00:00:00Z",
     }
     value["metadata_digest"] = metadata_digest(value)
+    value["task_id"] = task_id(value)
+    prefix = f"ci/pr-7/{value['task_id']}"
+    value.update(
+        task_ref=prefix + "/tested",
+        base_task_ref=prefix + "/base",
+        head_task_ref=prefix + "/head",
+    )
+    return value
+
+
+def revised_manifest(revision, captured_at):
+    value = manifest()
+    value["worker_revision_sha"] = revision
+    value["captured_at"] = captured_at
     value["task_id"] = task_id(value)
     prefix = f"ci/pr-7/{value['task_id']}"
     value.update(
@@ -167,6 +182,9 @@ def test_task_waits_for_automatic_control_update(tmp_path):
         def tasks(self):
             return [task]
 
+        def validity(self, task):
+            return True, ""
+
     class Manager:
         def generations(self):
             return {}
@@ -182,8 +200,275 @@ def test_task_waits_for_automatic_control_update(tmp_path):
         relay=Relay(),
         manager=Manager(),
         driver=object(),
+        control_request_selector=lambda config, current, requests, **kwargs: requests[0],
     )
-    worker.scan()
+    request = worker.scan()
     assert worker.journal.tasks() == []
+    assert request == {
+        "revision": task["worker_revision_sha"],
+        "task_id": task["task_id"],
+        "captured_at": task["captured_at"],
+    }
     health = json.loads((tmp_path / "health/worker.json").read_text())
     assert health["control_update"] == "required"
+
+
+def test_control_update_request_is_single_atomic_file_and_nonblocking(tmp_path):
+    task = manifest()
+    calls = []
+    unit = trigger_control_update(
+        {"state_dir": str(tmp_path)},
+        {"revision": task["worker_revision_sha"], "task_id": task["task_id"]},
+        run=lambda argv, **kwargs: calls.append((argv, kwargs)),
+    )
+    request = json.loads((tmp_path / "control-update/request.json").read_text())
+    assert request["revision"] == task["worker_revision_sha"]
+    assert request["task_id"] == task["task_id"]
+    assert unit == "triton-anchor-local-ci-control-update.service"
+    assert calls == [
+        (
+            [
+                "systemctl",
+                "--user",
+                "start",
+                "--no-block",
+                "triton-anchor-local-ci-control-update.service",
+            ],
+            {"check": True, "timeout": 30},
+        )
+    ]
+
+    first_requested_at = request["requested_at"]
+    trigger_control_update(
+        {"state_dir": str(tmp_path)},
+        {"revision": task["worker_revision_sha"], "task_id": task["task_id"]},
+        run=lambda argv, **kwargs: None,
+    )
+    repeated = json.loads((tmp_path / "control-update/request.json").read_text())
+    assert repeated["requested_at"] == first_requested_at
+
+
+def test_scan_releases_control_lock_before_trigger(tmp_path):
+    task = manifest()
+    events = []
+
+    class FixtureWorker:
+        config = {"state_dir": str(tmp_path)}
+
+        def scan(self):
+            events.append("scan")
+            return {"revision": task["worker_revision_sha"], "task_id": task["task_id"]}
+
+    with (tmp_path / "control.lock").open("w") as control_lock:
+        def trigger(config, request):
+            fcntl.flock(control_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            events.append("trigger-after-unlock")
+            fcntl.flock(control_lock, fcntl.LOCK_UN)
+
+        scan_once(FixtureWorker(), control_lock, trigger=trigger)
+
+    assert events == ["scan", "trigger-after-unlock"]
+
+
+def test_oldest_waiting_task_deterministically_requests_control_update(tmp_path):
+    newer = revised_manifest(
+        "1" * 40,
+        "2026-09-12T00:00:00Z",
+    )
+    older = revised_manifest(
+        "2" * 40,
+        "2026-09-11T00:00:00Z",
+    )
+
+    class Relay:
+        def refresh(self):
+            pass
+
+        def tasks(self):
+            return [newer, older]
+
+        def validity(self, task):
+            return True, ""
+
+    class Manager:
+        def generations(self):
+            return {}
+
+        def collect_retired(self):
+            pass
+
+        def current_control_revision(self):
+            return "f" * 40
+
+    worker = Worker(
+        {"state_dir": str(tmp_path), "simulation": True},
+        relay=Relay(),
+        manager=Manager(),
+        driver=object(),
+        control_request_selector=lambda config, current, requests, **kwargs: min(
+            requests, key=lambda row: (row["captured_at"], row["task_id"])
+        ),
+    )
+    assert worker.scan()["revision"] == older["worker_revision_sha"]
+
+
+def test_cancelled_and_published_tasks_do_not_block_newer_control_update(tmp_path):
+    cancelled = revised_manifest("1" * 40, "2026-09-09T00:00:00Z")
+    published = revised_manifest("2" * 40, "2026-09-10T00:00:00Z")
+    waiting = revised_manifest("3" * 40, "2026-09-11T00:00:00Z")
+
+    class Relay:
+        def refresh(self):
+            pass
+
+        def tasks(self):
+            return [cancelled, published, waiting]
+
+        def validity(self, task):
+            return (False, "cancelled") if task is cancelled else (True, "")
+
+    class Manager:
+        def generations(self):
+            return {}
+
+        def collect_retired(self):
+            pass
+
+        def current_control_revision(self):
+            return "f" * 40
+
+    worker = Worker(
+        {"state_dir": str(tmp_path), "simulation": True},
+        relay=Relay(),
+        manager=Manager(),
+        driver=object(),
+        control_request_selector=lambda config, current, requests, **kwargs: requests[0],
+    )
+    worker.journal.register(published)
+    payload = tmp_path / "published-result.json"
+    payload.write_text('{"status":"pass"}')
+    worker.journal.queue_result(
+        published["task_id"], payload, hashlib.sha256(payload.read_bytes()).hexdigest()
+    )
+    worker.journal.published(published["task_id"])
+
+    assert worker.scan()["revision"] == waiting["worker_revision_sha"]
+
+
+def test_worker_uses_startup_revision_even_if_checkout_head_moves(tmp_path):
+    task = revised_manifest("e" * 40, "2026-09-11T00:00:00Z")
+
+    class Relay:
+        def refresh(self):
+            pass
+
+        def tasks(self):
+            return [task]
+
+        def validity(self, task):
+            return True, ""
+
+    class Manager:
+        revision = "d" * 40
+
+        def generations(self):
+            return {}
+
+        def collect_retired(self):
+            pass
+
+        def current_control_revision(self):
+            return self.revision
+
+    manager = Manager()
+    worker = Worker(
+        {"state_dir": str(tmp_path), "simulation": True},
+        relay=Relay(),
+        manager=manager,
+        driver=object(),
+        control_request_selector=lambda config, current, requests, **kwargs: requests[0],
+    )
+    manager.revision = task["worker_revision_sha"]
+    trigger_control_update(
+        {"state_dir": str(tmp_path)},
+        {"revision": task["worker_revision_sha"], "task_id": task["task_id"]},
+        run=lambda argv, **kwargs: None,
+    )
+    request = worker.scan()
+    assert worker.running_control_revision == "d" * 40
+    assert request["revision"] == task["worker_revision_sha"]
+    assert worker.journal.tasks() == []
+
+
+def test_restarted_worker_clears_already_satisfied_request(tmp_path):
+    revision = "d" * 40
+    task = manifest()
+
+    class Relay:
+        def refresh(self):
+            pass
+
+        def tasks(self):
+            return []
+
+    class Manager:
+        def generations(self):
+            return {}
+
+        def collect_retired(self):
+            pass
+
+        def current_control_revision(self):
+            return revision
+
+    trigger_control_update(
+        {"state_dir": str(tmp_path)},
+        {"revision": revision, "task_id": task["task_id"]},
+        run=lambda argv, **kwargs: None,
+    )
+    worker = Worker(
+        {"state_dir": str(tmp_path), "simulation": True},
+        relay=Relay(),
+        manager=Manager(),
+        driver=object(),
+    )
+    assert worker.scan() is None
+    assert not (tmp_path / "control-update/request.json").exists()
+
+
+def test_control_history_fetch_failure_is_reported_as_blocked(tmp_path):
+    task = manifest()
+
+    class Relay:
+        def refresh(self):
+            pass
+
+        def tasks(self):
+            return [task]
+
+        def validity(self, task):
+            return True, ""
+
+    class Manager:
+        def generations(self):
+            return {}
+
+        def collect_retired(self):
+            pass
+
+        def current_control_revision(self):
+            return "f" * 40
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("control mirror unavailable")
+
+    worker = Worker(
+        {"state_dir": str(tmp_path), "simulation": True},
+        relay=Relay(),
+        manager=Manager(),
+        driver=object(),
+        control_request_selector=unavailable,
+    )
+    assert worker.scan() is None
+    heartbeat = json.loads((tmp_path / "health/worker.json").read_text())
+    assert heartbeat["control_update"] == "blocked"

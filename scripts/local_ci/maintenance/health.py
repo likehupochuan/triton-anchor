@@ -20,6 +20,7 @@ if str(LOCAL_ROOT) not in sys.path:
     sys.path.insert(0, str(LOCAL_ROOT))
 from prepare.runtime import EnvironmentManager
 from prepare.artifacts import atomic_json, safe_source
+from prepare.control_update import read_update_request, update_request_path
 from prepare.runtime_probe import runtime_status
 
 
@@ -146,8 +147,8 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
         "monitor_services",
         [
             "triton-anchor-local-ci.service",
+            "triton-anchor-local-ci-control-update.service",
             "triton-anchor-local-ci-health.timer",
-            "triton-anchor-local-ci-control-update.timer",
         ],
     ):
         if not isinstance(name, str) or not __import__("re").fullmatch(
@@ -181,6 +182,48 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
         except (OSError, subprocess.TimeoutExpired):
             pass
         services.append(row)
+    control_service = next(
+        (
+            row
+            for row in services
+            if row["name"] == "triton-anchor-local-ci-control-update.service"
+        ),
+        {},
+    )
+    control_update = {
+        "state": "blocked"
+        if worker.get("control_update") == "blocked"
+        else "idle",
+        "requested_revision": None,
+        "task_id": None,
+        "requested_at": None,
+    }
+    request_path = update_request_path(config)
+    if request_path.exists() or request_path.is_symlink():
+        try:
+            request = read_update_request(request_path)
+            requested_at = request.get("requested_at")
+            if (
+                type(requested_at) not in (int, float)
+                or not __import__("math").isfinite(requested_at)
+                or requested_at < 0
+            ):
+                raise ValueError("Control update request time is invalid")
+            state = (
+                "failed"
+                if control_service.get("active_state") == "failed"
+                else "updating"
+                if control_service.get("active_state") in {"active", "activating"}
+                else "pending"
+            )
+            control_update = {
+                "state": state,
+                "requested_revision": request["revision"],
+                "task_id": request["task_id"],
+                "requested_at": iso(requested_at),
+            }
+        except (OSError, ValueError):
+            control_update["state"] = "invalid"
     snapshot = {
         "schema": "triton-anchor-worker-health",
         "worker_id": config.get("worker_id", "local-ci"),
@@ -201,6 +244,7 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
         "workspaces": workspaces,
         "storage": storage,
         "services": services,
+        "control_update": control_update,
         "service_scope": "user",
         "runtime": runtime,
         "images": environments.get("images", []),
@@ -257,6 +301,7 @@ def public_snapshot(snapshot):
     poller = snapshot.get("poller", {})
     runtime = snapshot.get("runtime", {})
     environment = snapshot.get("environments", {})
+    control_update = snapshot.get("control_update", {"state": "idle"})
     result = {
         "schema": "triton-anchor-worker-health",
         "worker_id": identifier(snapshot.get("worker_id")),
@@ -272,6 +317,21 @@ def public_snapshot(snapshot):
             "last_poll_status": "error"
             if poller.get("last_poll_status") == "error"
             else "success",
+        },
+        "control_update": {
+            "state": control_update.get("state")
+            if control_update.get("state")
+            in {"idle", "pending", "updating", "failed", "invalid", "blocked"}
+            else "invalid",
+            "requested_revision": identifier(
+                control_update.get("requested_revision")
+            )
+            if control_update.get("requested_revision") is not None
+            else None,
+            "task_id": identifier(control_update.get("task_id"))
+            if control_update.get("task_id") is not None
+            else None,
+            "requested_at": instant(control_update.get("requested_at")),
         },
         "runtime": {
             "kind": "docker-rootless",

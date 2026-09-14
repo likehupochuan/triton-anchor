@@ -25,6 +25,11 @@ from prepare.runtime import EnvironmentManager
 from prepare.runtime_probe import probe_runtime
 
 
+OBSOLETE_UNITS = (
+    "triton-anchor-local-ci-control-update.timer",
+)
+
+
 def quoted(value: str) -> str:
     if any(character in value for character in "\n\r\x00"):
         raise ValueError("Systemd paths must not contain control characters")
@@ -62,7 +67,8 @@ def render_units(
         f"Environment={quoted('DOCKER_HOST=' + runtime.get('endpoint', ''))}\nUnsetEnvironment=DOCKER_CONTEXT DOCKER_TLS_VERIFY DOCKER_CERT_PATH\n"
     )
     worker = f"{python} {quoted(str(root / 'agent_ci/worker.py'))} --config {quoted(str(config_path))}"
-    control_update = f"{python} {quoted(str(root / 'prepare/control_update.py'))} --config {quoted(str(config_path))} --apply"
+    request_file = Path(config["state_dir"]) / "control-update/request.json"
+    control_update = f"{python} {quoted(str(root / 'prepare/control_update.py'))} --config {quoted(str(config_path))} --request-file {quoted(str(request_file))} --apply"
     health = f"{python} {quoted(str(root / 'maintenance/health.py'))} --config {quoted(str(config_path))} --publish"
     retention = f"{python} {quoted(str(root / 'maintenance/retention.py'))} --config {quoted(str(config_path))} --apply"
     units = {
@@ -73,10 +79,9 @@ def render_units(
         + common
         + f"ExecStart={health}\nTimeoutStartSec=10min\n",
         "triton-anchor-local-ci-health.timer": "[Unit]\nDescription=Refresh Local CI health independently of poller\n\n[Timer]\nOnBootSec=1min\nOnUnitActiveSec=5min\nRandomizedDelaySec=15\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n",
-        "triton-anchor-local-ci-control-update.service": "[Unit]\nDescription=Fast-forward the Local CI control checkout from Gitee\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\n"
+        "triton-anchor-local-ci-control-update.service": "[Unit]\nDescription=Update Local CI control checkout for a waiting task\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\n"
         + common
         + f"ExecStart={control_update}\nTimeoutStartSec=10min\n",
-        "triton-anchor-local-ci-control-update.timer": "[Unit]\nDescription=Keep the Local CI control checkout current\n\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=5min\nRandomizedDelaySec=30\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n",
     }
     units["triton-anchor-local-ci-retention.service"] = (
         "[Unit]\nDescription=Expire Local CI result evidence by upload age\n\n[Service]\nType=oneshot\n"
@@ -98,7 +103,9 @@ def render_units(
     return units
 
 
-def install_units(units: dict[str, str], destination: Path, backup: Path) -> dict:
+def install_units(
+    units: dict[str, str], destination: Path, backup: Path, *, obsolete=OBSOLETE_UNITS
+) -> dict:
     destination.mkdir(parents=True, exist_ok=True)
     backup.mkdir(parents=True, exist_ok=False)
     manifest = {
@@ -108,7 +115,7 @@ def install_units(units: dict[str, str], destination: Path, backup: Path) -> dic
         "destination": str(destination.resolve()),
         "units": {},
     }
-    if any((destination / name).is_symlink() for name in units):
+    if any((destination / name).is_symlink() for name in (*units, *obsolete)):
         raise ValueError("Refusing to replace symlinked systemd units")
     for name, content in units.items():
         target = destination / name
@@ -119,6 +126,12 @@ def install_units(units: dict[str, str], destination: Path, backup: Path) -> dic
             "existed": existed,
             "installed_sha256": hashlib.sha256(content.encode()).hexdigest(),
         }
+    for name in obsolete:
+        target = destination / name
+        existed = target.is_file()
+        if existed:
+            shutil.copy2(target, backup / name)
+        manifest["units"][name] = {"existed": existed, "removed": True}
     (backup / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     for name, content in units.items():
         target = destination / name
@@ -140,6 +153,12 @@ def rollback_units(backup: Path, *, apply: bool = False) -> dict:
         if not name.startswith("triton-anchor-local-ci") or Path(name).name != name:
             raise ValueError("Unsafe service backup entry")
         target = destination / name
+        if entry.get("removed"):
+            if target.exists():
+                raise ValueError(
+                    "An obsolete unit was recreated after installation; preserve it for manual review"
+                )
+            continue
         if target.is_symlink() or (
             target.exists()
             and hashlib.sha256(target.read_bytes()).hexdigest()
@@ -266,6 +285,18 @@ def main():
                 / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             )
             manifest = install_units(units, Path(args.unit_dir), backup)
+            installed_obsolete = [
+                name
+                for name in OBSOLETE_UNITS
+                if manifest["units"][name]["existed"]
+            ]
+            if installed_obsolete:
+                subprocess.run(
+                    ["systemctl", "--user", "disable", "--now", *installed_obsolete],
+                    check=True,
+                )
+            for name in OBSOLETE_UNITS:
+                (Path(args.unit_dir) / name).unlink(missing_ok=True)
             subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
             services = ["triton-anchor-local-ci.service"] + [
                 name for name in units if name.endswith(".timer")

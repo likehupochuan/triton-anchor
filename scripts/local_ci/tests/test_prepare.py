@@ -510,7 +510,17 @@ def test_install_prepares_then_starts_user_services(tmp_path):
     config_file.write_text(json.dumps(settings))
     credentials.write_text("FIXTURE=private\n")
     credentials.chmod(0o600)
+    unit_dir = tmp_path / "config/systemd/user"
+    unit_dir.mkdir(parents=True)
+    for name in install.OBSOLETE_UNITS:
+        (unit_dir / name).write_text("old periodic control update")
     events = []
+    systemd_calls = []
+
+    def systemd(argv, **kwargs):
+        events.append(argv)
+        systemd_calls.append((argv, kwargs))
+
     with (
         patch.dict(os.environ, {"XDG_CONFIG_HOME": str(tmp_path / "config")}),
         patch.object(sys, "argv", ["install.py", "--config", str(config_file),
@@ -518,13 +528,24 @@ def test_install_prepares_then_starts_user_services(tmp_path):
         patch.object(install.os, "geteuid", return_value=1001),
         patch.object(install, "load_environment", side_effect=lambda *a: events.append("env")),
         patch.object(install, "prepare_environments", side_effect=lambda *a: events.append("prepare")),
-        patch.object(install.subprocess, "run", side_effect=lambda argv, **kw: events.append(argv)),
+        patch.object(install.subprocess, "run", side_effect=systemd),
     ):
         assert install.main() == 0
     assert events[:2] == ["env", "prepare"]
     assert ["systemctl", "--user", "daemon-reload"] in events
     assert any(isinstance(e, list) and "restart" in e and "triton-anchor-local-ci.service" in e for e in events)
+    assert ["systemctl", "--user", "disable", "--now", *install.OBSOLETE_UNITS] in events
+    disable = next(
+        kwargs
+        for argv, kwargs in systemd_calls
+        if argv[:4] == ["systemctl", "--user", "disable", "--now"]
+    )
+    assert disable["check"] is True
     assert (tmp_path / "config/systemd/user/triton-anchor-local-ci.service").is_file()
+    assert not any(
+        (tmp_path / "config/systemd/user" / name).exists()
+        for name in install.OBSOLETE_UNITS
+    )
 
 
 def test_rendered_worker_units_include_local_watchdog_and_control_update(tmp_path):
@@ -534,8 +555,61 @@ def test_rendered_worker_units_include_local_watchdog_and_control_update(tmp_pat
     assert "triton-anchor-local-ci-watchdog.timer" in units
     assert "triton-anchor-local-ci-health.timer" in units
     assert "triton-anchor-local-ci-retention.timer" in units
-    assert "triton-anchor-local-ci-control-update.timer" in units
+    assert "triton-anchor-local-ci-control-update.timer" not in units
     assert "control_update.py" in units["triton-anchor-local-ci-control-update.service"]
+    assert "--request-file" in units["triton-anchor-local-ci-control-update.service"]
+
+
+def test_install_backup_supports_obsolete_control_timer_removal_and_rollback(tmp_path):
+    destination, backup = tmp_path / "units", tmp_path / "backup"
+    destination.mkdir()
+    old = destination / "triton-anchor-local-ci-control-update.timer"
+    old.write_text("old periodic control update")
+    units = {"triton-anchor-local-ci.service": "new worker"}
+    manifest = install.install_units(units, destination, backup)
+    assert manifest["units"][old.name] == {"existed": True, "removed": True}
+    assert old.exists()  # The caller stops the loaded timer before unlinking it.
+    old.unlink()
+    assert install.rollback_units(backup, apply=True)["scope"] == "user"
+    assert old.read_text() == "old periodic control update"
+
+
+def test_install_preserves_obsolete_timer_file_when_disable_fails(tmp_path):
+    settings = config(tmp_path)
+    config_file, credentials = tmp_path / "config.json", tmp_path / "credentials.env"
+    config_file.write_text(json.dumps(settings))
+    credentials.write_text("FIXTURE=private\n")
+    credentials.chmod(0o600)
+    unit_dir = tmp_path / "config/systemd/user"
+    unit_dir.mkdir(parents=True)
+    old = unit_dir / install.OBSOLETE_UNITS[0]
+    old.write_text("old periodic control update")
+
+    def systemd(argv, **kwargs):
+        if argv[:4] == ["systemctl", "--user", "disable", "--now"]:
+            raise install.subprocess.CalledProcessError(1, argv)
+
+    with (
+        patch.dict(os.environ, {"XDG_CONFIG_HOME": str(tmp_path / "config")}),
+        patch.object(
+            sys,
+            "argv",
+            [
+                "install.py",
+                "--config",
+                str(config_file),
+                "--credentials-env",
+                str(credentials),
+                "--apply",
+            ],
+        ),
+        patch.object(install.os, "geteuid", return_value=1001),
+        patch.object(install, "load_environment"),
+        patch.object(install, "prepare_environments"),
+        patch.object(install.subprocess, "run", side_effect=systemd),
+    ):
+        assert install.main() == 1
+    assert old.read_text() == "old periodic control update"
 
 
 def test_install_failure_does_not_start_services(tmp_path):

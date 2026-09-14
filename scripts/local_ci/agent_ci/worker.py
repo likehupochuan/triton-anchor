@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -22,9 +23,89 @@ from agent_ci.codex import CodexDriver
 from agent_ci.delivery import seal_result
 from agent_ci.executor import DockerExecutor
 from agent_ci.policy import changed_files, minimum_checks
-from agent_ci.protocol import ContractError, atomic_json, is_legacy_task, validate_task
+from agent_ci.protocol import ID, SHA, ContractError, atomic_json, is_legacy_task, validate_task
 from agent_ci.relay import GitRelay
 from agent_ci.state import Journal
+from prepare.control_update import (
+    REQUEST_SCHEMA,
+    oldest_forward_request,
+    read_update_request,
+    update_request_lock_path,
+    update_request_path,
+)
+
+
+CONTROL_UPDATE_UNIT = "triton-anchor-local-ci-control-update.service"
+
+
+def trigger_control_update(config: dict, request: dict, *, run=subprocess.run) -> str:
+    """Start the exact-revision updater after the Worker releases its control lock."""
+    import fcntl
+
+    revision = request.get("revision")
+    task_id = request.get("task_id")
+    if (
+        not isinstance(revision, str)
+        or not SHA.fullmatch(revision)
+        or not isinstance(task_id, str)
+        or not ID.fullmatch(task_id)
+    ):
+        raise ValueError("Control update trigger requires an exact revision")
+    request_path = update_request_path(config)
+    request_lock = update_request_lock_path(config)
+    request_lock.parent.mkdir(parents=True, exist_ok=True)
+    with request_lock.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        requested_at = time.time()
+        try:
+            existing = read_update_request(request_path)
+            if (
+                existing["revision"] == revision
+                and existing["task_id"] == task_id
+                and type(existing.get("requested_at")) in (int, float)
+                and existing["requested_at"] >= 0
+            ):
+                requested_at = existing["requested_at"]
+        except (OSError, ValueError):
+            pass
+        atomic_json(
+            request_path,
+            {
+                "schema": REQUEST_SCHEMA,
+                "revision": revision,
+                "task_id": task_id,
+                "requested_at": requested_at,
+            },
+        )
+    run(
+        ["systemctl", "--user", "start", "--no-block", CONTROL_UPDATE_UNIT],
+        check=True,
+        timeout=30,
+    )
+    return CONTROL_UPDATE_UNIT
+
+
+def complete_current_control_request(config: dict, current_revision: str | None) -> bool:
+    """Remove a request already satisfied by this running Worker revision."""
+    import fcntl
+
+    if not isinstance(current_revision, str) or not SHA.fullmatch(current_revision):
+        return False
+    request_path = update_request_path(config)
+    request_lock = update_request_lock_path(config)
+    request_lock.parent.mkdir(parents=True, exist_ok=True)
+    with request_lock.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not request_path.exists():
+            return False
+        try:
+            request = read_update_request(request_path)
+        except (OSError, ValueError):
+            return False
+        if request["revision"] != current_revision:
+            return False
+        request_path.unlink()
+        return True
 
 
 class ActiveTask:
@@ -43,7 +124,14 @@ class ActiveTask:
 
 class Worker:
     def __init__(
-        self, config, *, relay=None, manager=None, driver=None, executor_factory=None
+        self,
+        config,
+        *,
+        relay=None,
+        manager=None,
+        driver=None,
+        executor_factory=None,
+        control_request_selector=oldest_forward_request,
     ):
         self.config, self.state_dir = config, Path(config["state_dir"])
         self.journal = Journal(self.state_dir)
@@ -57,8 +145,12 @@ class Worker:
 
             manager = EnvironmentManager(config, self.state_dir)
         self.manager = manager
+        self.running_control_revision = getattr(
+            manager, "current_control_revision", lambda: None
+        )()
         self.driver = driver or CodexDriver(config, self.state_dir)
         self.executor_factory = executor_factory or DockerExecutor
+        self.control_request_selector = control_request_selector
         self.stop_event = threading.Event()
         self.active = None
 
@@ -283,6 +375,40 @@ class Worker:
             self.journal.event(row["task_id"], "publication_error", {"error": str(exc)})
 
     def scan(self):
+        complete_current_control_request(
+            self.config, self.running_control_revision
+        )
+        installed_revision = getattr(
+            self.manager, "current_control_revision", lambda: None
+        )()
+        if (
+            self.running_control_revision
+            and installed_revision
+            and installed_revision != self.running_control_revision
+        ):
+            try:
+                pending = read_update_request(update_request_path(self.config))
+            except (OSError, ValueError):
+                pending = None
+            if pending and pending["revision"] == installed_revision:
+                request = {
+                    "revision": pending["revision"],
+                    "task_id": pending["task_id"],
+                }
+                self.heartbeat(
+                    control_revision=self.running_control_revision,
+                    installed_control_revision=installed_revision,
+                    requested_control_revision=pending["revision"],
+                    control_update="restart_required",
+                )
+                return request
+            self.heartbeat(
+                control_revision=self.running_control_revision,
+                installed_control_revision=installed_revision,
+                control_update="blocked",
+                error="Installed control changed without a matching update request",
+            )
+            return None
         # Publication retries do not depend on Docker or rebuild the tested code.
         attempted = set()
         for row in self.journal.tasks():
@@ -300,18 +426,39 @@ class Worker:
             self.heartbeat(runtime="disk_budget_exceeded")
             return
         self.relay.refresh()
-        waiting_revision = ""
+        waiting = []
+        current_revision = self.running_control_revision
         for task in self.relay.tasks():
             if self.stop_event.is_set():
                 break
             if is_legacy_task(task):
                 continue
             try:
-                current_revision = getattr(
-                    self.manager, "current_control_revision", lambda: None
-                )()
+                validate_task(
+                    task,
+                    tuple(
+                        self.config.get(
+                            "repositories", ["likehupochuan/triton-anchor"]
+                        )
+                    ),
+                )
+                try:
+                    local = self.journal.task(task["task_id"])
+                except ContractError:
+                    local = None
+                if local and local["phase"] in {"publish_pending", "published"}:
+                    continue
+                valid, _ = self.relay.validity(task)
+                if not valid:
+                    continue
                 if current_revision and task.get("worker_revision_sha") != current_revision:
-                    waiting_revision = task.get("worker_revision_sha", "")
+                    waiting.append(
+                        {
+                            "revision": task["worker_revision_sha"],
+                            "task_id": task["task_id"],
+                            "captured_at": task["captured_at"],
+                        }
+                    )
                     continue
                 self.process(task)
                 if not any(
@@ -329,14 +476,44 @@ class Worker:
                     task.get("task_id", "invalid"), "task_error", {"error": str(exc)}
                 )
                 self.heartbeat(error=str(exc))
-        if waiting_revision:
+        if waiting:
+            try:
+                request = self.control_request_selector(
+                    self.config,
+                    current_revision,
+                    waiting,
+                    allow_local=self.config.get("simulation", False),
+                )
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                self.heartbeat(
+                    control_revision=current_revision,
+                    control_update="blocked",
+                    error=str(exc),
+                )
+                return None
             self.heartbeat(
                 control_revision=current_revision,
-                requested_control_revision=waiting_revision,
+                requested_control_revision=request["revision"],
                 control_update="required",
             )
+            return request
         else:
             self.heartbeat()
+            return None
+
+
+def scan_once(worker: Worker, control_lock, *, trigger=trigger_control_update):
+    """Scan under a shared lock, then trigger any required update after unlocking."""
+    import fcntl
+
+    fcntl.flock(control_lock, fcntl.LOCK_SH)
+    try:
+        request = worker.scan()
+    finally:
+        fcntl.flock(control_lock, fcntl.LOCK_UN)
+    if request:
+        trigger(worker.config, request)
+    return request
 
 
 def main(argv=None):
@@ -370,13 +547,10 @@ def main(argv=None):
         signal.signal(signal.SIGINT, stop)
         with (worker.state_dir / "control.lock").open("w") as control_lock:
             while not worker.stop_event.is_set():
-                fcntl.flock(control_lock, fcntl.LOCK_SH)
                 try:
-                    worker.scan()
+                    scan_once(worker, control_lock)
                 except Exception as exc:
                     worker.heartbeat(error=str(exc))
-                finally:
-                    fcntl.flock(control_lock, fcntl.LOCK_UN)
                 if args.once:
                     break
                 worker.stop_event.wait(worker.config.get("poll_interval_seconds", 60))
