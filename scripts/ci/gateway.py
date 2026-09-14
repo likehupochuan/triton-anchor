@@ -70,6 +70,16 @@ CHECK_CONCLUSIONS = {
 }
 
 
+def has_native_preflight(task: dict) -> bool:
+    """The control branch's own push already has native checks on its tested SHA."""
+    return (
+        task.get("event_kind") == "push"
+        and task.get("pr_number") == 0
+        and task.get("target_branch") == "local-ci-unified"
+        and task["worker_revision_sha"] == task["tested_sha"]
+    )
+
+
 class GitHubAPIError(RuntimeError):
     """A diagnostic GitHub failure that never exposes response bodies or credentials."""
 
@@ -256,6 +266,8 @@ class GitHub:
             conclusion and conclusion not in CHECK_CONCLUSIONS
         ):
             raise ValueError("Invalid CI Check Run conclusion")
+        if has_native_preflight(task):
+            return False
         name = CHECK_NAMES[key]
         external_id = f"triton-anchor-local-ci:{key}:{task['task_id']}"
         runs = self.check_runs(task, key)
@@ -343,6 +355,8 @@ class GitHub:
 
     def owns_preflight(self, task: dict) -> bool:
         """A newly prepared task owns the gate even before its Gitee enqueue."""
+        if has_native_preflight(task):
+            return True
         for key, name in CHECK_NAMES.items():
             owned = [
                 row

@@ -1011,6 +1011,32 @@ README only
             g.finalize_preflight(gh, task, {"prepare": "success", "basic": "failure"})
             self.assertEqual(writes, [])
 
+    def test_control_push_keeps_summary_without_duplicate_preflight_checks(self):
+        task = {**self.task, "pr_number": 0, "event_kind": "push",
+                "target_branch": "local-ci-unified", "tested_sha": self.head,
+                "worker_revision_sha": self.head}
+        gh = g.GitHub(g.REPOSITORY, token="fixture")
+        with patch.object(g, "is_current", return_value=True), \
+                patch.object(gh, "request") as request, patch.object(gh, "status") as status:
+            g.begin_preflight(gh, task)
+            for key in g.CHECK_NAMES:
+                self.assertFalse(g.sync_preflight(gh, task, {key: "success"}))
+            g.finalize_preflight(gh, task, {"prepare": "success", "basic": "failure"})
+            request.assert_not_called()  # No check writes or ownership lookups.
+            self.assertEqual([call.args[1] for call in status.call_args_list], ["pending", "failure"])
+            g.finalize_preflight(gh, task, {"enqueue": "success"})
+            self.assertEqual(status.call_count, 2)  # Receiver still owns the final result.
+
+        for change in ({"target_branch": "main"}, {"event_kind": "manual"},
+                       {"pr_number": 7, "event_kind": "pull_request"},
+                       {"worker_revision_sha": self.base}):
+            with self.subTest(change=change), \
+                    patch.object(gh, "request", return_value={"check_runs": []}) as request:
+                self.assertTrue(gh.check({**task, **change}, "basic", "completed",
+                                         "success", "Passed", "Evidence"))
+                self.assertEqual(request.call_args.args[:2], ("check-runs", "POST"))
+                self.assertEqual(request.call_args.args[2]["head_sha"], self.head)
+
     def test_stage_completion_rejects_unknown_or_nonterminal_outcomes(self):
         for stages in (None, [], ["basic"], {}, {"summary": "success"},
                        {"api": "in_progress"}, {"api": ["success"]}):

@@ -63,6 +63,7 @@ FlagGems 使用服务器 profile 中的固定只读依赖；修改 PR 中的 Fla
 Worker 轮询任务有效性，PR 关闭、转 Draft、更换目标或增加提交时停止旧容器。
 Codex 短暂中断可恢复同一 CLI 会话；Worker 重启会清理未完成容器并新建任务运行，
 保留之前的本地证据。已封存结果只重试发布，不重编、不重测。
+Codex 默认最多尝试 10 次（含首次），仍共用任务时间预算；已有配置中的 `codex_attempts` 显式值优先。
 
 ```text
 state_dir/

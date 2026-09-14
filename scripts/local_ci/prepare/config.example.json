@@ -36,7 +36,7 @@
   "poll_interval_seconds": 60,
   "heartbeat_stale_seconds": 180,
   "codex_timeout_seconds": 21600,
-  "codex_attempts": 3,
+  "codex_attempts": 10,
   "retry_delay_seconds": 30,
   "results_retention_days": 30,
   "task_workspace_max_bytes": 107374182400,

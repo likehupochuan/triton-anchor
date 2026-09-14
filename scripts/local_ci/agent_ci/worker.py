@@ -267,7 +267,7 @@ class Worker:
                 "codex_timeout_seconds", 21600
             )
             completed = False
-            for attempt in range(self.config.get("codex_attempts", 3)):
+            for attempt in range(self.config.get("codex_attempts", 10)):
                 if active.cancelled.is_set():
                     break
                 try:
@@ -294,7 +294,7 @@ class Worker:
                     self.journal.event(
                         task["task_id"], "codex_error", {"error": str(exc)}
                     )
-                if attempt + 1 < self.config.get("codex_attempts", 3):
+                if attempt + 1 < self.config.get("codex_attempts", 10):
                     active.cancelled.wait(self.config.get("retry_delay_seconds", 30))
             if not completed:
                 raise ContractError(
