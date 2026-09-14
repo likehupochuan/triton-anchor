@@ -25,7 +25,7 @@
         <label class="ci-field" for="taskSearch">按 PR 编号、分支或提交查找<input type="search" id="taskSearch" placeholder="例如：3、main、提交 SHA"></label>
         <p class="ci-help">输入 PR 编号即可精确查找对应任务。</p>
         <label class="ci-field" for="historyFilter">显示范围<select id="historyFilter"><option value="current">当前结果</option><option value="all">包含历史记录</option></select></label>
-        <label class="ci-field" for="resultFilter">结果筛选<select id="resultFilter"><option value="all">全部结果</option><option value="failure">失败 / 错误</option><option value="success">通过</option><option value="cancelled">已取消</option><option value="waiting">等待 / 待交付</option></select></label>
+        <label class="ci-field" for="resultFilter">结果筛选<select id="resultFilter"><option value="all">全部结果</option><option value="failure">未通过</option><option value="error">执行错误</option><option value="success">通过</option><option value="cancelled">已取消</option><option value="waiting">等待 / 待交付</option></select></label>
         <div id="taskList" class="ci-task-list"></div>
       </aside>
       <div class="ci-content">

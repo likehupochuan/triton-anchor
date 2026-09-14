@@ -67,6 +67,55 @@ const errorRun = result => normalize({schema:'triton-anchor-dashboard', tasks:[{
   task:task('a','2026-09-10'), status:result.status || 'infra_error', result,
 }]}).runs[0];
 
+test('execution errors and failed checks stay separate through task filters and business views', () => {
+  const vm=require('node:vm'), fs=require('node:fs');
+  const runs=normalize({schema:'triton-anchor-dashboard',tasks:['fail','infra_error'].map((status,index)=>({
+    task:{...task(String(index),'2026-09-10'),pr_number:index+1},status,
+    result:{status,environment:{profile:'profile-'+index},checks:[
+      {tool_id:'backend_tests',status},
+      {tool_id:'flaggems',status,details:{'flaggems-summary':{mode:'full',results:[
+        {op:'a',test_status:'失败'}, {op:'b',test_status:'infra_error'},
+      ]}}},
+    ]},
+  }))}).runs;
+  assert.deepEqual(runs.map(run=>run.conclusion),['failure','error']);
+  const projected=business({runs});
+  assert.deepEqual(projected.backends.backends.map(row=>row.state),['failure','error']);
+  assert.deepEqual(projected.fullTest.operators.map(row=>row.status),['failed','error']);
+
+  const nodes=new Map();
+  const document={createElement:()=>({}),querySelectorAll:()=>[],getElementById:id=>{
+    if(!nodes.has(id))nodes.set(id,{value:'',addEventListener(){}});
+    return nodes.get(id);
+  }};
+  const context=vm.createContext({document,URL,URLSearchParams,location:{search:''},
+    window:{location:{search:''}},fetch:()=>new Promise(()=>{}),setInterval(){},runs});
+  vm.runInContext(fs.readFileSync(require.resolve('../../../dashboard/local-ci.js'),'utf8'),context);
+  vm.runInContext('model.data={runs};',context);
+  nodes.get('historyFilter').value='current';
+  for(const filter of ['failure','error']){
+    nodes.get('resultFilter').value=filter;
+    assert.equal(vm.runInContext('filteredRuns().length',context),1);
+    assert.equal(vm.runInContext('filteredRuns()[0].conclusion',context),filter);
+  }
+  assert.equal(vm.runInContext("badge('failure').textContent",context),'未通过');
+  assert.equal(vm.runInContext("badge('error').textContent",context),'执行错误');
+
+  const app=vm.createContext({document,URLSearchParams,location:{search:''},LocalCIData:{normalize,business},window:{location:{search:''}},
+    fetch:()=>new Promise(()=>{})});
+  vm.runInContext(fs.readFileSync(require.resolve('../../../dashboard/app.js'),'utf8'),app);
+  vm.runInContext("state.fullTest={operators:[{name:'fail',status:'failed'},{name:'error',status:'infra_error'}]};",app);
+  const stats=vm.runInContext('computeOperatorSummary(state.fullTest.operators)',app);
+  assert.equal(stats.failed,1);
+  assert.equal(stats.error,1);
+  assert.equal(stats.exceptions,2);
+  for(const filter of ['failed','error']){
+    vm.runInContext(`state.status='${filter}';`,app);
+    assert.equal(vm.runInContext('filteredOperators().length',app),1);
+  }
+  assert.match(vm.runInContext("statusBadge('infra_error')",app),/status-error.*执行错误/);
+});
+
 test('server failure in summary is separated from reviews that never completed', () => {
   const run = errorRun({status:'infra_error', summary:'Task worker revision differs from installed control',
     blocking_reasons:['必要审查未通过：pr_info','必要审查未通过：architecture']});
@@ -162,11 +211,43 @@ test('blocker groups render Chinese headings and preserve original text without 
   const rendered = flatten(root);
   assert.ok(rendered.some(node=>node.tag==='h4'&&node.textContent.startsWith('服务器环境问题')));
   assert.ok(!rendered.some(node=>node.tag==='h4'&&node.textContent.startsWith('必检 / 审查未完成')));
-  assert.ok(rendered.some(node=>node.textContent.startsWith('影响：以下必检 / 审查尚未完成')));
+  assert.ok(rendered.some(node=>node.textContent==='未完成项目（不代表审查未通过）'));
   assert.ok(rendered.some(node=>node.textContent==='架构契约审查尚未完成'));
-  assert.ok(rendered.some(node=>node.tag==='summary'&&node.textContent==='原始原因与来源'));
+  assert.ok(rendered.some(node=>node.tag==='summary'&&node.textContent==='查看详情'));
   assert.ok(rendered.some(node=>node.textContent==='原始阻塞原因：'+original));
   assert.ok(!rendered.some(node=>node.tag==='img'));
+  const visible = node => [node,...(node.tag==='details'?[]:node.children.flatMap(visible))];
+  const mainText=visible(root).map(node=>node.textContent).join('\n');
+  assert.ok(mainText.includes('执行错误原因'));
+  assert.ok(mainText.includes('控制版本不匹配'));
+  assert.ok(!mainText.includes('架构契约审查尚未完成'));
+  assert.ok(!mainText.includes('必要审查未通过'));
+
+  // A real negative review remains separate even when the run also has an OOM.
+  const mixedRoot=new Element('main');
+  context.root=mixedRoot;
+  context.run=errorRun({summary:'Out of memory',reviews:[
+    {kind:'architecture',status:'fail',summary:'内存不足时没有清理资源'},
+  ]});
+  vm.runInNewContext('renderBlockers(root,run);',context);
+  assert.deepEqual(mixedRoot.children.map(box=>box.children[0].textContent),['执行错误原因','审查未通过']);
+  assert.ok(visible(mixedRoot.children[0]).some(node=>node.textContent==='内存不足'));
+  assert.ok(!visible(mixedRoot.children[0]).some(node=>node.textContent==='内存不足时没有清理资源'));
+  assert.ok(visible(mixedRoot.children[1]).some(node=>node.textContent==='内存不足时没有清理资源'));
+});
+
+test('profile errors and unknown execution summaries are not lost behind missing reviews', () => {
+  for(const [summary,category] of [
+    ['Trusted profile and exact LLVM revision are required','environment'],
+    ['LLVM version mismatch','environment'],
+    ['服务器配置缺失','environment'],
+    ['容器启动失败','environment'],
+    ['Agent exited without a final result','unknown'],
+  ]) {
+    const groups=blockerGroups(errorRun({summary,blocking_reasons:['必要审查未通过：architecture']}));
+    assert.equal(groups[0].id,category);
+    assert.ok(groups[0].reasons.some(item=>item.reason===summary));
+  }
 });
 
 test('incompletion is an impact under one recorded cause, otherwise its cause is unknown', () => {

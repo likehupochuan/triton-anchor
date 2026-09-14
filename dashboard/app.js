@@ -14,9 +14,9 @@ const state = {
 const statusLabels = {
   passed: "通过",
   success: "通过",
-  failed: "失败",
-  failure: "失败",
-  error: "错误",
+  failed: "未通过",
+  failure: "未通过",
+  error: "执行错误",
   timeout: "超时",
   warning: "警告",
   pending: "等待 / 待交付",
@@ -53,8 +53,8 @@ function normalizeStatus(value) {
   const status = String(value || "unknown").toLowerCase();
   if (status === "success" || status === "pass") return "passed";
   if (status === "waiting") return "pending";
-  if (status === "failure" || status === "fail" || status === "infra_error") return "failed";
-  if (status === "failure" || status === "error") return "failed";
+  if (status === "failure" || status === "fail") return "failed";
+  if (status === "infra_error" || status === "error") return "error";
   if (status === "healthy" || status === "idle") return "passed";
   if (status === "busy" || status === "polling" || status === "running") return "pending";
   if (status === "degraded") return "warning";
@@ -127,12 +127,12 @@ function renderHeader() {
 }
 
 function computeOperatorSummary(rows) {
-  const summary = { total: rows.length, passed: 0, failed: 0, timeout: 0 };
+  const summary = { total: rows.length, passed: 0, failed: 0, error: 0, timeout: 0 };
   rows.forEach((row) => {
     const status = normalizeStatus(row.status);
     if (status in summary) summary[status] += 1;
   });
-  summary.exceptions = summary.failed + summary.timeout;
+  summary.exceptions = summary.failed + summary.error + summary.timeout;
   summary.passRate = summary.total ? (summary.passed / summary.total) * 100 : 0;
   return summary;
 }
@@ -142,7 +142,8 @@ function renderOperatorMetrics() {
   const metrics = [
     ["算子总数", summary.total, ""],
     ["通过", summary.passed, ""],
-    ["失败", summary.failed, ""],
+    ["未通过", summary.failed, ""],
+    ["执行错误", summary.error, ""],
     ["超时", summary.timeout, ""],
     ["通过率", `${summary.passRate.toFixed(1)}%`, `${summary.exceptions} 项异常`],
   ];
@@ -173,7 +174,7 @@ function filteredOperators() {
     const matchesQuery = !query || row.name.toLowerCase().includes(query);
     const matchesStage = state.stage === "all" || row.failure_stage === state.stage;
     let matchesStatus = state.status === "all" || status === state.status;
-    if (state.status === "exception") matchesStatus = status === "failed" || status === "timeout";
+    if (state.status === "exception") matchesStatus = ['failed','error','timeout'].includes(status);
     return matchesQuery && matchesStage && matchesStatus;
   });
 }

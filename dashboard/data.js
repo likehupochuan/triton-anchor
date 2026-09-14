@@ -31,6 +31,7 @@
       const namedReview = reviews.find(item => text === item.summary || text.startsWith('必要审查未通过：' + item.kind) ||
         text.startsWith(item.kind + ':') || text.startsWith(item.kind + '：'));
       if (negative(namedReview?.status)) return 'review';
+      if (/Trusted profile and exact LLVM revision are required|LLVM.{0,30}(?:mismatch|not found|missing)|dependency version mismatch|配置.{0,12}(?:缺失|错误|不匹配)|容器.{0,12}(?:启动失败|不可用)/i.test(text)) return 'environment';
       if (/connection (?:refused|reset|timed out)|could not resolve (?:host|hostname)|(?:temporary failure in|failed) name resolution|NameResolutionError|network is unreachable|failed to (?:connect|establish a new connection)|SSL certificate problem|certificate verify failed|TLS handshake(?::| has)? (?:failed|failure|error|timeout)|网络(?:连接)?(?:失败|异常|不可达|超时)|连接(?:被拒绝|重置|超时)|域名解析失败|DNS(?: (?:lookup|resolution|query))?(?: has| is|:)? (?:failed|failure|error|timed out)|DNS.{0,10}(?:失败|异常|超时)|无法连接/i.test(text)) return 'network';
       if (/worker preparation(?: failed|:|$)|worker revision differs from installed control|environment (?:registry|operation|subprocess).{0,45}(?:unreadable|incomplete|failed|could not|invalid)|rootless Docker.{0,40}(?:required|failed|invalid)|cannot connect to the docker daemon|no space left on device|out of memory|\bOOM(?:Killed)?\b|permission denied|no module named|ModuleNotFoundError|shared librar(?:y|ies).{0,40}(?:not found|cannot open)|服务器环境.{0,15}(?:异常|失败|不匹配)|环境准备.{0,15}(?:失败|未完成)|依赖.{0,15}(?:缺失|不匹配)|内存不足|磁盘空间不足|权限不足/i.test(text)) return 'environment';
       if (/证据文件不存在|result.{0,30}(?:invalid|mismatch|changed|unreadable)|结果.{0,20}(?:校验|发布|上传|读取).{0,25}(?:失败|异常|错误|未完成|无法|不存在)|tested tracked source changed during execution/i.test(text)) return 'publication';
@@ -53,7 +54,7 @@
     // recorded blockers merely list reviews that never got a chance to run.
     if (['error','failure','failed','infra_error','fail','cancelled'].includes(run.local_conclusion || run.conclusion)) {
       const summary = review.summary;
-      if (summary && (classify(summary) !== 'unknown' || !originals.length)) add(summary, '任务摘要');
+      if (summary && (classify(summary) !== 'unknown' || !originals.length || originals.every(reason => classify(reason) === 'incomplete'))) add(summary, '任务摘要');
     }
     const covered = text => typeof text === 'string' && text.trim() && originals.some(reason => reason.includes(text));
     for (const check of checks) {
@@ -133,7 +134,7 @@
     const full = runs.find(run => run.checks.some(check => check.details?.["flaggems-summary"]?.mode === 'full'));
     const fg = full?.checks.find(check => check.details?.["flaggems-summary"]?.mode === 'full')?.details["flaggems-summary"];
     const operators = array(fg?.results).map((row,index) => ({index:row.index || index+1, name:row.op,
-      status:({'通过':'passed','成功':'passed','失败':'failed','超时':'timeout'}[row.test_status] || (row.exit_code === 0 && row.passed > 0 ? 'passed' : 'failed')),
+      status:({'通过':'passed','成功':'passed','失败':'failed','未通过':'failed','执行错误':'error','infra_error':'error','error':'error','超时':'timeout'}[row.test_status] || (row.exit_code === 0 && row.passed > 0 ? 'passed' : 'failed')),
       failure_stage:(row.first_failed_stage === '全部通过' ? '' : row.first_failed_stage) || row.timeout_reason || '', duration_ms:row.duration_seconds * 1000,
       log_url:full?.artifacts.find(a => row.log_file && a.path.endsWith(row.log_file) && a.url)?.url || ''}));
     const latestBackends = new Map();

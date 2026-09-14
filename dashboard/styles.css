@@ -111,6 +111,11 @@ h1 {
   white-space: nowrap;
 }
 
+.status-error {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
 .mode-badge {
   color: var(--amber);
   background: var(--amber-soft);
@@ -192,7 +197,7 @@ code {
 
 .metric-band {
   display: grid;
-  grid-template-columns: repeat(5, minmax(110px, 1fr));
+  grid-template-columns: repeat(6, minmax(110px, 1fr));
   margin-bottom: 22px;
   background: var(--surface);
   border: 1px solid var(--border);

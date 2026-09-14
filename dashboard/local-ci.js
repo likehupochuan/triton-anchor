@@ -1,5 +1,5 @@
 /* Render remote result text as text nodes. No result field can inject HTML. */
-const labels = {success:'通过',passed:'通过',failure:'失败',failed:'失败',error:'执行错误',cancelled:'已取消',skipped:'未执行',not_applicable:'不适用',healthy:'正常',degraded:'异常',offline:'离线',snapshot_stale:'快照已过期',unknown:'状态未知',waiting:'等待',ready:'已交付',pending:'待交付',expired:'已到期',not_comparable:'无可比基线'};
+const labels = {success:'通过',passed:'通过',failure:'未通过',failed:'未通过',error:'执行错误',cancelled:'已取消',skipped:'未执行',not_applicable:'不适用',healthy:'正常',degraded:'异常',offline:'离线',snapshot_stale:'快照已过期',unknown:'状态未知',waiting:'等待',ready:'已交付',pending:'待交付',expired:'已到期',not_comparable:'无可比基线'};
 const names = {environment:'环境与依赖',frontend_build:'前端构建',frontend_install:'前端安装与导入',frontend_tests:'前端测试',wheel_install:'Wheel 安装与导入',frontend_smoke:'前端基本功能验证',backend_build:'后端构建',backend_install:'后端安装与发现',backend_tests:'后端测试',backend_rebuild:'后端重新构建',backend_smoke:'后端基本功能与 JIT 验证',flaggems:'FlagGems',compile_time:'编译时间性能',pass_profile:'编译阶段性能剖析',ir_serialization:'IR 序列化',pr_information:'PR 说明与改动核验',architecture_review:'架构与接口约束审查',control_plane:'CI 流程检查',custom_test:'定向测试'};
 const friendlyReasons = {'cancelled':'任务已取消','missing required check':'必检尚未完成','PR intent and attributes were not reviewed':'PR 意图与属性尚未完成核验','all commands completed successfully':'命令执行成功','not selected for this change':'本次改动未触发该项检查','minimum frontend coverage':'编译器改动的最低检查范围','frontend code or test behavior changed':'前端代码或测试行为发生变化','architecture contract review is mandatory':'架构审查为必检项'};
 const model = {data:null, selected:null};
@@ -7,7 +7,7 @@ const $ = id => document.getElementById(id);
 const arr = value => Array.isArray(value) ? value : [];
 const txt = value => typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value);
 function el(tag, className, text) { const node=document.createElement(tag); if(className)node.className=className; if(text!=null)node.textContent=txt(text); return node; }
-function badge(status) { const tone=['success','passed','healthy','ready'].includes(status)?'good':['failure','failed','error','offline'].includes(status)?'bad':['degraded','waiting','pending','expired','snapshot_stale'].includes(status)?'warn':status==='cancelled'?'info':''; return el('span','ci-badge '+tone,labels[status]||status||'未知'); }
+function badge(status) { const tone=['success','passed','healthy','ready'].includes(status)?'good':['failure','failed','offline'].includes(status)?'bad':['error','degraded','waiting','pending','expired','snapshot_stale'].includes(status)?'warn':status==='cancelled'?'info':''; return el('span','ci-badge '+tone,labels[status]||status||'未知'); }
 function date(value) { const d=new Date(typeof value==='number'?value*1000:value); return value!=null&&!Number.isNaN(d.valueOf())?d.toLocaleString('zh-CN',{hour12:false}):'尚无时间记录'; }
 function link(label, url) { try { const target=new URL(url); if(target.protocol!=='https:')return null; const a=el('a','',label); a.href=target.href; a.target='_blank'; a.rel='noopener noreferrer'; return a; } catch { return null; } }
 function empty(container, message) { container.append(el('div','ci-empty',message)); }
@@ -22,7 +22,7 @@ function facts(parent,rows) {const list=el('dl','ci-facts');for(const [name,valu
 function filteredRuns() {
   const query=$('taskSearch').value.trim().toLowerCase(); const filter=$('resultFilter').value;
   const prQuery=query.match(/^#?([1-9][0-9]*)$/); const includeHistory=$('historyFilter').value==='all';
-  return arr(model.data.runs).filter(run=>(includeHistory||run.is_current)&&(filter==='all'||(filter==='failure'?['failure','error'].includes(run.conclusion):run.conclusion===filter))&&(prQuery?String(run.pr_number)===prQuery[1]:[run.pr_number,run.target_branch,run.tested_sha].join(' ').toLowerCase().includes(query)));
+  return arr(model.data.runs).filter(run=>(includeHistory||run.is_current)&&(filter==='all'||run.conclusion===filter)&&(prQuery?String(run.pr_number)===prQuery[1]:[run.pr_number,run.target_branch,run.tested_sha].join(' ').toLowerCase().includes(query)));
 }
 
 function renderList() {
@@ -51,25 +51,63 @@ function incompleteText(value) {
   return label+'尚未完成'+publicText(match[2]);
 }
 
+function shortBlocker(item, category) {
+  const text=txt(item.reason);
+  // Review findings describe code behavior; do not translate their vocabulary
+  // into an infrastructure diagnosis.
+  if(category==='environment') {
+    const rules=[
+      [/worker revision differs from installed control/i,'控制版本不匹配'],
+      [/Trusted profile and exact LLVM revision are required/i,'服务器 Profile 或 LLVM 版本配置不匹配'],
+      [/LLVM.{0,30}(?:mismatch|not found|missing)|dependency version mismatch|依赖.{0,15}不匹配/i,'依赖版本不匹配'],
+      [/no space left on device|磁盘空间不足/i,'磁盘空间不足'],
+      [/out of memory|\bOOM(?:Killed)?\b|内存不足/i,'内存不足'],
+      [/permission denied|权限不足/i,'权限不足'],
+      [/no module named|ModuleNotFoundError|shared librar(?:y|ies).{0,40}(?:not found|cannot open)|依赖.{0,15}缺失/i,'依赖缺失或无法加载'],
+      [/cannot connect to the docker daemon|rootless Docker.{0,40}(?:required|failed|invalid)|容器.{0,12}(?:启动失败|不可用)/i,'容器运行环境不可用'],
+      [/worker preparation(?: failed|:|$)|环境准备.{0,15}(?:失败|未完成)/i,'服务器环境准备失败'],
+    ];
+    for(const [pattern,label] of rules)if(pattern.test(text))return label;
+  }
+  if(category==='network')return '网络连接异常';
+  if(category==='execution'&&/timed? ?out|timeout|time budget exhausted|超时/i.test(text))return '执行超时';
+  if(item.source==='展示说明'||item.source==='任务状态')return '原因未明确，需查看执行日志';
+  const compact=publicText(text).replace(/\s+/g,' ').trim();
+  return compact.length>100?compact.slice(0,100)+'…':compact;
+}
+
 function renderBlockers(parent, run) {
   const groups=LocalCIData.blockerGroups(run);
   if(!groups.length)return;
-  const box=el('section','ci-blockers');box.append(el('h3','','阻塞原因'));
-  box.append(el('p','ci-muted','按结果中的明确线索分类，不替代根因诊断；“未完成”不等于审查发现代码问题。'));
-  for(const group of groups){
-    const category=el('div','ci-blocker-group');category.append(el('h4','',group.label+' · '+group.reasons.length));
-    category.append(el('p','ci-muted',group.hint));
-    const list=el('ul');for(const item of group.reasons)list.append(el('li','',publicText(item.reason)));
-    category.append(list);box.append(category);
-    if(group.impacts.length){
-      category.append(el('p','ci-muted','影响：以下必检 / 审查尚未完成（同次运行记录，不作为逐项因果结论）。'));
-      const impacts=el('ul');for(const item of group.impacts)impacts.append(el('li','',incompleteText(item.reason)));
-      category.append(impacts);
+  const executionError=['error','infra_error'].includes(run.local_conclusion||run.conclusion);
+  for(const reviewOnly of [false,true]) {
+    const selected=groups.filter(group=>(group.id==='review')===reviewOnly);
+    if(!selected.length)continue;
+    const box=el('section','ci-blockers');
+    box.append(el('h3','',reviewOnly?'审查未通过':executionError?'执行错误原因':'阻塞原因'));
+    for(const group of selected){
+      // Generic incompletion is secondary when an actual cause is available.
+      const reasons=group.reasons.filter(item=>item.source!=='展示说明'||selected.every(g=>g.reasons.every(r=>r.source==='展示说明')));
+      if(!reasons.length)continue;
+      const category=el('div','ci-blocker-group');category.append(el('h4','',group.label));
+      const list=el('ul');for(const text of new Set(reasons.map(item=>shortBlocker(item,group.id))))list.append(el('li','',text));
+      category.append(list);box.append(category);
     }
+    const original=el('details','ci-blocker-raw');original.append(el('summary','','查看详情'));
+    const list=el('ul');
+    for(const group of selected)for(const item of group.reasons)list.append(el('li','',item.source+'：'+item.reason));
+    original.append(list);
+    const incomplete=selected.flatMap(group=>group.impacts);
+    if(incomplete.length){
+      original.append(el('p','ci-muted','未完成项目（不代表审查未通过）'));
+      const impacts=el('ul');for(const item of incomplete){
+        const row=el('li','',incompleteText(item.reason));
+        row.append(el('small','ci-muted',item.source+'：'+item.reason));impacts.append(row);
+      }
+      original.append(impacts);
+    }
+    box.append(original);parent.append(box);
   }
-  const original=el('details','ci-blocker-raw');original.append(el('summary','','原始原因与来源'));
-  const list=el('ul');for(const group of groups)for(const item of [...group.reasons,...group.impacts])list.append(el('li','',item.source+'：'+item.reason));
-  original.append(list);box.append(original);parent.append(box);
 }
 
 function renderDetail(run) {
