@@ -175,7 +175,7 @@ jobs:
               }
             });
   deploy-dashboard:
-    name: 部署看板（不改变测试结论）
+    name: Deploy dashboard (independent of test results)
     needs: publish
     if: needs.publish.outputs.dashboard_changed == 'true'
     runs-on: ubuntu-latest
