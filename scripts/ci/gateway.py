@@ -246,8 +246,6 @@ class GitHub:
         url: str = "",
     ) -> bool:
         """Update only this task's Check Run; preserve other tasks as history."""
-        if not task["pr_number"]:
-            return False
         if key not in CHECK_NAMES or status not in {
             "queued",
             "in_progress",
@@ -345,8 +343,6 @@ class GitHub:
 
     def owns_preflight(self, task: dict) -> bool:
         """A newly prepared task owns the gate even before its Gitee enqueue."""
-        if not task["pr_number"]:
-            return True
         for key, name in CHECK_NAMES.items():
             owned = [
                 row
@@ -815,9 +811,12 @@ def enqueue(task: dict, gh: GitHub, control: GitStore, source: Path) -> None:
     gh.status(task, "pending", "Local CI: task published to Gitee; awaiting worker results", workflow_url())
 
 
-def cancel_obsolete(gh: GitHub, control: GitStore, pr_number: int = 0) -> int:
+def cancel_obsolete(gh: GitHub, control: GitStore, pr_number: int = 0, branch: str = "") -> int:
+    if not pr_number and not branch:
+        raise ValueError("Cancellation requires a PR number or source branch")
+    subject = {"repository": gh.repository, "pr_number": pr_number, "target_branch": branch}
     count = 0
-    for path in sorted((control.root / "current").glob("*.json")):
+    for path in (control.root / "current").glob(current_key(subject) + ".json"):
         row = json.loads(path.read_text())
         task = control.get(f"tasks/{row['task_id']}.json")
         if not task or (pr_number and task["pr_number"] != pr_number):
@@ -825,6 +824,8 @@ def cancel_obsolete(gh: GitHub, control: GitStore, pr_number: int = 0) -> int:
         if is_legacy_task(task):
             continue
         validate_task(task)
+        if current_key(task) != current_key(subject):
+            raise ValueError("Current task pointer belongs to a different PR or branch")
         if not is_current(gh, task):
             name = f"cancel/{task['task_id']}.json"
             cancellation = control.get(name)
@@ -1617,14 +1618,20 @@ def main() -> int:
     control = GitStore(url, CONTROL_BRANCH)
     try:
         if args.command == "cancel":
-            cancel_obsolete(gh, control, args.pr)
+            cancel_obsolete(gh, control, args.pr, args.branch)
         elif args.command == "enqueue":
             enqueue(task, gh, control, args.source)
         else:
             results = GitStore(url, RESULTS_BRANCH)
             try:
                 if args.command == "collect":
-                    cancel_obsolete(gh, control)
+                    if args.task_id:
+                        if not ID.fullmatch(args.task_id):
+                            raise ValueError("Receiver task ID must be an exact task identity")
+                        received = validate_task(control.get(f"tasks/{args.task_id}.json"))
+                        if received["task_id"] != args.task_id:
+                            raise ValueError("Receiver task manifest identity differs")
+                        cancel_obsolete(gh, control, received["pr_number"], received["target_branch"])
                     collect_results(gh, control, results, args.dashboard)
             finally:
                 results.close()

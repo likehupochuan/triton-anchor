@@ -412,7 +412,7 @@ README only
         results.put(
             {f"runs/{self.task['task_id']}/{result['run_id']}/result.json": result}
         )
-        self.assertEqual(g.cancel_obsolete(self.gh, control), 0)
+        self.assertEqual(g.cancel_obsolete(self.gh, control, 7), 0)
         published = g.collect_results(
             self.gh, control, results, self.root / "dashboard"
         )
@@ -451,6 +451,70 @@ README only
                         self.gh, control, results, self.root / "dashboard"
                     )
         self.assertEqual(self.gh.writes, [])
+
+    def test_branch_cancellation_ignores_unrelated_current_records(self):
+        gh = FakeGitHub(self.base, self.tested, self.tested)
+        task = g.prepare_task(gh, self.base, branch="main")
+        control = self.store(g.CONTROL_BRANCH)
+        g.enqueue(task, gh, control, self.source)
+        unrelated = [
+            {**task, "target_branch": "other"},
+            self.task,
+            {**task, "repository": "anteloper-c/triton-anchor"},
+        ]
+        damaged = {
+            f"current/{g.current_key(subject)}.json": {"damaged": True}
+            for subject in unrelated
+        }
+        control.put(damaged)
+        gh.head = "e" * 40
+        with patch.object(gh, "request", wraps=gh.request) as request:
+            self.assertEqual(g.cancel_obsolete(gh, control, branch="main"), 1)
+        self.assertEqual([call.args[0] for call in request.call_args_list], ["branches/main"])
+        self.assertIsNotNone(control.get(f"cancel/{task['task_id']}.json"))
+        self.assertEqual(g.cancel_obsolete(gh, control, branch="missing"), 0)
+        for path, row in damaged.items():
+            self.assertEqual(control.get(path), row)
+        with self.assertRaises(ValueError):
+            g.cancel_obsolete(gh, control)
+
+    def test_collect_cancels_only_the_receivers_branch_and_requires_a_task_scope(self):
+        gh = FakeGitHub(self.base, self.tested, self.tested)
+        task = g.prepare_task(gh, self.base, branch="main")
+        other = {**task, "target_branch": "other"}
+        other["task_id"] = g.digest({key: other[key] for key in g.IDENTITY_FIELDS})
+        for field, suffix in (("task_ref", "tested"), ("base_task_ref", "base"), ("head_task_ref", "head")):
+            other[field] = f"ci/branch/{other['task_id']}/{suffix}"
+        g.validate_task(other)
+        control = self.store(g.CONTROL_BRANCH)
+        documents = {}
+        for item in (task, other, self.task):
+            documents[f"tasks/{item['task_id']}.json"] = item
+            documents[f"current/{g.current_key(item)}.json"] = {"task_id": item["task_id"]}
+        control.put(documents)
+        gh.head = "e" * 40
+        request = gh.request
+        store = g.GitStore
+        for received_id in ("", task["task_id"]):
+            with (
+                self.subTest(received_id=received_id),
+                patch("sys.argv", ["gateway.py", "collect"]),
+                patch.dict(g.os.environ, {
+                    "GITEE_RESULTS_REPO_URL": "https://gitee.com/test/results.git",
+                    "RECEIVER_TASK_ID": received_id,
+                    "PR_NUMBER": "0", "SOURCE_BRANCH": "other",
+                }),
+                patch.object(g, "GitHub", return_value=gh),
+                patch.object(g, "GitStore", side_effect=lambda _url, branch: store(str(self.remote), branch)),
+                patch.object(gh, "request", side_effect=lambda path: {"commit": {"sha": gh.head}} if path == "branches/other" else request(path)),
+                patch.object(g, "collect_results") as collect,
+            ):
+                self.assertEqual(g.main(), 0)
+                collect.assert_called_once()
+            control.refresh()
+            self.assertEqual(bool(control.get(f"cancel/{task['task_id']}.json")), bool(received_id))
+            for item in (other, self.task):
+                self.assertIsNone(control.get(f"cancel/{item['task_id']}.json"))
 
     def test_lifecycle_cancellation_reaches_gitee(self):
         control = self.store(g.CONTROL_BRANCH)
@@ -645,7 +709,7 @@ README only
                 [],
             )
         self.assertFalse(self.gh.comments)
-        self.assertEqual(g.cancel_obsolete(self.gh, control), 1)
+        self.assertEqual(g.cancel_obsolete(self.gh, control, 7), 1)
         self.assertEqual(self.gh.statuses[-1][1], "error")
 
     def test_latest_invalid_result_does_not_reuse_an_old_pass(self):
@@ -913,6 +977,39 @@ README only
         with patch.object(self.gh, "check") as check:
             self.assertFalse(g.sync_preflight(self.gh, self.task, {"security": "cancelled"}))
             check.assert_not_called()
+
+    def test_push_checks_use_tested_commit_and_cannot_overwrite_a_new_owner(self):
+        task = {**self.task, "pr_number": 0, "tested_sha": self.head, "event_kind": "push"}
+        gh = g.GitHub(g.REPOSITORY, token="fixture")
+        runs, writes = [], []
+
+        def request(path, method="GET", data=None):
+            if method != "GET":
+                writes.append((path, method, data))
+                return {}
+            if path.startswith(f"commits/{task['head_sha']}/check-runs?"):
+                return {"check_runs": runs}
+            return self.gh.request(path)
+
+        with patch.object(gh, "request", side_effect=request), patch.dict(g.os.environ, {
+            "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": g.REPOSITORY,
+            "GITHUB_RUN_ID": "1234",
+        }):
+            self.assertTrue(g.sync_preflight(gh, task, {"basic": "success"}))
+            self.assertEqual(len(writes), 1)
+            path, method, payload = writes[0]
+            self.assertEqual((path, method), ("check-runs", "POST"))
+            self.assertEqual(payload["head_sha"], task["head_sha"])
+            self.assertEqual(payload["details_url"], f"https://github.com/{g.REPOSITORY}/actions/runs/1234")
+            self.assertEqual(payload["conclusion"], "success")
+            runs.append({
+                **payload, "id": 12, "app": {"slug": "github-actions"},
+                "external_id": "triton-anchor-local-ci:basic:newer-task",
+            })
+            writes.clear()
+            self.assertFalse(g.sync_preflight(gh, task, {"basic": "failure"}))
+            g.finalize_preflight(gh, task, {"prepare": "success", "basic": "failure"})
+            self.assertEqual(writes, [])
 
     def test_stage_completion_rejects_unknown_or_nonterminal_outcomes(self):
         for stages in (None, [], ["basic"], {}, {"summary": "success"},
@@ -1241,6 +1338,10 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertIn("format(' {0}', inputs.receiver_round)", data["run-name"])
         self.assertEqual(data["run-name"].count("${{"), data["run-name"].count("}}"))
         jobs = data["jobs"]
+        cancel = next(step for step in jobs["cancel-obsolete"]["steps"] if step.get("run", "").endswith("gateway.py cancel"))
+        self.assertEqual(cancel["env"]["SOURCE_BRANCH"], "${{ inputs.source_branch || github.ref_name }}")
+        collect = next(step for step in jobs["publish"]["steps"] if step.get("id") == "collect")
+        self.assertEqual(collect["env"]["RECEIVER_TASK_ID"], "${{ inputs.task_id }}")
         self.assertEqual(jobs["basic"]["needs"], "prepare")
         self.assertIn("basic", jobs["api"]["needs"])
         self.assertIn("api", jobs["security"]["needs"])
@@ -1299,7 +1400,9 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertIn("needs.receive.outputs.state == 'ready'", jobs["publish"]["if"])
         self.assertNotIn("environment", jobs["publish"])
         self.assertNotIn("id-token", jobs["publish"]["permissions"])
-        self.assertEqual(jobs["deploy-dashboard"]["environment"], "github-pages")
+        self.assertEqual(jobs["deploy-dashboard"]["environment"], {
+            "name": "github-pages", "url": "${{ steps.deployment.outputs.page_url }}"
+        })
         self.assertEqual(jobs["deploy-dashboard"]["needs"], "publish")
         self.assertIn("dashboard_changed", jobs["deploy-dashboard"]["if"])
         self.assertEqual(jobs["finalize-preflight"]["permissions"]["pull-requests"], "read")
