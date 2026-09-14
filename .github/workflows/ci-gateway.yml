@@ -1,5 +1,6 @@
 name: Local CI / Orchestrator
-run-name: Local CI / ${{ inputs.mode || 'request' }} / ${{ (inputs.pr_number != '' && inputs.pr_number != '0' && format('PR #{0}', inputs.pr_number)) || (github.event.pull_request.number && format('PR #{0}', github.event.pull_request.number)) || inputs.task_id || github.ref_name }}
+run-name: >-
+  Local CI / ${{ inputs.mode || 'request' }} / ${{ (inputs.pr_number != '' && inputs.pr_number != '0' && format('PR #{0}', inputs.pr_number)) || (github.event.pull_request.number && format('PR #{0}', github.event.pull_request.number)) || inputs.task_id || github.ref_name }}
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, edited, closed, converted_to_draft, labeled, unlabeled]

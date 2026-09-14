@@ -1091,6 +1091,12 @@ class WorkflowStructureTests(unittest.TestCase):
 
         worker_text = (ROOT / ".github/workflows/ci-gateway.yml").read_text()
         data = yaml.load(worker_text, Loader=yaml.BaseLoader)
+        # A plain YAML scalar treats the space before '#' in 'PR #{0}' as
+        # a comment, silently cutting the Actions expression before its close.
+        self.assertIn("format('PR #{0}', inputs.pr_number)", data["run-name"])
+        self.assertIn("format('PR #{0}', github.event.pull_request.number)", data["run-name"])
+        self.assertTrue(data["run-name"].endswith("github.ref_name }}"))
+        self.assertEqual(data["run-name"].count("${{"), data["run-name"].count("}}"))
         jobs = data["jobs"]
         self.assertEqual(jobs["basic"]["needs"], "prepare")
         self.assertIn("basic", jobs["api"]["needs"])
