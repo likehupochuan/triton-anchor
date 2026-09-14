@@ -29,15 +29,17 @@
 
 GitHub required checks 必须实际配置并查询验证：`local-ci/basic`、`local-ci/api`、`local-ci/security`、`local-ci/summary`。前三项是 PR head 上的 Check Runs，summary 是 commit status，避免同一名称同时对应两种门禁。真实失败使用 `failure`，取消使用 `cancelled`，被上游阻断或未执行使用 `action_required`；三者都不放行，且不将未执行误报成测试失败。不能用 `skipped` 或 `neutral` 表示未完成的必检，因为 GitHub 会将这两种结论视为满足 required check。PR 关闭或转为草稿时，尚在等待审批或执行的状态会结束为取消；网络失败只重试发布封存结果，不重新执行测试。
 
-冻结新任务后立即将 summary 置为 pending，并为本任务排队三个前置 checks。Basic、API、Security 各阶段结束后，由独立的可信结果作业立即同步该阶段结论到 PR head 的 Checks，不等待其他检查或人工审批；实际开始时间受 GitHub runner 排队影响。结果作业只检出固定控制代码、校验任务摘要和当前身份，不检出或运行候选代码，也不改变 summary 和 PR 评论。审批卡与 finalizer 仍补齐最终状态，阶段回写失败时可重试。Check Run 按完整 task ID 更新，其他任务的已完成记录保留为历史；同一 head 上被新任务替代的旧等待检查结束为取消，不篡改旧失败结论。已完成任务的前置检查重跑会创建新记录。接收、取消和异常收尾在回写前核对最新前置 checks 的任务身份，防止新任务尚未投递到 Gitee 时，旧结果覆盖新门禁。审批拒绝、前置检查或投递失败由 `finalize-preflight` 结束等待状态并追加中文准入结果；已成功投递的任务继续由接收器负责 summary。
+冻结新任务后立即将 summary 置为 pending，并为本任务排队三个前置 checks。Basic、API、Security 各阶段结束后，由独立的可信结果作业立即同步该阶段结论到 PR head 的 Checks，不等待其他检查或人工审批；实际开始时间受 GitHub runner 排队影响。结果作业只检出固定控制代码、校验任务摘要和当前身份，不检出或运行候选代码，也不改变 summary 和 PR 评论。审批卡与 finalizer 仍补齐最终状态，阶段回写失败时可重试。Check Run 按完整 task ID 更新，其他任务的已完成记录保留为历史；同一 head 上被新任务替代的旧等待检查结束为取消，不篡改旧失败结论。已完成任务的前置检查重跑会创建新记录。接收、取消和异常收尾在回写前核对最新前置 checks 的任务身份，防止新任务尚未投递到 Gitee 时，旧结果覆盖新门禁。审批拒绝、前置检查或投递失败由 `finalize-preflight` 结束等待状态，不再发送“Local CI 准入结果”评论；已成功投递的任务继续由接收器负责 summary。
 
 GitHub Checks 的名称、结论、标题、状态说明，以及 `local-ci/summary` 的说明保持英文；审批卡、最终 PR 评论和 Agent 的面向维护者解释保持中文。旧任务取消只更新 Checks/status 与 Gitee 停止标记，不追加“Local CI 旧任务已取消”评论；历史评论不自动删除。
 
 审批卡与 `ci_repo` 的证据结构一致：前置检查表、完整 head/base/merge/control SHA、任务 ID、验证范围、审批原因和本次 Actions 证据/审批入口。卡片同时写入 PR 和工作流摘要；它只陈述已完成的前置检查，不预报服务器验证结果。外部 fork 仍以配置了 required reviewers 的 `local-ci-fork-approval` 环境为唯一人工准入门禁，审批后继续复查冻结身份。
 
+PR 信息、Basic、API、Security 必须全部通过才显示审批卡；失败、取消、跳过或缺失结果均不显示卡片，也不进入人工审批或投递服务器任务。该条件同时由 workflow 和网关检查。失败详情继续同步英文 Checks/status；PR 信息缺失时保留带感谢、明确补充项和更新描述指引的中文提示，不重复发送准入结果汇总。历史评论不自动删除。
+
 PR 评论是追加式历史，不再使用全局 marker 查找并覆盖旧评论。任务 ID 与完整反馈内容共同确定事件标记；新提交、新运行、审批卡与最终结果各自追加，同一事件的发布重试只查重。旧格式评论原样保留。最终结果以中文展示结论、提交/运行身份、已执行检查与审查、未选/未执行范围、阻塞项和可用证据链接；机器状态枚举、工具 ID 和原始诊断保留原值，Agent 的解释与最终答复要求中文。
 
-部署此状态修复时，`main` 路由文件的 `receive` job 也须包含 `checks: read`，供接收器核对任务身份；其 `publish`/`deploy-dashboard` 拆分也须同步，因为 `mode=receive` 工作流在 main 运行。`local-ci-unified` 中的 prepare/finalize 使用 `checks: write`，finalize 还需 `pull-requests: write` 追加准入结果，审批验证使用 `checks: read`。仅更新控制分支不会自动改变 main 上的工作流定义。
+部署此状态修复时，`main` 路由文件的 `receive` job 也须包含 `checks: read`，供接收器核对任务身份；其 `publish`/`deploy-dashboard` 拆分也须同步，因为 `mode=receive` 工作流在 main 运行。`local-ci-unified` 中的 prepare/finalize 使用 `checks: write`；finalize 只读 PR，不再需要写评论权限，审批验证使用 `checks: read`。仅更新控制分支不会自动改变 main 上的工作流定义。
 
 Actions 的 `route`、`enqueue`、`receive`、`publish` 成功只表示相应调度或传输完成，不能替代 `local-ci/summary` 的测试结论。前置 checks 成功与服务器 `infra_error` 可以同时出现。旧版 `local-ci/sophgo-cmodel` 等 commit status 会留在历史提交上；新流程不再写入它们，也不将历史错误改写为通过。仓库门禁应只要求上面的四个当前 context。
 

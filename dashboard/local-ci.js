@@ -44,13 +44,32 @@ function evidenceList(parent, entries) {
   parent.append(list);
 }
 
-function blockingSummary(run) {
-  const checks=arr(run.checks).filter(check=>['error','skipped','not_applicable'].includes(check.status));
-  const original=arr(run.blocking_reasons);
-  const preparationFailed=original.some(value=>String(value).startsWith('worker preparation'));
-  const reasons=[...new Set(original.filter(value=>!(preparationFailed&&value==='tested tracked source changed during execution')&&!checks.some(check=>String(value).startsWith(check.id+': '))).map(value=>String(value).startsWith('worker preparation')?'CI 运行环境准备未完成，需要维护者处理后重新执行；详细原因见完整报告。':value==='tested tracked source changed during execution'?'源码一致性校验未通过，需要重新验证。':value))];
-  if(original.length&&!reasons.length)reasons.push('验证未完成，执行错误和未执行项目详见下方检查结果。');
-  return reasons;
+function incompleteText(value) {
+  const match=txt(value).match(/^(?:必要审查未通过|最低必检未通过)：([a-z_]+)(.*)$/);
+  if(!match)return publicText(value);
+  const label=({pr_info:'PR 信息核验',architecture:'架构契约审查',intent:'变更意图审查'})[match[1]]||names[match[1]]||match[1];
+  return label+'尚未完成'+publicText(match[2]);
+}
+
+function renderBlockers(parent, run) {
+  const groups=LocalCIData.blockerGroups(run);
+  if(!groups.length)return;
+  const box=el('section','ci-blockers');box.append(el('h3','','阻塞原因'));
+  box.append(el('p','ci-muted','按结果中的明确线索分类，不替代根因诊断；“未完成”不等于审查发现代码问题。'));
+  for(const group of groups){
+    const category=el('div','ci-blocker-group');category.append(el('h4','',group.label+' · '+group.reasons.length));
+    category.append(el('p','ci-muted',group.hint));
+    const list=el('ul');for(const item of group.reasons)list.append(el('li','',publicText(item.reason)));
+    category.append(list);box.append(category);
+    if(group.impacts.length){
+      category.append(el('p','ci-muted','影响：以下必检 / 审查尚未完成（同次运行记录，不作为逐项因果结论）。'));
+      const impacts=el('ul');for(const item of group.impacts)impacts.append(el('li','',incompleteText(item.reason)));
+      category.append(impacts);
+    }
+  }
+  const original=el('details','ci-blocker-raw');original.append(el('summary','','原始原因与来源'));
+  const list=el('ul');for(const group of groups)for(const item of [...group.reasons,...group.impacts])list.append(el('li','',item.source+'：'+item.reason));
+  original.append(list);box.append(original);parent.append(box);
 }
 
 function renderDetail(run) {
@@ -63,8 +82,7 @@ function renderDetail(run) {
   const links=el('div','ci-links'); for(const [label,url] of [['查看完整结果',run.result_url],['查看执行产物',run.artifacts_url]]) { const a=link(label,url); if(a)links.append(a); }root.append(links);
   const metrics=el('div','ci-metrics'); const checks=arr(run.checks); const values=[[checks.filter(c=>c.required).length,'最低必检项'],[checks.filter(c=>c.status==='passed').length,'已通过检查'],[checks.filter(c=>['skipped','not_applicable'].includes(c.status)).length,'未执行 / 不适用'],[arr(run.artifacts).filter(artifact=>!artifact.omitted).length,'所选证据文件']];
   for(const [value,label] of values){const box=el('div','ci-metric');box.append(el('strong','',value),el('span','',label));metrics.append(box);}root.append(metrics);
-  const blockers=blockingSummary(run);
-  if(blockers.length){const box=el('div','ci-blockers');box.append(el('h3','','阻塞原因'));const list=el('ul');for(const reason of blockers)list.append(el('li','',publicText(reason)));box.append(list);root.append(box);}
+  renderBlockers(root,run);
   const scope=section(root,'检查选择与执行结果');
   const policy=run.policy||{};scope.append(el('p','ci-muted',policy.docs_only?'文档变更：依规则免构建；架构审查仍需提供证据。':policy.manual_full?'维护者手动触发全量测试。':'按改动影响选择检查，并满足主机控制面规定的最低要求。'));
   const wrap=el('div','ci-table-shell'),table=el('table','ci-table'),thead=el('thead'),header=el('tr'); for(const s of ['检查','要求','结果','结果说明'])header.append(el('th','',s));thead.append(header);table.append(thead);const tbody=el('tbody');

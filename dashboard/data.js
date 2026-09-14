@@ -5,6 +5,89 @@
   const safeUrl = value => { try { const url = new URL(value); return url.protocol === 'https:' ? url.href : ''; } catch { return ''; } };
   const subject = task => task.repository + '/' + (task.pr_number ? 'pr/' + task.pr_number : 'branch/' + task.target_branch);
   const timestamp = value => typeof value === 'number' ? value * 1000 : Date.parse(value) || 0;
+  const blockerCategories = {
+    environment: {label:'服务器环境问题', hint:'检查服务器配置、容器、依赖版本、权限和资源；不据此认定 PR 代码有问题。'},
+    network: {label:'网络 / 连接问题', hint:'检查目标服务连通性、DNS、代理或 TLS；结合原始错误确认故障位置。'},
+    review: {label:'审查阻塞', hint:'审查明确报告未通过或高风险发现，需要结合代码与证据处理。'},
+    validation: {label:'构建 / 测试未通过', hint:'核对失败用例与日志；检查失败本身不证明根因一定在 PR。'},
+    execution: {label:'执行中断 / 超时', hint:'确认中断位置与时间预算；仅凭超时不能判定是网络或服务器故障。'},
+    publication: {label:'结果校验 / 发布异常', hint:'核对结果文件与发布记录；发布异常不改写已经取得的测试结论。'},
+    unknown: {label:'原因待确认', hint:'现有结果不足以可靠分类，请查看原始原因与完整执行报告。'},
+  };
+
+  // Presentation-only classification. Keep the machine verdict and source text
+  // untouched, and do not mistake a missing review for a negative review.
+  function blockerGroups(run) {
+    const checks = array(run.checks), review = run.ai_review || {};
+    const reviews = ['pr_info','architecture','intent'].flatMap(kind => review[kind] ? [{kind,...review[kind]}] : []);
+    const findings = array(review.findings).filter(item => item.blocking === true || ['high','critical'].includes(item.severity));
+    const negative = value => ['fail','failure','failed'].includes(value);
+    const unfinished = value => ['infra_error','error','skipped','not_selected','unknown'].includes(value);
+    const originals = array(run.blocking_reasons).filter(value => typeof value === 'string' && value.trim());
+    const entries = [], seen = new Set();
+    function classify(text, context = {}) {
+      // Structured review findings describe the change, not infrastructure health.
+      if (context.finding || negative(context.review?.status) || findings.some(item => item.summary === text)) return 'review';
+      const namedReview = reviews.find(item => text === item.summary || text.startsWith('必要审查未通过：' + item.kind) ||
+        text.startsWith(item.kind + ':') || text.startsWith(item.kind + '：'));
+      if (negative(namedReview?.status)) return 'review';
+      if (/connection (?:refused|reset|timed out)|could not resolve (?:host|hostname)|(?:temporary failure in|failed) name resolution|NameResolutionError|network is unreachable|failed to (?:connect|establish a new connection)|SSL certificate problem|certificate verify failed|TLS handshake(?::| has)? (?:failed|failure|error|timeout)|网络(?:连接)?(?:失败|异常|不可达|超时)|连接(?:被拒绝|重置|超时)|域名解析失败|DNS(?: (?:lookup|resolution|query))?(?: has| is|:)? (?:failed|failure|error|timed out)|DNS.{0,10}(?:失败|异常|超时)|无法连接/i.test(text)) return 'network';
+      if (/worker preparation(?: failed|:|$)|worker revision differs from installed control|environment (?:registry|operation|subprocess).{0,45}(?:unreadable|incomplete|failed|could not|invalid)|rootless Docker.{0,40}(?:required|failed|invalid)|cannot connect to the docker daemon|no space left on device|out of memory|\bOOM(?:Killed)?\b|permission denied|no module named|ModuleNotFoundError|shared librar(?:y|ies).{0,40}(?:not found|cannot open)|服务器环境.{0,15}(?:异常|失败|不匹配)|环境准备.{0,15}(?:失败|未完成)|依赖.{0,15}(?:缺失|不匹配)|内存不足|磁盘空间不足|权限不足/i.test(text)) return 'environment';
+      if (/证据文件不存在|result.{0,30}(?:invalid|mismatch|changed|unreadable)|结果.{0,20}(?:校验|发布|上传|读取).{0,25}(?:失败|异常|错误|未完成|无法|不存在)|tested tracked source changed during execution/i.test(text)) return 'publication';
+      if (/timed? ?out|timeout|time budget exhausted|cancelled|canceled|超时|已取消|执行中断/i.test(text)) return 'execution';
+      const check = context.check || checks.find(item => text.startsWith(item.id + ':') || text.startsWith(item.id + '：') ||
+        text.startsWith('最低必检未通过：' + item.id));
+      if (check?.id === 'environment' && (negative(check.status) || unfinished(check.status))) return 'environment';
+      if (negative(check?.status)) return 'validation';
+      if (context.review || namedReview || /必要审查未通过|最低必检未通过|missing required check|必检尚未完成|审查.{0,12}(?:未完成|未执行)|变更验证必须说明/i.test(text)) return 'incomplete';
+      if (unfinished(check?.status) && check.status !== 'error' && check.status !== 'infra_error') return 'incomplete';
+      return 'unknown';
+    }
+    function add(reason, source, context) {
+      if (typeof reason !== 'string' || !reason.trim()) return;
+      const category = classify(reason, context), id = category + '\n' + reason;
+      if (!seen.has(id)) { seen.add(id); entries.push({category, reason, source}); }
+    }
+    for (const reason of originals) add(reason, '原始阻塞原因');
+    // An environment failure may appear only in the task summary, while the
+    // recorded blockers merely list reviews that never got a chance to run.
+    if (['error','failure','failed','infra_error','fail','cancelled'].includes(run.local_conclusion || run.conclusion)) {
+      const summary = review.summary;
+      if (summary && (classify(summary) !== 'unknown' || !originals.length)) add(summary, '任务摘要');
+    }
+    const covered = text => typeof text === 'string' && text.trim() && originals.some(reason => reason.includes(text));
+    for (const check of checks) {
+      if ((negative(check.status) || check.status === 'error' || (check.required && unfinished(check.status))) && !covered(check.reason)) {
+        add(check.reason || '最低必检未通过：' + check.id, '检查：' + check.id, {check});
+      }
+    }
+    for (const item of reviews) {
+      if ((negative(item.status) || unfinished(item.status)) && !covered(item.summary)) {
+        add(item.summary || '必要审查未通过：' + item.kind, '审查：' + item.kind, {review:item});
+      }
+    }
+    for (const finding of findings) if (!covered(finding.summary)) add(finding.summary, '审查发现', {finding:true});
+    if (run.receiver_message) {
+      const category = classify(run.receiver_message);
+      entries.push({category:category === 'unknown' ? 'publication' : category, reason:run.receiver_message, source:'结果接收器'});
+    }
+    if (!entries.length && ['error','failure','failed','infra_error','fail'].includes(run.conclusion)) {
+      add('尚无足够的错误详情，无法确定根因。', '任务状态');
+    }
+    const incomplete = entries.filter(entry => entry.category === 'incomplete');
+    const causes = [...new Set(entries.filter(entry => entry.category !== 'incomplete').map(entry => entry.category))];
+    // Associate generic incompletion with a single recorded execution cause only.
+    // Multiple causes (or a review finding alone) cannot establish this relation.
+    const impactCategory = causes.length === 1 && ['environment','network','execution'].includes(causes[0]) ? causes[0] : 'unknown';
+    if (incomplete.length && impactCategory === 'unknown' && !entries.some(entry => entry.category === 'unknown')) {
+      entries.push({category:'unknown', reason:'未完成项目的具体原因尚不能确定，请结合执行日志核对。', source:'展示说明'});
+    }
+    return Object.entries(blockerCategories).flatMap(([id, category]) => {
+      const reasons = entries.filter(entry => entry.category === id);
+      const impacts = id === impactCategory ? incomplete : [];
+      return reasons.length || impacts.length ? [{id,...category,reasons,impacts}] : [];
+    });
+  }
   function normalize(feed) {
     if (feed.schema !== 'triton-anchor-dashboard' || !Array.isArray(feed.tasks)) throw new Error('结果数据格式不兼容');
     const ordered = [...feed.tasks].sort((a,b) => timestamp(b.task?.captured_at) - timestamp(a.task?.captured_at));
@@ -81,6 +164,6 @@
       fullTest:{run:{backend:full?.environment.profile || '尚无全量算子结果',sha:full?.tested_sha || ''},operators},
       backends:{backends},performance:{backend:measured?.environment.profile || '尚无有效测量',compile_time:{kernels:compileRows},pass_profile:{hotspots:passRows},ir_serialization:{metrics:irRows}}};
   }
-  global.LocalCIData = {normalize,business,status,safeUrl};
+  global.LocalCIData = {normalize,business,status,safeUrl,blockerGroups};
   if (typeof module !== 'undefined' && module.exports) module.exports = global.LocalCIData;
 })(typeof window === 'undefined' ? globalThis : window);

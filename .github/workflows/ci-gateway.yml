@@ -196,7 +196,10 @@ jobs:
   review-card:
     name: Approval review card
     needs: [prepare, basic, api, security, basic-result, api-result, security-result]
-    if: ${{ always() && needs.prepare.outputs.tested_sha != '' }}
+    if: >-
+      always() && needs.prepare.outputs.tested_sha != '' &&
+      needs.prepare.result == 'success' && needs.basic.result == 'success' &&
+      needs.api.result == 'success' && needs.security.result == 'success'
     runs-on: ubuntu-latest
     permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: read}
     outputs:
@@ -291,7 +294,7 @@ jobs:
     needs: [prepare, basic, api, security, review-card, approve-external-fork, enqueue]
     if: ${{ always() && needs.prepare.outputs.task_id != '' && needs.enqueue.result != 'success' }}
     runs-on: ubuntu-latest
-    permissions: {contents: read, pull-requests: write, statuses: write, checks: write}
+    permissions: {contents: read, pull-requests: read, statuses: write, checks: write}
     steps:
       - uses: actions/checkout@v4
         with:

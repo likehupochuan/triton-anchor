@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { normalize, business } = require('../../../dashboard/data.js');
+const { normalize, business, blockerGroups } = require('../../../dashboard/data.js');
 const task = (id, date) => ({task_id:id, repository:'example/repo',pr_number:7,target_branch:'main',tested_sha:id.repeat(40),captured_at:date});
 
 test('old pass cannot override a newer pending or cancelled task', () => {
@@ -61,4 +61,127 @@ test('all Codex reviews retain their summaries and source references', () => {
     assert.deepEqual(run.ai_review[review.kind].evidence,review.evidence);
     assert.equal(run.ai_review[review.kind].status,'passed');
   }
+});
+
+const errorRun = result => normalize({schema:'triton-anchor-dashboard', tasks:[{
+  task:task('a','2026-09-10'), status:result.status || 'infra_error', result,
+}]}).runs[0];
+
+test('server failure in summary is separated from reviews that never completed', () => {
+  const run = errorRun({status:'infra_error', summary:'Task worker revision differs from installed control',
+    blocking_reasons:['必要审查未通过：pr_info','必要审查未通过：architecture']});
+  const before = JSON.stringify(run);
+  const groups = blockerGroups(run);
+  assert.deepEqual(groups.map(group=>group.id), ['environment']);
+  assert.equal(groups[0].reasons[0].reason,run.ai_review.summary);
+  assert.equal(groups[0].impacts.length,2);
+  assert.equal(JSON.stringify(run),before);
+});
+
+test('explicit network errors are not hidden by a generic preparation prefix', () => {
+  for (const reason of ['worker preparation: Connection refused','Could not resolve host: gitee.com',
+    '网络连接失败：代理不可达','certificate verify failed']) {
+    assert.equal(blockerGroups(errorRun({blocking_reasons:[reason]}))[0].id,'network');
+  }
+  for (const reason of ['Out of memory','No space left on device',"ModuleNotFoundError: No module named 'torch'",
+    'Cannot connect to the Docker daemon']) {
+    assert.equal(blockerGroups(errorRun({blocking_reasons:[reason]}))[0].id,'environment');
+  }
+});
+
+test('a negative review about networking is a review blocker, not an outage', () => {
+  const summary = '网络连接失败时未释放资源，违反接口契约';
+  const groups = blockerGroups(errorRun({status:'fail',summary,
+    reviews:[{kind:'architecture',status:'fail',summary}],
+    blocking_reasons:['必要审查未通过：architecture — '+summary]}));
+  assert.deepEqual(groups.map(group=>group.id),['review']);
+  const finding = {summary:'DNS failure handling leaks credentials',severity:'high'};
+  assert.equal(blockerGroups(errorRun({findings:[finding],blocking_reasons:[finding.summary]}))[0].id,'review');
+});
+
+test('test failure, incomplete coverage, and absent evidence stay distinct', () => {
+  const run = errorRun({status:'fail',policy:{required_checks:['frontend_tests','frontend_build']},
+    checks:[{tool_id:'frontend_tests',status:'fail',summary:'断言失败：期望 2，实际 3'},
+      {tool_id:'frontend_build',status:'skipped',summary:'尚未执行'}],
+    blocking_reasons:['frontend_tests：断言失败：期望 2，实际 3',
+      '最低必检未通过：frontend_build','frontend_smoke 引用的证据文件不存在：smoke.log']});
+  assert.deepEqual(blockerGroups(run).map(group=>group.id),['validation','publication','unknown']);
+  assert.ok(blockerGroups(run).find(group=>group.id==='unknown').impacts.length);
+});
+
+test('ambiguous failures and generic timeouts do not guess network or server causes', () => {
+  assert.equal(blockerGroups(errorRun({summary:'Codex task time budget exhausted'}))[0].id,'execution');
+  assert.equal(blockerGroups(errorRun({blocking_reasons:['Command timed out']}))[0].id,'execution');
+  assert.equal(blockerGroups(errorRun({blocking_reasons:['任务返回 137，原因未记录']}))[0].id,'unknown');
+  assert.equal(blockerGroups(errorRun({}))[0].id,'unknown');
+  for (const summary of ['Rootless Docker preparation succeeded; unspecified failure later',
+    'TLS handshake succeeded; unspecified failure later','结果校验通过，另有问题待定位']) {
+    assert.equal(blockerGroups(errorRun({summary}))[0].id,'unknown');
+  }
+});
+
+test('successful runs stay successful when publishing has a separate error', () => {
+  const run = errorRun({status:'pass',summary:'验证通过'});
+  assert.deepEqual(blockerGroups(run),[]);
+  run.receiver_message = '结果读取或 GitHub 发布未完成；稍后重试接收，不重跑构建。';
+  assert.equal(blockerGroups(run)[0].id,'publication');
+  assert.equal(run.conclusion,'success');
+});
+
+test('all original reasons survive classification, with exact duplicates collapsed', () => {
+  const reasons = ['worker preparation failed','tested tracked source changed during execution',
+    '未知异常 <img src=x onerror=alert(1)>','未知异常 <img src=x onerror=alert(1)>'];
+  const groups = blockerGroups(errorRun({blocking_reasons:reasons}));
+  assert.deepEqual(new Set(groups.flatMap(group=>group.reasons.map(item=>item.reason))),new Set(reasons));
+  assert.equal(groups.flatMap(group=>group.reasons).length,3);
+});
+
+test('blocker groups render Chinese headings and preserve original text without HTML injection', () => {
+  const vm = require('node:vm');
+  const fs = require('node:fs');
+  class Element {
+    constructor(tag) { this.tag=tag; this.children=[]; this.textContent=''; }
+    append(...children) { this.children.push(...children); }
+    addEventListener() {}
+    set innerHTML(_value) { throw new Error('Remote text must not be rendered as HTML'); }
+  }
+  const nodes = new Map();
+  const document = {createElement:tag=>new Element(tag), getElementById:id=>{
+    if(!nodes.has(id))nodes.set(id,new Element('div'));
+    return nodes.get(id);
+  }};
+  const root = new Element('main');
+  const original = '未知异常 <img src=x onerror=alert(1)>';
+  const context = {document,URLSearchParams,URL,setInterval:()=>{},fetch:()=>new Promise(()=>{}),
+    location:{search:''},LocalCIData:{blockerGroups},root,
+    run:errorRun({summary:'Task worker revision differs from installed control',
+      blocking_reasons:['必要审查未通过：architecture',original]})};
+  vm.runInNewContext(fs.readFileSync(require.resolve('../../../dashboard/local-ci.js'),'utf8')+
+    '\nrenderBlockers(root,run);',context);
+  const flatten = node => [node,...node.children.flatMap(flatten)];
+  const rendered = flatten(root);
+  assert.ok(rendered.some(node=>node.tag==='h4'&&node.textContent.startsWith('服务器环境问题')));
+  assert.ok(!rendered.some(node=>node.tag==='h4'&&node.textContent.startsWith('必检 / 审查未完成')));
+  assert.ok(rendered.some(node=>node.textContent.startsWith('影响：以下必检 / 审查尚未完成')));
+  assert.ok(rendered.some(node=>node.textContent==='架构契约审查尚未完成'));
+  assert.ok(rendered.some(node=>node.tag==='summary'&&node.textContent==='原始原因与来源'));
+  assert.ok(rendered.some(node=>node.textContent==='原始阻塞原因：'+original));
+  assert.ok(!rendered.some(node=>node.tag==='img'));
+});
+
+test('incompletion is an impact under one recorded cause, otherwise its cause is unknown', () => {
+  const missing = '必要审查未通过：architecture';
+  for (const [reason, category] of [['Could not resolve host: gitee.com','network'],
+    ['Codex task time budget exhausted','execution']]) {
+    const groups = blockerGroups(errorRun({summary:reason,blocking_reasons:[missing]}));
+    assert.deepEqual(groups.map(group=>group.id),[category]);
+    assert.equal(groups[0].impacts[0].reason,missing);
+  }
+  const unknown = blockerGroups(errorRun({blocking_reasons:[missing]}));
+  assert.deepEqual(unknown.map(group=>group.id),['unknown']);
+  assert.equal(unknown[0].impacts[0].reason,missing);
+  const mixed = blockerGroups(errorRun({blocking_reasons:['Out of memory','Connection refused',missing]}));
+  assert.deepEqual(mixed.map(group=>group.id),['environment','network','unknown']);
+  assert.equal(mixed.find(group=>group.id==='unknown').impacts[0].reason,missing);
+  assert.ok(mixed.filter(group=>group.id!=='unknown').every(group=>group.impacts.length===0));
 });

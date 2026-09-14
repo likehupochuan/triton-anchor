@@ -952,7 +952,23 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
     return "\n".join(lines)
 
 
+def preflight_passed(stages: dict) -> bool:
+    return all(stages.get(key) == "success" for key in ("prepare", *CHECK_NAMES))
+
+
+def pr_info_comment(errors: list[str]) -> str:
+    return (
+        "## PR 信息需要补充\n\n"
+        "感谢您的贡献！为了帮助维护者理解这次改动并安排合适的验证，请补充以下信息：\n\n"
+        + "\n".join(f"- {feedback_text(error)}" for error in errors)
+        + "\n\n请直接更新 PR 描述，系统会重新检查。信息检查通过后才会继续前置检查，"
+        "全部通过后再进入后续审批（如需）和 Local CI 验证；目前无需等待审批。"
+    )
+
+
 def approval_card(task: dict, stages: dict, eligible: bool, approval_error: str = "") -> str:
+    if not preflight_passed(stages):
+        return ""
     lines = ["## Local CI 前置检查与审批", "",
              f"PR #{task['pr_number']}：{feedback_text(task['title'])}", "",
              "| 前置检查 | 结果 |", "| --- | --- |"]
@@ -1074,27 +1090,15 @@ def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
     publish_preflight_checks(gh, task, stages, False)
     if any(stages.get(key) == "failure" for key in ("prepare", *CHECK_NAMES)):
         state, description = "failure", "Local CI: preflight checks failed; see workflow"
-        message = "Local CI：前置检查未通过，请查看工作流"
     elif any(stages.get(key) != "success" for key in ("prepare", *CHECK_NAMES)):
         state, description = "error", "Local CI: preflight cancelled or not executed; verification incomplete"
-        message = "Local CI：前置检查取消或未执行，尚无完整验证结论"
     elif stages.get("card", "success") != "success":
         state, description = "error", "Local CI: approval card publication failed; worker verification not started"
-        message = "Local CI：审批卡发布未完成，尚未进入服务器验证"
     elif task.get("external_fork") and stages.get("approval") != "success":
         state, description = "error", "Local CI: approval failed or cancelled; worker verification not started"
-        message = "Local CI：人工审批未通过或已取消，未进入服务器验证"
     else:
         state, description = "error", "Local CI: task dispatch or receiver startup failed; see workflow"
-        message = "Local CI：任务投递或接收器启动未完成，请查看工作流"
     gh.status(task, state, description, workflow_url())
-    body = (
-        f"## Local CI 准入结果\n\n{message}\n\n"
-        f"PR 提交：`{task['head_sha']}`；任务：`{task['task_id']}`。"
-    )
-    if workflow_url():
-        body += f"\n\n[检查证据与处理入口]({workflow_url()})"
-    gh.comment(task, body)
 
 
 def current_task(gh: GitHub, control: GitStore, task: dict) -> bool:
@@ -1517,9 +1521,7 @@ def main() -> int:
         errors = validate_pr_info(task)
         if errors:
             gh.status(task, "failure", "Local CI: PR information incomplete; see PR comment", workflow_url())
-            gh.comment(
-                task, "## PR 信息需要补充\n\n" + "\n".join(f"- {x}" for x in errors)
-            )
+            gh.comment(task, pr_info_comment(errors))
         return int(bool(errors))
     if args.command == "card":
         if not is_current(gh, task) or not gh.owns_preflight(task):
@@ -1527,10 +1529,15 @@ def main() -> int:
                 gh.finish_inactive_pr(task["pr_number"])
             raise ValueError("PR changed before preflight publication")
         stages = json.loads(args.stages)
-        eligible = all(
-            stages.get(key) == "success"
-            for key in ("prepare", "basic", "api", "security")
-        )
+        eligible = preflight_passed(stages)
+        if not eligible:
+            # Defense in depth for manual CLI use or an older workflow caller.
+            # Failed prerequisites get Checks/status feedback, never an approval card.
+            publish_preflight_checks(gh, task, stages, False)
+            gh.status(task, "failure" if "failure" in stages.values() else "error",
+                      "Local CI: preflight not passed; approval and dispatch skipped", workflow_url())
+            output("eligible", False)
+            return 0
         approval_error = ""
         if eligible and task.get("external_fork"):
             try:

@@ -910,13 +910,13 @@ README only
         stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
         g.finalize_preflight(self.gh, self.task, {**stages, "approval": "failure"})
         self.assertTrue(self.gh.latest_statuses[self.task["task_id"]][1].isascii())
-        self.assertIn("人工审批未通过", self.gh.comments[-1])
+        self.assertEqual(self.gh.comments, [])
 
     def test_failed_card_is_not_reported_as_a_rejected_approval(self):
         stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
         g.finalize_preflight(self.gh, self.task, {**stages, "card": "failure", "approval": "skipped"})
-        self.assertIn("审批卡发布未完成", self.gh.comments[-1])
-        self.assertNotIn("人工审批未通过", self.gh.comments[-1])
+        self.assertIn("card publication failed", self.gh.latest_statuses[self.task['task_id']][1])
+        self.assertEqual(self.gh.comments, [])
 
     def test_approval_card_has_frozen_identity_evidence_and_admission_boundary(self):
         stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
@@ -929,12 +929,51 @@ README only
                      "并不代表代码安全或测试通过"):
             self.assertIn(text, card)
         blocked = g.approval_card(self.task, {**stages, "basic": "failure"}, False)
-        self.assertIn("未进入 Local CI", blocked)
-        self.assertNotIn("等待维护者审批", blocked)
+        self.assertEqual(blocked, "")
         config_error = g.approval_card(self.task, stages, False, "缺少 required reviewers")
         self.assertIn("缺少 required reviewers", config_error)
         internal = g.approval_card({**self.task, "external_fork": False}, stages, True)
         self.assertIn("无需外部 fork 审批", internal)
+
+    def test_failed_prerequisites_never_publish_card_or_verify_approval(self):
+        passed = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
+        summary_path = self.root / "step-summary.md"
+        for key in passed:
+            for outcome in ("failure", "cancelled", "skipped", None):
+                stages = {**passed, key: outcome}
+                with (
+                    self.subTest(stage=key, outcome=outcome),
+                    patch.object(g.sys, "argv", ["gateway.py", "card", "--stages", json.dumps(stages)]),
+                    patch.object(g, "GitHub", return_value=self.gh),
+                    patch.object(g, "load_task", return_value=self.task),
+                    patch.object(g, "validate_approval_environment") as approval,
+                    patch.object(g, "output") as output,
+                    patch.dict(g.os.environ, {"GITHUB_STEP_SUMMARY": str(summary_path)}),
+                ):
+                    self.assertEqual(g.main(), 0)
+                    approval.assert_not_called()
+                    output.assert_called_once_with("eligible", False)
+                    self.assertEqual(g.approval_card(self.task, stages, False), "")
+                    self.assertEqual(self.gh.comments, [])
+                    self.assertFalse(summary_path.exists())
+                g.finalize_preflight(self.gh, self.task, {**stages, "card": "skipped"})
+                self.assertEqual(self.gh.comments, [])
+
+    def test_pr_information_failure_has_friendly_actionable_feedback(self):
+        errors = ["请补充影响范围", "请说明已完成的验证"]
+        with (
+            patch.object(g.sys, "argv", ["gateway.py", "info"]),
+            patch.object(g, "GitHub", return_value=self.gh),
+            patch.object(g, "load_task", return_value=self.task),
+            patch.object(g, "validate_pr_info", return_value=errors),
+        ):
+            self.assertEqual(g.main(), 1)
+        self.assertEqual(len(self.gh.comments), 1)
+        message = self.gh.comments[0]
+        for text in ("感谢您的贡献", *errors, "直接更新 PR 描述", "目前无需等待审批"):
+            self.assertIn(text, message)
+        self.assertEqual(self.gh.statuses[-1][1], "failure")
+        self.assertTrue(self.gh.latest_statuses[self.task['task_id']][1].isascii())
 
     def test_result_comment_is_chinese_scoped_to_run_and_separates_unexecuted_checks(self):
         result = self.result()
@@ -995,7 +1034,7 @@ README only
         g.finalize_preflight(self.gh, self.task, stages)
         self.assertEqual(self.gh.statuses[-1][1], "error")
         self.assertIn("approval", self.gh.latest_statuses[self.task['task_id']][1])
-        self.assertIn("准入结果", self.gh.comments[-1])
+        self.assertEqual(self.gh.comments, [])
         before = len(self.gh.statuses)
         with patch.object(self.gh, "owns_preflight", return_value=False):
             g.finalize_preflight(self.gh, self.task, stages)
@@ -1187,6 +1226,8 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertIn("basic", jobs["api"]["needs"])
         self.assertIn("api", jobs["security"]["needs"])
         self.assertIn("security", jobs["review-card"]["needs"])
+        for stage in ("prepare", "basic", "api", "security"):
+            self.assertIn(f"needs.{stage}.result == 'success'", jobs["review-card"]["if"])
         self.assertIn("review-card", jobs["approve-external-fork"]["needs"])
         self.assertIn("approve-external-fork", jobs["enqueue"]["needs"])
         for name in (
@@ -1242,7 +1283,7 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertEqual(jobs["deploy-dashboard"]["environment"], "github-pages")
         self.assertEqual(jobs["deploy-dashboard"]["needs"], "publish")
         self.assertIn("dashboard_changed", jobs["deploy-dashboard"]["if"])
-        self.assertEqual(jobs["finalize-preflight"]["permissions"]["pull-requests"], "write")
+        self.assertEqual(jobs["finalize-preflight"]["permissions"]["pull-requests"], "read")
         self.assertEqual(jobs["publish"]["concurrency"]["cancel-in-progress"], "false")
         self.assertIn("inputs.task_id", data["concurrency"]["group"])
         self.assertIn("inputs.mode != 'receive'", data["concurrency"]["cancel-in-progress"])
