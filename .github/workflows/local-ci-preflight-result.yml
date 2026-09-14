@@ -1,0 +1,28 @@
+name: Local CI / Preflight Result
+on:
+  workflow_call:
+    inputs:
+      task_digest: {type: string, required: true}
+      worker_revision_sha: {type: string, required: true}
+      stage: {type: string, required: true}
+      outcome: {type: string, required: true}
+permissions: {contents: read, pull-requests: read, checks: write}
+jobs:
+  sync:
+    name: Sync ${{ inputs.stage }} result
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.worker_revision_sha }}
+          persist-credentials: false
+          submodules: false
+      - uses: actions/download-artifact@v4
+        with: {name: local-ci-task}
+      - name: Publish this stage to PR Checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_TASK_DIGEST: ${{ inputs.task_digest }}
+          STAGES: '{"${{ inputs.stage }}":"${{ inputs.outcome }}"}'
+        run: python3 scripts/ci/gateway.py checks

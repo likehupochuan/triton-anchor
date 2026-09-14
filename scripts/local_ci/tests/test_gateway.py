@@ -425,6 +425,10 @@ README only
             self.assertFalse(g.is_current(self.gh, self.task))
         self.assertEqual(g.cancel_obsolete(self.gh, control, 7), 1)
         self.assertEqual(g.cancel_obsolete(self.gh, control, 7), 0)
+        self.assertEqual(self.gh.comments, [])
+        self.assertEqual(self.gh.statuses[-1][1], "error")
+        self.assertTrue(self.gh.latest_statuses[self.task["task_id"]][1].isascii())
+        self.assertTrue(control.get("cancel/" + self.task["task_id"] + ".json")["github_notified"])
         self.assertEqual(
             control.get("cancel/" + self.task["task_id"] + ".json")["task_id"],
             self.task["task_id"],
@@ -824,10 +828,49 @@ README only
                                       {"basic": "failure", "api": "skipped", "security": "cancelled"}, False)
         self.assertEqual([call.args[3] for call in check.call_args_list],
                          ["failure", "action_required", "cancelled"])
-        self.assertIn("未执行", check.call_args_list[1].args[4])
+        self.assertIn("skipped", check.call_args_list[1].args[4])
+        self.assertTrue(all(call.args[4].isascii() and call.args[5].isascii() for call in check.call_args_list))
         stages = {key: "cancelled" for key in ("prepare", *g.CHECK_NAMES)}
         g.finalize_preflight(self.gh, self.task, stages)
         self.assertEqual(self.gh.statuses[-1][1], "error")
+
+    def test_stage_completion_updates_only_that_check_without_summary_or_comments(self):
+        outcomes = {"success": "success", "failure": "failure",
+                    "cancelled": "cancelled", "skipped": "action_required"}
+        for stage in g.CHECK_NAMES:
+            for outcome, conclusion in outcomes.items():
+                with self.subTest(stage=stage, outcome=outcome), patch.object(self.gh, "check", return_value=True) as check:
+                    self.assertTrue(g.sync_preflight(self.gh, self.task, {stage: outcome}))
+                    check.assert_called_once()
+                    self.assertEqual(check.call_args.args[1:4], (stage, "completed", conclusion))
+                    self.assertEqual(check.call_args.args[4], f"local-ci/{stage}: {outcome}")
+        self.assertEqual(self.gh.writes, [])
+
+    def test_late_stage_completion_cannot_overwrite_a_new_task(self):
+        with patch.object(self.gh, "owns_preflight", return_value=False), patch.object(self.gh, "check") as check:
+            self.assertFalse(g.sync_preflight(self.gh, self.task, {"basic": "success"}))
+            check.assert_not_called()
+        self.gh.pull["draft"] = True
+        with patch.object(self.gh, "check") as check:
+            self.assertFalse(g.sync_preflight(self.gh, self.task, {"security": "cancelled"}))
+            check.assert_not_called()
+
+    def test_stage_completion_rejects_unknown_or_nonterminal_outcomes(self):
+        for stages in (None, [], ["basic"], {}, {"summary": "success"},
+                       {"api": "in_progress"}, {"api": ["success"]}):
+            with self.subTest(stages=stages), self.assertRaises(ValueError):
+                g.sync_preflight(self.gh, self.task, stages)
+
+    def test_checks_use_english_while_pr_feedback_remains_chinese(self):
+        with patch.object(self.gh, "check") as check:
+            g.begin_preflight(self.gh, self.task)
+        self.assertTrue(all(call.args[4].isascii() and call.args[5].isascii() for call in check.call_args_list))
+        for state in g.GITHUB_STATES:
+            self.assertTrue(g.publication_description(state, "a" * 64).isascii())
+        stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
+        g.finalize_preflight(self.gh, self.task, {**stages, "approval": "failure"})
+        self.assertTrue(self.gh.latest_statuses[self.task["task_id"]][1].isascii())
+        self.assertIn("人工审批未通过", self.gh.comments[-1])
 
     def test_failed_card_is_not_reported_as_a_rejected_approval(self):
         stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
@@ -911,7 +954,7 @@ README only
         stages.update(approval="failure", enqueue="skipped")
         g.finalize_preflight(self.gh, self.task, stages)
         self.assertEqual(self.gh.statuses[-1][1], "error")
-        self.assertIn("人工审批", self.gh.latest_statuses[self.task['task_id']][1])
+        self.assertIn("approval", self.gh.latest_statuses[self.task['task_id']][1])
         self.assertIn("准入结果", self.gh.comments[-1])
         before = len(self.gh.statuses)
         with patch.object(self.gh, "owns_preflight", return_value=False):
@@ -1108,11 +1151,31 @@ class WorkflowStructureTests(unittest.TestCase):
             "local-ci-basic-checks.yml",
             "local-ci-api-compatibility.yml",
             "local-ci-security.yml",
+            "local-ci-preflight-result.yml",
         ):
             workflow = yaml.load(
                 (ROOT / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader
             )
             self.assertEqual(set(workflow["on"]), {"workflow_call"})
+        for stage in ("basic", "api", "security"):
+            completion = jobs[stage + "-result"]
+            self.assertEqual(completion["needs"], ["prepare", stage])
+            self.assertIn("always()", completion["if"])
+            self.assertIn("needs.prepare.outputs.task_id", completion["if"])
+            self.assertEqual(completion["with"]["stage"], stage)
+            self.assertEqual(completion["with"]["outcome"], "${{ needs." + stage + ".result }}")
+            self.assertEqual(completion["permissions"]["checks"], "write")
+            self.assertNotIn("checks", jobs[stage]["permissions"])
+            self.assertIn(stage + "-result", jobs["review-card"]["needs"])
+        sync = yaml.load((ROOT / ".github/workflows/local-ci-preflight-result.yml").read_text(), Loader=yaml.BaseLoader)
+        steps = sync["jobs"]["sync"]["steps"]
+        self.assertEqual(steps[0]["with"]["ref"], "${{ inputs.worker_revision_sha }}")
+        self.assertEqual(steps[0]["with"]["persist-credentials"], "false")
+        self.assertEqual(steps[-1]["env"]["EXPECTED_TASK_DIGEST"], "${{ inputs.task_digest }}")
+        self.assertEqual(steps[-1]["run"], "python3 scripts/ci/gateway.py checks")
+        self.assertNotIn("statuses", sync["permissions"])
+        self.assertEqual(sync["permissions"]["pull-requests"], "read")
+        self.assertTrue(jobs["deploy-dashboard"]["name"].isascii())
         self.assertEqual(jobs["review-card"]["permissions"]["pull-requests"], "write")
         self.assertEqual(jobs["review-card"]["permissions"]["statuses"], "write")
         self.assertEqual(jobs["prepare"]["permissions"]["checks"], "write")

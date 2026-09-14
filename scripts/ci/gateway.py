@@ -293,8 +293,8 @@ class GitHub:
                         {
                             "status": "completed", "conclusion": "cancelled",
                             "output": {
-                                "title": "旧任务已被替代",
-                                "summary": "同一提交已有新的冻结任务；请查看最新检查。",
+                                "title": "Superseded task cancelled",
+                                "summary": "A newer frozen task owns this commit. See the latest checks.",
                             },
                         },
                     )
@@ -380,7 +380,7 @@ class GitHub:
                     self.status(
                         {"tested_sha": sha, "head_sha": sha},
                         "error",
-                        "Local CI：PR 已关闭或转为草稿，验证取消",
+                        "Local CI cancelled: PR closed or became draft",
                     )
                 break
             if len(statuses) < 100:
@@ -406,8 +406,8 @@ class GitHub:
                             "status": "completed",
                             "conclusion": "cancelled",
                             "output": {
-                                "title": "Local CI 已取消",
-                                "summary": "PR 已关闭或转为草稿。",
+                                "title": "Local CI cancelled",
+                                "summary": "PR closed or became draft.",
                             },
                         },
                     )
@@ -806,7 +806,7 @@ def enqueue(task: dict, gh: GitHub, control: GitStore, source: Path) -> None:
         validate_task(old)
         documents[f"tasks/{task['task_id']}.json"] = old
     control.put(documents, (f"tasks/{task['task_id']}.json",))
-    gh.status(task, "pending", "Local CI：任务已投递到 Gitee，等待服务器结果", workflow_url())
+    gh.status(task, "pending", "Local CI: task published to Gitee; awaiting worker results", workflow_url())
 
 
 def cancel_obsolete(gh: GitHub, control: GitStore, pr_number: int = 0) -> int:
@@ -830,7 +830,7 @@ def cancel_obsolete(gh: GitHub, control: GitStore, pr_number: int = 0) -> int:
                 }
                 control.put({name: cancellation})
                 count += 1
-            # A newer dispatched task owns the current status/comment. Never let
+            # A newer dispatched task owns the current status. Never let
             # an old cancellation overwrite its result (including same-head edits).
             control.refresh()
             pointer = control.get(f"current/{current_key(task)}.json")
@@ -843,11 +843,7 @@ def cancel_obsolete(gh: GitHub, control: GitStore, pr_number: int = 0) -> int:
                 gh.status(
                     task,
                     "error",
-                    "Local CI：PR 或分支已变化、关闭或转为草稿，旧任务取消",
-                )
-                gh.comment(
-                    task,
-                    f"## Local CI 旧任务已取消\n\n任务 `{task['task_id']}`，被测提交 `{task['tested_sha']}`。\n\nPR/分支的提交、目标、信息或状态已变化，本地 worker 已收到停止通知；此结果不能作为当前通过结果。若 PR 仍需验证，请查看对应新任务或从 Gateway 重新请求。",
+                    "Local CI cancelled: PR/branch changed, closed or became draft",
                 )
                 cancellation["github_notified"] = True
                 control.put({name: cancellation})
@@ -990,7 +986,7 @@ GITHUB_STATES = {
 
 def publication_description(status: str, result_digest: str) -> str:
     # The digest binds task, run and all evidence without another delivery record.
-    return f"Local CI：{display_state(status)}（结果 {result_digest}）"
+    return f"Local CI: {status} (result {result_digest})"
 
 
 def workflow_url() -> str:
@@ -1011,10 +1007,12 @@ def check_value(value: object, limit: int = 300) -> str:
 
 
 def publish_preflight_checks(
-    gh: GitHub, task: dict, stages: dict, eligible: bool
+    gh: GitHub, task: dict, stages: dict, eligible: bool, *, partial: bool = False
 ) -> bool:
     changed = False
     for key in CHECK_NAMES:
+        if partial and key not in stages:
+            continue
         outcome = str(stages.get(key, "skipped"))
         # GitHub treats skipped/neutral required checks as passing. Keep an
         # unexecuted prerequisite blocking without misreporting a test failure.
@@ -1024,25 +1022,39 @@ def publish_preflight_checks(
             key,
             "completed",
             conclusion,
-            f"{DISPLAY_CHECKS[key]}：{display_state(outcome)}",
-            f"可信前置检查：**{display_state(outcome)}**。未执行不等于通过；请查看本次工作流证据。",
+            f"{CHECK_NAMES[key]}: {check_value(outcome)}",
+            f"Trusted preflight stage: **{check_value(outcome)}**. Unexecuted required checks do not pass. "
+            f"[Workflow evidence]({workflow_url()})",
             workflow_url(),
         )
     return changed
 
 
+def sync_preflight(gh: GitHub, task: dict, stages: dict) -> bool:
+    """A trusted completion job updates only its stage, never the CI summary."""
+    if not isinstance(stages, dict) or not stages or set(stages) - CHECK_NAMES.keys() or any(
+        not isinstance(value, str) or value not in {"success", "failure", "cancelled", "skipped"}
+        for value in stages.values()
+    ):
+        raise ValueError("Invalid preflight stage results")
+    if not is_current(gh, task) or not gh.owns_preflight(task):
+        return False
+    return publish_preflight_checks(gh, task, stages, False, partial=True)
+
+
 def begin_preflight(gh: GitHub, task: dict) -> None:
     if not is_current(gh, task):
         raise ValueError("Task changed before preflight initialization")
-    gh.status(task, "pending", "Local CI：等待前置检查结果", workflow_url())
+    gh.status(task, "pending", "Local CI: awaiting preflight results", workflow_url())
     for key in CHECK_NAMES:
         gh.check(
             task,
             key,
             "queued",
             None,
-            f"{DISPLAY_CHECKS[key]}：等待前置检查结果",
-            f"此门禁等待本任务的前置检查汇总；各阶段实时进度见工作流。任务 `{task['task_id']}`。",
+            f"{CHECK_NAMES[key]}: queued",
+            f"Waiting for this task's preflight stage. Task `{task['task_id']}`. "
+            f"[Workflow progress]({workflow_url()})",
             workflow_url(),
         )
 
@@ -1055,18 +1067,23 @@ def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
         return
     publish_preflight_checks(gh, task, stages, False)
     if any(stages.get(key) == "failure" for key in ("prepare", *CHECK_NAMES)):
-        state, description = "failure", "Local CI：前置检查未通过，请查看工作流"
+        state, description = "failure", "Local CI: preflight checks failed; see workflow"
+        message = "Local CI：前置检查未通过，请查看工作流"
     elif any(stages.get(key) != "success" for key in ("prepare", *CHECK_NAMES)):
-        state, description = "error", "Local CI：前置检查取消或未执行，尚无完整验证结论"
+        state, description = "error", "Local CI: preflight cancelled or not executed; verification incomplete"
+        message = "Local CI：前置检查取消或未执行，尚无完整验证结论"
     elif stages.get("card", "success") != "success":
-        state, description = "error", "Local CI：审批卡发布未完成，尚未进入服务器验证"
+        state, description = "error", "Local CI: approval card publication failed; worker verification not started"
+        message = "Local CI：审批卡发布未完成，尚未进入服务器验证"
     elif task.get("external_fork") and stages.get("approval") != "success":
-        state, description = "error", "Local CI：人工审批未通过或已取消，未进入服务器验证"
+        state, description = "error", "Local CI: approval failed or cancelled; worker verification not started"
+        message = "Local CI：人工审批未通过或已取消，未进入服务器验证"
     else:
-        state, description = "error", "Local CI：任务投递或接收器启动未完成，请查看工作流"
+        state, description = "error", "Local CI: task dispatch or receiver startup failed; see workflow"
+        message = "Local CI：任务投递或接收器启动未完成，请查看工作流"
     gh.status(task, state, description, workflow_url())
     body = (
-        f"## Local CI 准入结果\n\n{description}\n\n"
+        f"## Local CI 准入结果\n\n{message}\n\n"
         f"PR 提交：`{task['head_sha']}`；任务：`{task['task_id']}`。"
     )
     if workflow_url():
@@ -1179,7 +1196,7 @@ def receive_result(
                     gh.status(
                         task,
                         "error",
-                        "Local CI：结果接收超时，请补收结果；不需要重新构建",
+                        "Local CI: receiver timed out; retry receive without rebuilding",
                     )
                     raise ValueError(
                         f"Local CI receiver timed out after {RECEIVER_MAX_ROUNDS} rounds; "
@@ -1218,7 +1235,7 @@ def publication_error(gh: GitHub, control: GitStore, task: dict) -> None:
             gh.status(
                 task,
                 "error",
-                "Local CI：结果校验或状态发布未完成，接收器将重试",
+                "Local CI: result validation or status publication failed; receiver will retry",
             )
     except (ValueError, OSError, RuntimeError):
         pass
@@ -1409,6 +1426,7 @@ def main() -> int:
             "prepare",
             "info",
             "card",
+            "checks",
             "finalize",
             "approval",
             "enqueue",
@@ -1466,8 +1484,11 @@ def main() -> int:
         failures = sarif_failures(args.source)
         print(f"CodeQL high/critical or error findings: {len(failures)}")
         return int(bool(failures))
-    if args.command in {"info", "card", "finalize", "approval", "enqueue", "api", "security"}:
+    if args.command in {"info", "card", "checks", "finalize", "approval", "enqueue", "api", "security"}:
         task = load_task(args.task, os.getenv("EXPECTED_TASK_DIGEST", ""))
+    if args.command == "checks":
+        sync_preflight(gh, task, json.loads(args.stages))
+        return 0
     if args.command == "finalize":
         finalize_preflight(gh, task, json.loads(args.stages))
         return 0
@@ -1483,7 +1504,7 @@ def main() -> int:
             raise ValueError("PR changed before information publication")
         errors = validate_pr_info(task)
         if errors:
-            gh.status(task, "failure", "Local CI：PR 信息不完整，请查看评论", workflow_url())
+            gh.status(task, "failure", "Local CI: PR information incomplete; see PR comment", workflow_url())
             gh.comment(
                 task, "## PR 信息需要补充\n\n" + "\n".join(f"- {x}" for x in errors)
             )
@@ -1517,11 +1538,11 @@ def main() -> int:
                 stream.write(body + "\n")
         state = "pending" if eligible else "failure" if "failure" in stages.values() else "error"
         if not eligible:
-            description = "Local CI：前置检查或审批配置未就绪，参见审批卡"
+            description = "Local CI: preflight or approval configuration not ready; see review card"
         elif task.get("external_fork"):
-            description = "Local CI：等待人工审批"
+            description = "Local CI: awaiting maintainer approval"
         else:
-            description = "Local CI：前置检查通过，等待派发"
+            description = "Local CI: preflight passed; awaiting dispatch"
         gh.status(task, state, description, workflow_url())
         output("eligible", eligible)
         return 0
@@ -1630,7 +1651,7 @@ if __name__ == "__main__":
                         client.status(
                             context,
                             "error",
-                            "Local CI：准备或投递未完成，请查看 PR 评论",
+                            "Local CI: preparation or dispatch failed; see PR comment",
                         )
                         run_id = os.getenv("GITHUB_RUN_ID", "")
                         link = (

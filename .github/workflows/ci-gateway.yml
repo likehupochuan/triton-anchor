@@ -150,8 +150,38 @@ jobs:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
       tested_sha: ${{ needs.prepare.outputs.tested_sha }}
       worker_revision_sha: ${{ inputs.worker_revision_sha }}
+  basic-result:
+    needs: [prepare, basic]
+    if: ${{ always() && needs.prepare.outputs.task_id != '' }}
+    permissions: {contents: read, pull-requests: read, checks: write}
+    uses: ./.github/workflows/local-ci-preflight-result.yml
+    with:
+      task_digest: ${{ needs.prepare.outputs.task_digest }}
+      worker_revision_sha: ${{ inputs.worker_revision_sha }}
+      stage: basic
+      outcome: ${{ needs.basic.result }}
+  api-result:
+    needs: [prepare, api]
+    if: ${{ always() && needs.prepare.outputs.task_id != '' }}
+    permissions: {contents: read, pull-requests: read, checks: write}
+    uses: ./.github/workflows/local-ci-preflight-result.yml
+    with:
+      task_digest: ${{ needs.prepare.outputs.task_digest }}
+      worker_revision_sha: ${{ inputs.worker_revision_sha }}
+      stage: api
+      outcome: ${{ needs.api.result }}
+  security-result:
+    needs: [prepare, security]
+    if: ${{ always() && needs.prepare.outputs.task_id != '' }}
+    permissions: {contents: read, pull-requests: read, checks: write}
+    uses: ./.github/workflows/local-ci-preflight-result.yml
+    with:
+      task_digest: ${{ needs.prepare.outputs.task_digest }}
+      worker_revision_sha: ${{ inputs.worker_revision_sha }}
+      stage: security
+      outcome: ${{ needs.security.result }}
   review-card:
-    needs: [prepare, basic, api, security]
+    needs: [prepare, basic, api, security, basic-result, api-result, security-result]
     if: ${{ always() && needs.prepare.outputs.tested_sha != '' }}
     runs-on: ubuntu-latest
     permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: read}
@@ -376,7 +406,7 @@ jobs:
               }
             });
   deploy-dashboard:
-    name: 部署看板（不改变测试结论）
+    name: Deploy dashboard (independent of test results)
     needs: publish
     if: needs.publish.outputs.dashboard_changed == 'true'
     runs-on: ubuntu-latest

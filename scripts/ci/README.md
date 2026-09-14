@@ -27,7 +27,9 @@
 
 GitHub required checks 必须实际配置并查询验证：`local-ci/basic`、`local-ci/api`、`local-ci/security`、`local-ci/summary`。前三项是 PR head 上的 Check Runs，summary 是 commit status，避免同一名称同时对应两种门禁。真实失败使用 `failure`，取消使用 `cancelled`，被上游阻断或未执行使用 `action_required`；三者都不放行，且不将未执行误报成测试失败。不能用 `skipped` 或 `neutral` 表示未完成的必检，因为 GitHub 会将这两种结论视为满足 required check。PR 关闭或转为草稿时，尚在等待审批或执行的状态会结束为取消；网络失败只重试发布封存结果，不重新执行测试。
 
-冻结新任务后立即将 summary 置为 pending，并为本任务排队三个前置 checks。排队表示等待汇总，阶段实时进度看工作流；审批卡发布时写入实际结论。Check Run 按完整 task ID 更新，其他任务的已完成记录保留为历史；同一 head 上被新任务替代的旧等待检查结束为取消，不篡改旧失败结论。已完成任务的前置检查重跑会创建新记录。接收、取消和异常收尾在回写前核对最新前置 checks 的任务身份，防止新任务尚未投递到 Gitee 时，旧结果覆盖新门禁。审批拒绝、前置检查或投递失败由 `finalize-preflight` 结束等待状态并追加中文准入结果；已成功投递的任务继续由接收器负责 summary。
+冻结新任务后立即将 summary 置为 pending，并为本任务排队三个前置 checks。Basic、API、Security 各阶段结束后，由独立的可信结果作业立即同步该阶段结论到 PR head 的 Checks，不等待其他检查或人工审批；实际开始时间受 GitHub runner 排队影响。结果作业只检出固定控制代码、校验任务摘要和当前身份，不检出或运行候选代码，也不改变 summary 和 PR 评论。审批卡与 finalizer 仍补齐最终状态，阶段回写失败时可重试。Check Run 按完整 task ID 更新，其他任务的已完成记录保留为历史；同一 head 上被新任务替代的旧等待检查结束为取消，不篡改旧失败结论。已完成任务的前置检查重跑会创建新记录。接收、取消和异常收尾在回写前核对最新前置 checks 的任务身份，防止新任务尚未投递到 Gitee 时，旧结果覆盖新门禁。审批拒绝、前置检查或投递失败由 `finalize-preflight` 结束等待状态并追加中文准入结果；已成功投递的任务继续由接收器负责 summary。
+
+GitHub Checks 的名称、结论、标题、状态说明，以及 `local-ci/summary` 的说明保持英文；审批卡、最终 PR 评论和 Agent 的面向维护者解释保持中文。旧任务取消只更新 Checks/status 与 Gitee 停止标记，不追加“Local CI 旧任务已取消”评论；历史评论不自动删除。
 
 审批卡与 `ci_repo` 的证据结构一致：前置检查表、完整 head/base/merge/control SHA、任务 ID、验证范围、审批原因和本次 Actions 证据/审批入口。卡片同时写入 PR 和工作流摘要；它只陈述已完成的前置检查，不预报服务器验证结果。外部 fork 仍以配置了 required reviewers 的 `local-ci-fork-approval` 环境为唯一人工准入门禁，审批后继续复查冻结身份。
 
