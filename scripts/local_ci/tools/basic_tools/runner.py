@@ -210,8 +210,8 @@ def plan(
         raise ValueError(f"Unsupported parameters: {sorted(set(params) - allowed)}")
     profile = context.get("profile", {})
     config = profile.get("tools", {})
-    py = context.get("python_bin", config.get("python_bin", "python3"))
-    trusted_py = context.get("trusted_python_bin", "/usr/bin/python3")
+    py = context.get("python_bin", config.get("python_bin", "/task/candidate/venv/bin/python"))
+    trusted_py = context.get("trusted_python_bin", "/opt/venv/bin/python")
     root = context.get("tools_dir", str(Path(__file__).resolve().parents[1]))
     helper = path_join(root, "basic_tools", "actions.py")
     source = context["source_dir"]

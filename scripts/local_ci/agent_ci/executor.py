@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .protocol import ContractError, atomic_json
 from prepare.runtime import docker_command
+from prepare.python_environment import ci_python
 
 LAUNCH_PROGRAM = r"""
 import json,os,pathlib,signal,sys,time
@@ -121,6 +122,12 @@ class DockerExecutor:
             ],
             PYTHON_BIN=str(root / "venv/bin/python"),
             PYTHON_VENV_ACTIVATE=str(root / "venv/bin/activate"),
+            VIRTUAL_ENV=str(root / "venv"),
+            PYTHONNOUSERSITE="1",
+            PIP_REQUIRE_VIRTUALENV="true",
+            LOCAL_CI_SEED_PYTHON=ci_python(self.config, self.generation.get("env")),
+            BASH_ENV=self.config.get("container_control_root", "/opt/local-ci/control")
+            + "/scripts/local_ci/tools/basic_tools/ci_python_env.sh",
             PATH=str(root / "venv/bin")
             + ":"
             + env.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
@@ -134,6 +141,7 @@ class DockerExecutor:
         )
         if self.generation.get("backend_enabled"):
             env["BACKEND_PATH"] = str(root / "backend")
+        env.pop("PYTHONHOME", None)
         return env
 
     def tool_context(self, variant="candidate"):
@@ -196,9 +204,7 @@ class DockerExecutor:
             ).replace("triton-", ""),
             "python_bin": env["PYTHON_BIN"],
             "task_venv": str(root / "venv"),
-            "trusted_python_bin": self.config.get(
-                "container_python", "/usr/bin/python3"
-            ),
+            "trusted_python_bin": ci_python(self.config, self.generation.get("env")),
             "tools_dir": self.config.get(
                 "container_control_root", "/opt/local-ci/control"
             )
@@ -245,7 +251,7 @@ class DockerExecutor:
             "--user",
             f"{self.uid}:{self.gid}",
             self.generation["container_id"],
-            self.config.get("container_python", "/usr/bin/python3"),
+            ci_python(self.config, self.generation.get("env")),
             "-I",
             "-S",
             "-c",
@@ -263,7 +269,7 @@ class DockerExecutor:
                 "--user",
                 f"{self.uid}:{self.gid}",
                 self.generation["container_id"],
-                self.config.get("container_python", "/usr/bin/python3"),
+                ci_python(self.config, self.generation.get("env")),
                 "-I",
                 "-S",
                 "-c",

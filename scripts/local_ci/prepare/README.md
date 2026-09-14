@@ -37,3 +37,12 @@ Worker 接单仍校验控制 SHA，并在整个任务期间持有现有 `control
 只读依赖的目录、权限和摘要配置见 [DEPENDENCY_MOUNTS.md](DEPENDENCY_MOUNTS.md)。`profiles/slim/` 提供共享基础镜像配方，FlagGems 从固定服务器目录导入，各任务的 venv 和构建输出独立。后端测试默认路径为 `tests`；多个路径可显式设置 profile 的 `tools.backend_test_paths` 数组。
 
 健康采集、异常观察和本地保留策略见 [maintenance/README.md](../maintenance/README.md)。
+
+## 容器内 CI Python
+
+`container_python` 必须指向镜像中专门准备的 CI 虚拟环境（通常为 `/opt/venv/bin/python`），
+不能配置成 `/usr/bin/python3` 或仅 `python3`。未显式配置时使用 Profile 的 `SEED_PYTHON`
+或 `PYTHON_VENV_ACTIVATE` 对应解释器；它用于可信管理操作，并为 candidate/base 各自生成
+可写的任务 venv。Codex 的构建、安装和测试使用相应任务 venv，环境修复不会污染预置环境。
+任务 venv 直接复制预置包（包括 pip），不依赖系统 `ensurepip`；安装依赖使用 `"$PYTHON_BIN" -m pip`。
+宿主机服务的 `python_bin` 与容器解释器独立，仍可使用宿主机 Python。

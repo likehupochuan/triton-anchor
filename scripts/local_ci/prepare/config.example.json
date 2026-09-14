@@ -14,6 +14,7 @@
     "likehupochuan/triton-anchor"
   ],
   "python_bin": "/usr/bin/python3",
+  "container_python": "/opt/venv/bin/python",
   "docker_bin": "docker",
   "codex_bin": "",
   "codex_home": "",

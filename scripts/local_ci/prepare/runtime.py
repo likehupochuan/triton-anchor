@@ -44,6 +44,7 @@ from .control_mount import (
     mount_arguments as control_mount_arguments,
     verify_mount as verify_control_mount,
 )
+from .python_environment import ci_python
 
 SCHEMA = "triton-anchor-local-ci-environments"
 HELPER = "/opt/local-ci/control/scripts/local_ci/prepare/container_fs.py"
@@ -464,7 +465,8 @@ class EnvironmentManager:
             k: v for k, v in profile.items()
             if k not in {"control_revision", "validation_commands", "daily_calendar"}
         }
-        return fingerprint(["shared-image-mounted-v1", recipe, self.uids, self.gids])
+        return fingerprint(["shared-image-mounted-v1", recipe, self.uids, self.gids,
+                            ci_python(self.config, profile.get("env"))])
 
     def _validation_digest(self, profile):
         return self._recipe_digest(profile)
@@ -575,16 +577,13 @@ class EnvironmentManager:
             for key, value in env.items():
                 prefix += ["--env", key + "=" + value]
             prefix += ["--env", "PYTHONDONTWRITEBYTECODE=1", container]
-            seed = env.get("SEED_PYTHON") or str(
-                Path(env.get("PYTHON_VENV_ACTIVATE", "/opt/venv/bin/activate")).parent
-                / "python"
-            )
+            seed = ci_python(self.config, env)
             self._docker(
                 *prefix,
                 seed,
                 "-I",
                 "-c",
-                "import build,setuptools,wheel,pybind11,yaml,pytest",
+                "import sys; assert sys.prefix != sys.base_prefix, 'Prepared CI virtual environment required'; import build,setuptools,wheel,pybind11,yaml,pytest,pip",
             )
             self._docker(
                 *prefix,
@@ -963,7 +962,7 @@ class EnvironmentManager:
                         "backend_enabled",
                     )
                 }
-                payload["python_bin"] = self.config.get("container_python", "python3")
+                payload["python_bin"] = ci_python(self.config, handle.get("env"))
                 self._helper(
                     handle,
                     "init",
@@ -1048,7 +1047,7 @@ class EnvironmentManager:
             "--user",
             "0:0",
             handle["container_id"],
-            self.config.get("container_python", "python3"),
+            ci_python(self.config, handle.get("env")),
             "-I",
             "-S",
             "-B",
@@ -1107,7 +1106,7 @@ class EnvironmentManager:
         layout = dict(
             home="/task/session/home",
             workspace="/task/candidate/checkout",
-            python_bin=self.config.get("container_python", "python3"),
+            python_bin=ci_python(self.config, h.get("env")),
         )
         if not files and not environment:
             return layout
@@ -1232,7 +1231,7 @@ class EnvironmentManager:
                 "type=bind,source=" + str(work) + ",target=/task",
                 *control_mount_arguments(control),
                 "--entrypoint",
-                self.config.get("container_python", "python3"),
+                ci_python(self.config, h.get("env")),
                 h["image_id"],
                 "-I",
                 "-S",

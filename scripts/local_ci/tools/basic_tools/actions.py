@@ -43,7 +43,7 @@ def read_json(path: Path) -> dict[str, Any]:
 
 def candidate_python(context: dict[str, Any]) -> str:
     """The host-selected task wrapper, never this trusted helper interpreter."""
-    return context.get("python_bin", sys.executable)
+    return context.get("python_bin", "/task/candidate/venv/bin/python")
 
 
 def remove_child(root: Path, child: Path) -> None:

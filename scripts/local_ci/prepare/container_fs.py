@@ -20,6 +20,14 @@ import sys
 import tarfile
 import tempfile
 
+if __package__:
+    from .python_environment import ci_python
+else:
+    # -I/-S removes the script directory from sys.path. Load only our sibling
+    # from the read-only control mount, never a module from the task checkout.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from python_environment import ci_python
+
 TASK = Path("/task")
 SESSION = TASK / "session"
 CONTROL = TASK / ".control"
@@ -254,18 +262,10 @@ def git(root, *arguments):
 
 def seed_venv(root, environment):
     """Copy packages only from the immutable image interpreter, never PR Python."""
-    seed = environment.get("SEED_PYTHON") or str(
-        Path(environment.get("PYTHON_VENV_ACTIVATE", "/opt/venv/bin/activate")).parent
-        / "python"
-    )
-    subprocess.run(
-        [seed, "-I", "-m", "venv", "--copies", str(root / "venv")],
-        check=True,
-        timeout=120,
-    )
+    seed = ci_python(environment=environment)
     # Ask the isolated trusted seed for its actual package layout, including
     # Debian dist-packages. The immutable seed is used only for environment preparation.
-    query = "import json,sys;print(json.dumps({'version':str(sys.version_info.major)+'.'+str(sys.version_info.minor),'paths':[p for p in sys.path if p.endswith(('site-packages','dist-packages'))]}))"
+    query = "import json,sys; assert sys.prefix != sys.base_prefix, 'Prepared CI virtual environment required'; print(json.dumps({'version':str(sys.version_info.major)+'.'+str(sys.version_info.minor),'paths':[p for p in sys.path if p.endswith(('site-packages','dist-packages'))]}))"
     layout = json.loads(
         subprocess.run(
             [seed, "-I", "-c", query], check=True, timeout=30, capture_output=True
@@ -273,6 +273,13 @@ def seed_venv(root, environment):
     )
     if not re.fullmatch(r"[0-9]+\.[0-9]+", layout["version"]):
         raise ValueError("Invalid trusted seed Python layout")
+    subprocess.run(
+        # pip and other packages come from the prepared CI environment below;
+        # do not bootstrap a different pip through the system ensurepip module.
+        [seed, "-I", "-m", "venv", "--copies", "--without-pip", str(root / "venv")],
+        check=True,
+        timeout=120,
+    )
     target = root / "venv/lib" / ("python" + layout["version"]) / "site-packages"
     # Earlier entries in sys.path take precedence, so copy them last.
     for value in reversed(layout["paths"]):
@@ -280,6 +287,19 @@ def seed_venv(root, environment):
         if not source.is_absolute() or not source.is_dir():
             continue
         shutil.copytree(source, target, dirs_exist_ok=True, symlinks=False)
+    # Preserve Python console commands (pip, pytest, etc.) with task-local
+    # shebangs, so PATH cannot fall through to a seed/system installation.
+    for source in Path(seed).parent.iterdir():
+        if not source.is_file():
+            continue
+        with source.open("rb") as stream:
+            first_line = stream.readline(4096)
+            if not re.fullmatch(rb"#![^\r\n]*[/ ]python[0-9.]*\r?\n", first_line):
+                continue
+            body = stream.read()
+        command = root / "venv/bin" / source.name
+        command.write_bytes(("#!" + str(root / "venv/bin/python") + "\n").encode() + body)
+        command.chmod(source.stat().st_mode & 0o777)
     # Bind each task venv to its own profile's read-only source, never the image.
     flaggems = environment.get("FLAGGEMS_CLONE_DIR")
     (target / "local_ci_flaggems.pth").unlink(missing_ok=True)
@@ -324,7 +344,7 @@ def prepare_workspace(params):
         ):
             raise ValueError("Partial or different task venv requires a new run")
     else:
-        seed_venv(root, data.get("env", {}))
+        seed_venv(root, {**data.get("env", {}), "SEED_PYTHON": ci_python({"container_python": data.get("python_bin")}, data.get("env"))})
         write(marker, json.dumps(expected, sort_keys=True).encode(), mode=0o644)
         set_tree_identity(venv, data["uids"]["task"], data["gids"]["task"])
     for name in ("home", "tmp", "cache", "state"):
@@ -381,7 +401,7 @@ def deploy_session(payload):
     return {
         "home": "/task/session/home",
         "workspace": "/task/candidate/checkout",
-        "python_bin": data.get("python_bin", "python3"),
+        "python_bin": environment["PYTHON_BIN"],
     }
 
 

@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 
 from prepare.runtime import EnvironmentManager
+from prepare.python_environment import ci_python
 from prepare.dependency_mounts import (
     dependency_mounts,
     mount_arguments,
@@ -251,7 +252,7 @@ def probe_runtime(config):
                 "--user",
                 str(identities["task"]),
                 "--entrypoint",
-                config.get("container_python", "python3"),
+                ci_python(config, config["profiles"][branch].get("env")),
                 *mount_arguments(mounts),
                 image,
                 "-I",
