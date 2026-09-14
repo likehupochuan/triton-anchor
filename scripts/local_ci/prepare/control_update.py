@@ -18,6 +18,7 @@ if str(LOCAL_ROOT) not in sys.path:
     sys.path.insert(0, str(LOCAL_ROOT))
 
 from prepare.artifacts import SHA_RE, atomic_json, safe_source, utc_now
+from prepare.runtime import EnvironmentManager
 
 
 UPDATE_SCHEMA = "triton-anchor-local-ci-control-update"
@@ -365,6 +366,17 @@ def update_control(
             if ancestor.returncode:
                 raise ValueError("control_repo_url would replace history; only fast-forward updates are allowed")
             if target != current:
+                # A crashed Worker releases its lock before Docker stops its task.
+                # Leave the checkout intact until normal Worker recovery cleans up.
+                manager = EnvironmentManager(config, state_dir)
+                containers = manager._docker(
+                    "ps", "-aq", "--filter", "label=local-ci.owner=" + manager.owner,
+                    "--format", '{{.Label "local-ci.kind"}}',
+                    timeout=30,
+                ).decode().splitlines()
+                if {"task", "task-cleanup"}.intersection(containers):
+                    result["state"] = "deferred-active-task"
+                    return result
                 _git(root, ["checkout", "--quiet", "--detach", target], environment)
                 if (
                     _git(root, ["rev-parse", "HEAD^{commit}"], environment)

@@ -14,6 +14,7 @@ from pathlib import Path
 from .protocol import (
     PREINSTALLED_SUBMODULES,
     ContractError,
+    llvm_hash_from_files,
     current_key,
     result_task_prefix,
     within,
@@ -213,10 +214,16 @@ class GitRelay:
                     or self.ref_sha(module["task_ref"]) != module["sha"]
                 ):
                     return False, "Pinned Gitee submodule snapshot changed"
-        llvm = self.git(
-            ["show", f"{task['tested_sha']}:triton/cmake/llvm-hash.txt"], check=False
-        )
-        if llvm.returncode or llvm.stdout.decode().strip() != task["llvm_hash"]:
+        paths = self.git(
+            ["ls-tree", "-r", "--name-only", "-z", task["tested_sha"], "--", "triton/cmake/"]
+        ).stdout.decode().split("\0")
+        try:
+            llvm = llvm_hash_from_files(
+                paths, lambda path: self.git(["show", f"{task['tested_sha']}:{path}"]).stdout
+            )
+        except ValueError as exc:
+            return False, f"Invalid tested LLVM metadata: {exc}"
+        if llvm != task["llvm_hash"]:
             return False, "Task LLVM identity does not match tested source"
         return True, "current"
 

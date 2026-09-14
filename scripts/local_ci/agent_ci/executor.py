@@ -76,8 +76,8 @@ class DockerExecutor:
     def __init__(self, config, state_dir, generation, task, relay, *, manager):
         self.config, self.generation, self.task = config, generation, task
         self.manager, self.relay = manager, relay
-        self.run_dir = Path(state_dir) / "runs" / task["task_id"] / generation["run_id"]
-        self.artifacts = self.run_dir / "artifacts"
+        self.artifacts = Path(generation["artifacts_host"])
+        self.run_dir = self.artifacts.parent
         self.uid, self.gid = generation["execution_uid"], generation["execution_gid"]
         if self.uid <= 0 or self.gid <= 0:
             raise ContractError("Codex must run as the task's non-root user")

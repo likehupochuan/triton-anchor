@@ -2,7 +2,9 @@
 
 `prepare/` 管理 Rootless Docker 环境、每任务容器和服务安装。部署使用固定控制提交、镜像 digest、完整 LLVM revision 和服务器预置依赖。源码及控制更新经 Gitee 到达 CI 主机。
 
-填写 `config.example.json` 或 `profiles/config.template.json` 中的实际路径、Gitee 仓库、镜像、依赖和模型配置。`control_repo_url` 指向服务器可访问的、无内嵌凭据的 Gitee `control_anchor` 镜像，`control_branch` 默认 `local-ci-unified`。`branch_profiles` 将目标分支映射到 `profiles`；目标分支与 profile 同名时可直接选择。所有 PR 目标分支都可使用，但每个目标需要对应的环境配置。
+填写 `config.example.json` 或 `profiles/config.template.json` 中的实际路径、Gitee 仓库、镜像、依赖和模型配置。`control_repo_url` 指向服务器可访问的、无内嵌凭据的 Gitee `control_anchor` 镜像，`control_branch` 默认 `local-ci-unified`。环境选择优先使用 `branch_profiles` 显式映射，其次使用与目标分支同名的 profile；两者都没有时，按任务的 LLVM SHA 唯一匹配已配置 profile 的 `llvm_hash` 或 `llvm.revisions`，复用其镜像和依赖。该 SHA 由网关读取被测提交的 LLVM 元数据，服务器再对照 Gitee 源码校验。无匹配时需要部署对应环境；多个 profile 支持同一 SHA 时才需显式映射，不按分支名称猜测 Triton 版本。已有显式选择不会因 LLVM 不匹配而悄悄换成其他环境。
+
+网关和服务器共用 LLVM 元数据解析：只在被测提交的 `triton/cmake/` 目录识别 `llvm-hash`、`llvm-info`，兼容无扩展名、`.txt` 和 `.json`。纯文本应为完整的 40 位提交 SHA，JSON 读取 `llvm_hash` 字段。多个文件同时存在时必须给出相同 SHA；不读取 `amd-llvm-info.json` 等其他后端元数据，也不从构建脚本中搜索任意哈希。
 
 新服务器不需要先手工克隆 `control_anchor`。先由受信任的配置管理或制品通道投放本目录中的独立引导脚本、配置和私有凭据，并取得已经审核的 40 位控制提交 SHA。先预览，再以普通 CI 用户执行：
 
@@ -26,7 +28,9 @@ python3 bootstrap_control.py \
 
 从旧配置升级时，将 profile 内的 `image` 合并为顶层一个 digest；LLVM 使用 `mode: mount`，原 `archives` / `repositories` 中的依赖改为预置的只读目录。删除旧 `prepare_commands` 与 `validation_commands`，镜像本身需要的安装步骤放在共享镜像配方中。示例配置列出了 LLVM、后端、PPL 和 FlagGems 的挂载位置。构建默认使用 12 路并行，已有配置的 `max_jobs` / `MAX_JOBS` 不会自动覆盖；按服务器资源设置，Codex 也可通过工具的 `jobs` 参数调整（1–64）。
 
-每任务一个容器，Codex、构建和测试共用 `identities.task` / `identities.gid` 的非 root 身份。candidate、base 和临时实验是任务内的数据目录。可写挂载只有 `work/<task>/<run> → /task` 与 `runs/<task>/<run>/artifacts → /task/artifacts`；控制快照和 LLVM、FlagGems、后端等服务器依赖只读挂载。状态、私有日志和已封存结果留在宿主。
+每任务一个容器，Codex、构建和测试共用 `identities.task` / `identities.gid` 的非 root 身份。candidate、base 和临时实验是任务内的数据目录。可写挂载只有 `work/<task>/<run> → /task` 与当前运行目录的 `artifacts → /task/artifacts`；运行目录按 [本地与 Gitee 共用的命名规则](../README.md) 分层。直接将 `control_root`（服务器上的 `control_anchor`）中的 `scripts`、`api_contract` 和 `envsetup.sh` 只读挂载到容器 `/opt/local-ci/control/` 下的对应位置，不再导出 `environments/control-revisions/<SHA>` 快照。LLVM、FlagGems、后端等服务器依赖仍只读挂载；`.git`、凭据、状态、私有日志和已封存结果留在宿主，不能放入上述挂载目录。
+
+Worker 接单仍校验控制 SHA，并在整个任务期间持有现有 `control.lock`。自动更新拿不到独占锁，或发现本实例尚有任务容器或清理容器未移除时，会延后切换 checkout。挂载前仅将受版本控制的运行文件和目录设为容器可读，兼容服务的 `UMask=0077`。手动更新 `control_anchor` 时，须先停止 Worker、确认任务容器已退出并清理，再更新和启动 Worker。旧任务的快照仍可用于恢复清理，但新任务不再创建快照。
 
 `runtime.py` 负责镜像及容器生命周期；`container_fs.py` 在容器内准备工作目录、独立 venv 和私有 Codex 会话，结束后清理凭据。任务命令可写自己的源码和构建输出；取消、超时和重启恢复由 Worker 停止对应任务，清理不删除已经保存的结果。
 

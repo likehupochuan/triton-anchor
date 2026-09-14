@@ -12,6 +12,12 @@ from prepare.control_update import (
     oldest_forward_request,
     update_control,
 )
+from prepare.runtime import EnvironmentManager
+
+
+@pytest.fixture(autouse=True)
+def no_task_containers(monkeypatch):
+    monkeypatch.setattr(EnvironmentManager, "_docker", lambda *args, **kwargs: b"")
 
 
 def git(root, *arguments):
@@ -52,16 +58,32 @@ def fixture_checkout(tmp_path):
         "state_dir": str(tmp_path / "state"),
         "control_repo_url": str(source),
         "control_branch": "local-ci-unified",
+        "runtime": {"kind": "docker-rootless", "endpoint": "unix:///run/user/1001/docker.sock"},
     }
     return config, control, old, new
 
 
-def test_control_checkout_fast_forwards_and_restarts_once(tmp_path):
+def test_control_checkout_fast_forwards_and_restarts_once(tmp_path, monkeypatch):
     config, control, old, new = fixture_checkout(tmp_path)
     marker = tmp_path / "state/control-update.json"
     marker.parent.mkdir(parents=True)
     marker.write_text(json.dumps({"revision": new}))
     restarts = []
+    def docker(self, *arguments, **kwargs):
+        assert arguments == ("ps", "-aq", "--filter", "label=local-ci.owner=" + self.owner,
+                             "--format", '{{.Label "local-ci.kind"}}')
+        return b"task\n"
+    monkeypatch.setattr(EnvironmentManager, "_docker", docker)
+    deferred = update_control(
+        config, apply=True, allow_local=True, restart_worker=lambda: restarts.append("worker"),
+        expected_revision=new,
+    )
+    assert deferred["state"] == "deferred-active-task"
+    assert not deferred["changed"] and not deferred["restarted"]
+    assert git(control, "rev-parse", "HEAD") == old
+    assert not restarts
+    # Environment probes no longer mount the control checkout and need not block it.
+    monkeypatch.setattr(EnvironmentManager, "_docker", lambda *args, **kwargs: b"image-validation\n")
     result = update_control(
         config,
         apply=True,
@@ -74,6 +96,10 @@ def test_control_checkout_fast_forwards_and_restarts_once(tmp_path):
     assert result["changed"] and result["restarted"]
     assert git(control, "rev-parse", "HEAD") == new
     assert restarts == ["worker"]
+    monkeypatch.setattr(
+        EnvironmentManager, "_docker",
+        lambda *args, **kwargs: pytest.fail("An unchanged revision needs no Docker check"),
+    )
     again = update_control(
         config,
         apply=True,

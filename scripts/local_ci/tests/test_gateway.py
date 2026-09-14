@@ -59,6 +59,8 @@ class FakeGitHub:
         }
         self.statuses, self.comments = [], []
         self.latest_statuses, self.writes = {}, []
+        self.cmake_files = {"triton/cmake/llvm-hash.txt": b"a" * 40 + b"\n"}
+        self.content_reads = []
         self.environment = {
             "protection_rules": [
                 {
@@ -71,6 +73,8 @@ class FakeGitHub:
         }
 
     def request(self, path, method="GET", data=None):
+        if path == "contents/triton/cmake?ref=" + self.tested:
+            return [{"type": "file", "path": name} for name in self.cmake_files]
         if path == "environments/local-ci-fork-approval":
             return self.environment
         if path == "pulls/7":
@@ -88,7 +92,8 @@ class FakeGitHub:
 
     def content(self, path, ref):
         assert ref == self.tested
-        return b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        self.content_reads.append(path)
+        return self.cmake_files[path]
 
     def status(self, task, state, description, url=""):
         self.statuses.append((task["task_id"], state))
@@ -204,6 +209,40 @@ class GatewayBehaviorTests(unittest.TestCase):
         task_file.write_bytes(g.canonical(changed))
         with self.assertRaises(ValueError):
             g.load_task(task_file, g.digest(self.task))
+
+    def test_prepare_reads_llvm_metadata_without_reading_unrelated_files(self):
+        llvm_json = json.dumps({"llvm_hash": "a" * 40, "build_number": 123}).encode()
+        for files in (
+            {"llvm-info.json": llvm_json},
+            {"llvm-info": llvm_json},
+            {"llvm-info.txt": b"a" * 40 + b"\n"},
+            {"llvm-hash.txt": b"a" * 40, "llvm-info.json": llvm_json},
+        ):
+            with self.subTest(files=tuple(files)):
+                self.gh.cmake_files = {"triton/cmake/" + name: value for name, value in files.items()}
+                expected_reads = set(self.gh.cmake_files)
+                self.gh.cmake_files.update({
+                    "triton/cmake/amd-llvm-info.json": b"invalid",
+                    "triton/cmake/llvm-build-info.json": b"invalid",
+                    "vendor/llvm-info.json": b"invalid",
+                })
+                self.gh.content_reads.clear()
+                task = g.prepare_task(self.gh, self.base, 7)
+                self.assertEqual(task["llvm_hash"], "a" * 40)
+                self.assertEqual(set(self.gh.content_reads), expected_reads)
+
+    def test_prepare_rejects_missing_invalid_or_conflicting_llvm_metadata(self):
+        for files in (
+            {},
+            {"llvm-info.json": b'{"llvm_hash": "not-a-sha"}'},
+            {"llvm-info.json": b'{"version": "3.3.0"}'},
+            {"llvm-info": b"revision: " + b"a" * 40},
+            {"llvm-hash.txt": b"a" * 40, "llvm-info.json": json.dumps({"llvm_hash": "b" * 40}).encode()},
+        ):
+            with self.subTest(files=tuple(files)):
+                self.gh.cmake_files = {"triton/cmake/" + name: value for name, value in files.items()}
+                with self.assertRaises(ValueError):
+                    g.prepare_task(self.gh, self.base, 7)
 
     def test_prepare_uses_documented_pr_merge_result_and_checks_its_identity(self):
         self.assertEqual(self.task["tested_sha"], self.gh.pull["merge_commit_sha"])
@@ -721,6 +760,7 @@ README only
                 {"ref": "main", "inputs": {
                     "mode": "receive", "task_id": self.task["task_id"],
                     "receiver_round": str(round_number),
+                    "run_title": f"PR #7 | h:{self.head[:7]} m:{self.tested[:7]}",
                 }}
                 for round_number in (2, 3)
             ],
@@ -1138,7 +1178,9 @@ class WorkflowStructureTests(unittest.TestCase):
         # a comment, silently cutting the Actions expression before its close.
         self.assertIn("format('PR #{0}', inputs.pr_number)", data["run-name"])
         self.assertIn("format('PR #{0}', github.event.pull_request.number)", data["run-name"])
-        self.assertTrue(data["run-name"].endswith("github.ref_name }}"))
+        self.assertEqual(data["name"], "CI Gateway")
+        self.assertIn("inputs.run_title", data["run-name"])
+        self.assertIn("format(' {0}', inputs.receiver_round)", data["run-name"])
         self.assertEqual(data["run-name"].count("${{"), data["run-name"].count("}}"))
         jobs = data["jobs"]
         self.assertEqual(jobs["basic"]["needs"], "prepare")
@@ -1210,6 +1252,10 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertNotIn("if", dispatch)
         self.assertIn("mode: 'receive'", dispatch["with"]["script"])
         self.assertEqual(dispatch["env"]["TASK_ID"], "${{ needs.prepare.outputs.task_id }}")
+        self.assertIn("run_title: runTitle", dispatch["with"]["script"])
+        retry = jobs["publish"]["steps"][-1]
+        self.assertEqual(retry["env"]["RUN_TITLE"], "${{ inputs.run_title }}")
+        self.assertIn("run_title: process.env.RUN_TITLE", retry["with"]["script"])
         for step in jobs["publish"]["steps"]:
             if "pages@" in step.get("uses", "") or "pages-artifact@" in step.get("uses", ""):
                 self.assertEqual(step["if"], "steps.dashboard.outputs.changed == 'true'")

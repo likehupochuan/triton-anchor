@@ -6,6 +6,7 @@ on:
 permissions: {contents: read}
 jobs:
   lint:
+    name: Python lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,6 +25,7 @@ jobs:
           ruff check --select E9,F63,F7,F82 "${paths[@]}"
           ruff check --ignore E9,F63,F7,F82 "${paths[@]}" || echo "::warning::Style findings; see log"
   unit-tests:
+    name: Python tests (${{ matrix.python }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -42,6 +44,7 @@ jobs:
         env: {PYTHONPATH: python}
         run: python -m pytest python/triton_anchor/tests/ -q
   gateway-contracts:
+    name: Gateway contracts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

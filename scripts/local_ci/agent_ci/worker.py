@@ -461,9 +461,7 @@ class Worker:
                     )
                     continue
                 self.process(task)
-                if not any(
-                    (self.state_dir / "runs" / task["task_id"]).glob("*/state.json")
-                ):
+                if not self.journal.has_task(task["task_id"]):
                     continue
                 row = self.journal.task(task["task_id"])
                 if (
@@ -506,7 +504,14 @@ def scan_once(worker: Worker, control_lock, *, trigger=trigger_control_update):
     """Scan under a shared lock, then trigger any required update after unlocking."""
     import fcntl
 
-    fcntl.flock(control_lock, fcntl.LOCK_SH)
+    while True:
+        try:
+            fcntl.flock(control_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            # The updater holds the lock while restarting this Worker.
+            if worker.stop_event.wait(1):
+                return None
     try:
         request = worker.scan()
     finally:

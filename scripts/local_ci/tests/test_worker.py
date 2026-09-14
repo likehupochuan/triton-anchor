@@ -4,11 +4,15 @@ import fcntl
 import hashlib
 import json
 from pathlib import Path
+import select
+import subprocess
+import sys
 
 import pytest
 
 from agent_ci.protocol import TASK_SCHEMA, atomic_json, metadata_digest, task_id
 from agent_ci.worker import Worker, scan_once, trigger_control_update
+from agent_ci.state import Journal, local_run_dir
 
 
 def manifest():
@@ -97,6 +101,7 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
                 "environment_fingerprint": "fixture",
                 "llvm_hash": task["llvm_hash"],
                 "image_id": "fixture",
+                "artifacts_host": str(local_run_dir(tmp_path, task, run_id) / "artifacts"),
             }
 
         def stop_task(self, handle):
@@ -111,9 +116,7 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
 
     class Executor:
         def __init__(self, config, state_dir, generation, task, relay, *, manager):
-            self.run_dir = (
-                Path(state_dir) / "runs" / task["task_id"] / generation["run_id"]
-            )
+            self.run_dir = Path(generation["artifacts_host"]).parent
 
         def prepare(self, variant="candidate"):
             return tmp_path
@@ -166,10 +169,26 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
     )
     assert result["status"] == ("cancelled" if cancelled else "pass")
     assert events[-3:] == ["stop", "collect", "destroy"]
+    worker.journal = Journal(tmp_path)
+    assert worker.journal.register(task)["run_id"] == row["run_id"]
+    directory = worker.journal.run_dir(task["task_id"])
+    assert directory == tmp_path / "runs/pr/branch-main/pr-7" / task["task_id"] / row["run_id"]
+    # Simulate a pre-upgrade run: reload and retry its saved upload in place.
+    legacy = tmp_path / "runs" / task["task_id"]
+    directory.parent.rename(legacy)
+    record_path = legacy / row["run_id"] / "state.json"
+    record = json.loads(record_path.read_text())
+    record["delivery"]["payload_path"] = str(record_path.parent / "sealed/result.json")
+    atomic_json(record_path, record)
+    worker.journal = Journal(tmp_path)
     worker.scan()
     assert calls == 1 and uploads == 2
     assert worker.journal.task(task["task_id"])["phase"] == "published"
     assert worker.journal.task(task["task_id"])["run_id"] == row["run_id"]
+    assert worker.journal.run_dir(task["task_id"]) == record_path.parent
+    worker.journal = Journal(tmp_path)
+    worker.scan()
+    assert calls == 1 and uploads == 2  # Published old runs remain deduplicated.
 
 
 def test_task_waits_for_automatic_control_update(tmp_path):
@@ -472,3 +491,57 @@ def test_control_history_fetch_failure_is_reported_as_blocked(tmp_path):
     assert worker.scan() is None
     heartbeat = json.loads((tmp_path / "health/worker.json").read_text())
     assert heartbeat["control_update"] == "blocked"
+
+
+def test_worker_exits_on_sigterm_while_control_update_holds_lock(tmp_path):
+    import fcntl
+
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"state_dir": str(tmp_path)}))
+    program = """
+import fcntl, sys, threading
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from agent_ci import worker
+
+class IdleWorker:
+    def __init__(self, config):
+        self.config = config
+        self.state_dir = Path(config['state_dir'])
+        self.stop_event = threading.Event()
+        self.active = None
+    def scan(self):
+        raise AssertionError('Worker must not scan during a control update')
+
+flock = fcntl.flock
+def observed_flock(stream, operation):
+    if operation & fcntl.LOCK_SH:
+        print('waiting', flush=True)
+    return flock(stream, operation)
+fcntl.flock = observed_flock
+worker.Worker = IdleWorker
+raise SystemExit(worker.main(['--config', sys.argv[2]]))
+"""
+    with (tmp_path / "control.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        child = subprocess.Popen(
+            [
+                sys.executable, "-c", program,
+                str(Path(__file__).resolve().parents[1]), str(config),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert select.select([child.stdout], [], [], 5)[0], (
+                "Worker did not reach the control lock"
+            )
+            assert child.stdout.readline().strip() == "waiting"
+            child.terminate()
+            _, error = child.communicate(timeout=5)
+            assert child.returncode == 0, error
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.communicate()

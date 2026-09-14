@@ -15,6 +15,7 @@ PREINSTALLED_SUBMODULES = frozenset({"FlagGems"})
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 ID = re.compile(r"[0-9a-f]{64}\Z")
 RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,159}\Z")
+LLVM_METADATA = re.compile(r"triton/cmake/llvm-(?:hash|info)(?:\.(?:txt|json))?\Z")
 IDENTITY_FIELDS = (
     "repository",
     "event_kind",
@@ -33,6 +34,25 @@ CHECK_STATUSES = RESULT_STATUSES | {"not_selected", "not_applicable", "skipped"}
 
 class ContractError(ValueError):
     pass
+
+
+def llvm_hash_from_files(paths, read_file):
+    """Read the same pinned LLVM metadata on GitHub and from the Gitee checkout."""
+    revisions = set()
+    for path in sorted(paths):
+        if not LLVM_METADATA.fullmatch(path):
+            continue
+        value = read_file(path).decode().strip()
+        if value.startswith("{"):
+            value = json.loads(value).get("llvm_hash")
+        if not isinstance(value, str) or not SHA.fullmatch(value):
+            raise ContractError(f"Expected a full LLVM commit in {path}")
+        revisions.add(value)
+    if not revisions:
+        raise ContractError("No llvm-hash or llvm-info metadata found in triton/cmake")
+    if len(revisions) != 1:
+        raise ContractError("Conflicting LLVM commits in triton/cmake metadata")
+    return revisions.pop()
 
 
 def canonical(value: Any) -> bytes:
@@ -68,7 +88,7 @@ def current_key(task: dict) -> str:
 
 
 def result_task_prefix(task: dict) -> str:
-    """Return the readable, traversal-safe Gitee directory for one task."""
+    """Return the shared readable directory for local runs and Gitee results."""
     branch = task.get("target_branch")
     if not isinstance(branch, str) or not branch or any(
         ord(character) < 32 or ord(character) == 127 for character in branch

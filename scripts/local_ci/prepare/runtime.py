@@ -19,6 +19,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+from agent_ci.state import local_run_dir
 from .artifacts import (
     EnvironmentError,
     SHA_RE,
@@ -38,8 +39,8 @@ from .dependency_mounts import (
 )
 from .control_mount import (
     CONTROL_TARGET,
-    snapshot_control,
-    verify_snapshot,
+    bind_control,
+    mounts as control_mounts,
     mount_arguments as control_mount_arguments,
     verify_mount as verify_control_mount,
 )
@@ -93,6 +94,32 @@ def validate_branch_profiles(config):
                 "chains and profile overrides are forbidden"
             )
     return dict(mappings)
+
+
+def resolve_task_profile(config, branch, llvm_hash):
+    """Prefer explicit routing; otherwise reuse one configured LLVM environment."""
+    mappings = validate_branch_profiles(config)
+    profiles = config.get("profiles", {})
+    if branch in mappings:
+        return mappings[branch]
+    if branch in profiles:
+        return branch
+    matches = [
+        name for name, profile in profiles.items()
+        if profile.get("llvm_hash") == llvm_hash
+        or llvm_hash in profile.get("llvm", {}).get("revisions", {})
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise EnvironmentError(
+            f"No configured profile supports LLVM {llvm_hash} for branch {branch}; "
+            "prepare a profile with the matching LLVM mount"
+        )
+    raise EnvironmentError(
+        f"Multiple profiles support LLVM {llvm_hash}: {', '.join(sorted(matches))}; "
+        f"set branch_profiles[{branch!r}] to choose one"
+    )
 
 
 def shared_image(config):
@@ -424,11 +451,10 @@ class EnvironmentManager:
         """Expose the installed revision so the Worker can await its updater."""
         return self._control_revision()
 
-    def _control_snapshot(self, revision):
-        return snapshot_control(
+    def _control_mount(self, revision):
+        return bind_control(
             self.config["control_root"],
             revision,
-            self.directory / "control-revisions",
             self._run,
         )
 
@@ -519,7 +545,6 @@ class EnvironmentManager:
 
     def _validate_image(self, ident, profile, env):
         # Lightweight environment probe only: no Wheel build/install/smoke.
-        control = self._control_snapshot(profile["control_revision"])
         container = (
             self._docker(
                 "create",
@@ -534,7 +559,6 @@ class EnvironmentManager:
                 "--label",
                 "local-ci.kind=image-validation",
                 *self._limits(),
-                *control_mount_arguments(control),
                 *mount_arguments(
                     dependency_mounts(self.config, profile, verify_content=True)
                 ),
@@ -545,7 +569,6 @@ class EnvironmentManager:
         )
         self._validation_container = container
         try:
-            verify_control_mount(self._inspect(container), control)
             verify_mounts(self._inspect(container), profile.get("mounts", []))
             self._docker("start", container)
             prefix = ["exec"]
@@ -595,7 +618,6 @@ class EnvironmentManager:
             self._docker(*prefix, "test", "-d", env["LLVM_BUILD_DIR"] + "/include")
             self._docker(*prefix, "test", "-d", env["LLVM_BUILD_DIR"] + "/lib")
             dependency_mounts(self.config, profile, verify_content=True)
-            verify_snapshot(control)
             return dict(
                 control_revision=profile["control_revision"],
                 checks=["environment"],
@@ -699,7 +721,7 @@ class EnvironmentManager:
                 backend_enabled=bool(profile.get("backend_enabled")),
                 daemon_id=daemon,
                 control_revision=profile["control_revision"],
-                control_delivery="snapshot-mount",
+                control_delivery="checkout-mount",
                 dependency_mounts=copy.deepcopy(profile.get("mounts", [])),
             )
             state["images"][release] = row
@@ -826,8 +848,8 @@ class EnvironmentManager:
             raise EnvironmentError(
                 "Task worker revision differs from installed control"
             )
-        profile_branch = validate_branch_profiles(self.config).get(
-            task["target_branch"], task["target_branch"]
+        profile_branch = resolve_task_profile(
+            self.config, task["target_branch"], task["llvm_hash"]
         )
         image = self.ensure_image(profile_branch, task["llvm_hash"])
         with self._lock(True), self._lock():
@@ -841,12 +863,12 @@ class EnvironmentManager:
             }:
                 raise EnvironmentError("Task already has a live run")
             work = self.state_dir / "work" / task_id / run_id
-            artifacts = self.state_dir / "runs" / task_id / run_id / "artifacts"
+            artifacts = local_run_dir(self.state_dir, task, run_id) / "artifacts"
             for path in (work, artifacts):
                 path.mkdir(parents=True, exist_ok=True)
                 # Container namespace UID 0 creates children for the task user.
                 path.chmod(0o777)
-            control = self._control_snapshot(revision)
+            control = self._control_mount(revision)
             ident = run_id
             name = "local-ci-task-" + uuid.uuid4().hex
             handle = {
@@ -864,7 +886,7 @@ class EnvironmentManager:
             }
             handle.update(
                 control_revision=revision,
-                control_snapshot=control,
+                control_mount=control,
                 dependency_mounts=copy.deepcopy(image.get("dependency_mounts", [])),
                 target_branch=task["target_branch"],
                 profile_branch=profile_branch,
@@ -998,14 +1020,15 @@ class EnvironmentManager:
                 or mount.get("RW") is not True
             ):
                 raise EnvironmentError("Task writable mount identity differs")
+        control = handle.get("control_mount", handle.get("control_snapshot"))
         allowed = (
             set(expected)
-            | {CONTROL_TARGET}
+            | {m["target"] for m in control_mounts(control)}
             | {m["target"] for m in handle["dependency_mounts"]}
         )
         if set(mounts) != allowed:
             raise EnvironmentError("Unexpected host mount in task container")
-        verify_control_mount(info, handle["control_snapshot"])
+        verify_control_mount(info, control)
         verify_mounts(info, handle["dependency_mounts"])
         return info
 
@@ -1185,7 +1208,7 @@ class EnvironmentManager:
             # Rootless subuid-owned files may be unreadable to the host account.
             # An inert, offline management invocation clears only this work bind.
             pass
-        control = h["control_snapshot"]
+        control = h.get("control_mount", h.get("control_snapshot"))
         ident = (
             self._docker(
                 "create",

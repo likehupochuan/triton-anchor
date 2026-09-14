@@ -1,6 +1,6 @@
-name: Local CI / Orchestrator
+name: CI Gateway
 run-name: >-
-  Local CI / ${{ inputs.mode || 'request' }} / ${{ (inputs.pr_number != '' && inputs.pr_number != '0' && format('PR #{0}', inputs.pr_number)) || (github.event.pull_request.number && format('PR #{0}', github.event.pull_request.number)) || inputs.task_id || github.ref_name }}
+  ${{ inputs.run_title || (inputs.pr_number != '' && inputs.pr_number != '0' && format('PR #{0}', inputs.pr_number)) || (github.event.pull_request.number && format('PR #{0}', github.event.pull_request.number)) || (inputs.task_id && format('Task {0}', inputs.task_id)) || format('Branch {0}', inputs.source_branch || github.ref_name) }} | ${{ inputs.mode == 'run' && 'dispatch' || inputs.mode || 'request' }}${{ inputs.mode == 'receive' && format(' {0}', inputs.receiver_round) || '' }}
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, edited, closed, converted_to_draft, labeled, unlabeled]
@@ -20,12 +20,14 @@ on:
       worker_revision_sha: {type: string, default: ''}
       action: {type: string, default: ''}
       full: {type: boolean, default: false}
+      run_title: {type: string, default: '', description: 'Display identity passed between stages; normally leave empty'}
 permissions: {}
 concurrency:
   group: ${{ inputs.mode == 'receive' && format('local-ci-receive-{0}', inputs.task_id) || format('local-ci-{0}-{1}', inputs.mode || github.event_name, inputs.pr_number != '0' && inputs.pr_number || github.event.pull_request.number || inputs.source_branch || github.ref_name) }}
   cancel-in-progress: ${{ inputs.mode != 'receive' }}
 jobs:
   route:
+    name: Route CI request
     if: >-
       (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
       (github.event_name != 'workflow_dispatch' || inputs.mode == 'request')
@@ -57,18 +59,22 @@ jobs:
             const controlRef = 'local-ci-unified';
             const {data: release} = await github.rest.repos.getBranch({owner, repo, branch: controlRef});
             const revision = release.commit.sha;
+            const requestedSha = pull?.head.sha || process.env.INPUT_SHA || (context.eventName === 'push' ? context.sha : '');
+            const subject = pull ? `PR #${pull.number}` : `Branch ${branch}`;
+            const runTitle = requestedSha ? `${subject} | h:${requestedSha.slice(0, 7)}` : subject;
             await github.rest.actions.createWorkflowDispatch({
               owner, repo, workflow_id: 'ci-gateway.yml', ref: controlRef,
               inputs: {
                 mode: 'run',
                 pr_number: String(pull?.number || process.env.INPUT_PR || '0'),
                 source_branch: branch,
-                requested_sha: pull?.head.sha || process.env.INPUT_SHA || (context.eventName === 'push' ? context.sha : ''),
+                requested_sha: requestedSha, run_title: runTitle,
                 worker_revision_sha: revision, action: context.eventName === 'workflow_dispatch' ? 'manual' : context.payload.action || '',
                 full: process.env.INPUT_FULL || 'false'
               }
             });
   cancel-obsolete:
+    name: Cancel obsolete tasks
     needs: validate-worker
     if: >-
       (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
@@ -91,6 +97,7 @@ jobs:
           GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
         run: python3 scripts/ci/gateway.py cancel
   prepare:
+    name: Prepare exact task
     needs: cancel-obsolete
     if: ${{ inputs.action != 'closed' && inputs.action != 'converted_to_draft' }}
     runs-on: ubuntu-latest
@@ -128,12 +135,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/ci/gateway.py info
   basic:
+    name: Basic CI
     needs: prepare
     permissions: {contents: read}
     uses: ./.github/workflows/local-ci-basic-checks.yml
     with:
       tested_sha: ${{ needs.prepare.outputs.tested_sha }}
   api:
+    name: API compatibility
     needs: [prepare, basic]
     permissions: {contents: read}
     uses: ./.github/workflows/local-ci-api-compatibility.yml
@@ -143,6 +152,7 @@ jobs:
       base_sha: ${{ needs.prepare.outputs.base_sha }}
       worker_revision_sha: ${{ inputs.worker_revision_sha }}
   security:
+    name: Security gate
     needs: [prepare, api]
     permissions: {contents: read, security-events: write}
     uses: ./.github/workflows/local-ci-security.yml
@@ -151,6 +161,7 @@ jobs:
       tested_sha: ${{ needs.prepare.outputs.tested_sha }}
       worker_revision_sha: ${{ inputs.worker_revision_sha }}
   basic-result:
+    name: Publish Basic CI result
     needs: [prepare, basic]
     if: ${{ always() && needs.prepare.outputs.task_id != '' }}
     permissions: {contents: read, pull-requests: read, checks: write}
@@ -161,6 +172,7 @@ jobs:
       stage: basic
       outcome: ${{ needs.basic.result }}
   api-result:
+    name: Publish API result
     needs: [prepare, api]
     if: ${{ always() && needs.prepare.outputs.task_id != '' }}
     permissions: {contents: read, pull-requests: read, checks: write}
@@ -171,6 +183,7 @@ jobs:
       stage: api
       outcome: ${{ needs.api.result }}
   security-result:
+    name: Publish security result
     needs: [prepare, security]
     if: ${{ always() && needs.prepare.outputs.task_id != '' }}
     permissions: {contents: read, pull-requests: read, checks: write}
@@ -181,6 +194,7 @@ jobs:
       stage: security
       outcome: ${{ needs.security.result }}
   review-card:
+    name: Approval review card
     needs: [prepare, basic, api, security, basic-result, api-result, security-result]
     if: ${{ always() && needs.prepare.outputs.tested_sha != '' }}
     runs-on: ubuntu-latest
@@ -202,6 +216,7 @@ jobs:
           STAGES: '{"prepare":"${{ needs.prepare.result }}","basic":"${{ needs.basic.result }}","api":"${{ needs.api.result }}","security":"${{ needs.security.result }}"}'
         run: python3 scripts/ci/gateway.py card
   approve-external-fork:
+    name: Approve external fork
     needs: [prepare, review-card]
     if: ${{ needs.review-card.outputs.eligible == 'true' && needs.prepare.outputs.external_fork == 'true' }}
     environment: local-ci-fork-approval
@@ -223,6 +238,7 @@ jobs:
           REQUESTED_SHA: ${{ needs.prepare.outputs.head_sha }}
         run: python3 scripts/ci/gateway.py approval
   enqueue:
+    name: Dispatch local CI task
     needs: [prepare, review-card, approve-external-fork]
     if: >-
       always() && needs.review-card.outputs.eligible == 'true' &&
@@ -262,11 +278,16 @@ jobs:
         with:
           retries: 3
           script: |
+            const task = JSON.parse(require('fs').readFileSync('task.json', 'utf8'));
+            const runTitle = task.pr_number
+              ? `PR #${task.pr_number} | h:${task.head_sha.slice(0, 7)} m:${task.tested_sha.slice(0, 7)}`
+              : `Branch ${task.target_branch} | h:${task.tested_sha.slice(0, 7)}`;
             await github.rest.actions.createWorkflowDispatch({
               ...context.repo, workflow_id: 'ci-gateway.yml', ref: 'main',
-              inputs: {mode: 'receive', task_id: process.env.TASK_ID, receiver_round: '1'}
+              inputs: {mode: 'receive', task_id: process.env.TASK_ID, receiver_round: '1', run_title: runTitle}
             });
   finalize-preflight:
+    name: Finalize preflight
     needs: [prepare, basic, api, security, review-card, approve-external-fork, enqueue]
     if: ${{ always() && needs.prepare.outputs.task_id != '' && needs.enqueue.result != 'success' }}
     runs-on: ubuntu-latest
@@ -286,6 +307,7 @@ jobs:
           STAGES: '{"prepare":"${{ needs.prepare.result }}","basic":"${{ needs.basic.result }}","api":"${{ needs.api.result }}","security":"${{ needs.security.result }}","card":"${{ needs.review-card.result }}","approval":"${{ needs.approve-external-fork.result }}","enqueue":"${{ needs.enqueue.result }}"}'
         run: python3 scripts/ci/gateway.py finalize
   validate-worker:
+    name: Validate control revision
     if: >-
       (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
       github.event_name == 'workflow_dispatch' && inputs.mode == 'run'
@@ -300,6 +322,7 @@ jobs:
           test "$GITHUB_SHA" = "$WORKER_SHA"
 
   receive:
+    name: Receive local CI result
     if: >-
       (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
       github.event_name == 'workflow_dispatch' && inputs.mode == 'receive'
@@ -333,6 +356,7 @@ jobs:
         id: wait
         run: python3 scripts/ci/gateway.py receive
   publish:
+    name: Publish CI results
     needs: receive
     if: needs.receive.outputs.state == 'ready'
     runs-on: ubuntu-latest
@@ -395,6 +419,7 @@ jobs:
         env:
           TASK_ID: ${{ inputs.task_id }}
           RECEIVER_ROUND: ${{ inputs.receiver_round }}
+          RUN_TITLE: ${{ inputs.run_title }}
         with:
           retries: 3
           script: |
@@ -402,7 +427,8 @@ jobs:
               ...context.repo, workflow_id: 'ci-gateway.yml', ref: 'main',
               inputs: {
                 mode: 'receive', task_id: process.env.TASK_ID,
-                receiver_round: String(Number(process.env.RECEIVER_ROUND) + 1)
+                receiver_round: String(Number(process.env.RECEIVER_ROUND) + 1),
+                run_title: process.env.RUN_TITLE
               }
             });
   deploy-dashboard:

@@ -1,131 +1,73 @@
-"""Committed control snapshots, isolated from the mutable deployment checkout."""
+"""Read-only runtime inputs from the deployment checkout, held by control.lock."""
 
 from __future__ import annotations
 
-import fcntl
-import json
-import os
 from pathlib import Path
-import tempfile
 
-from .artifacts import (
-    EnvironmentError,
-    SHA_RE,
-    atomic_json,
-    extract_verified_archive,
-    file_digest,
-    tree_digest,
-)
+from .artifacts import EnvironmentError, SHA_RE
 
 CONTROL_TARGET = "/opt/local-ci/control"
 
 
-def verify_snapshot(snapshot):
-    root = Path(snapshot["source"])
-    if (
-        not root.is_absolute()
-        or root.resolve() != root
-        or not root.is_dir()
-        or tree_digest(root) != snapshot["sha256"]
-    ):
-        raise EnvironmentError("Control snapshot content or location changed")
-
-
-def snapshot_control(control_root, revision, directory, run):
+def bind_control(control_root, revision, run):
+    root = Path(control_root)
     if not isinstance(revision, str) or not SHA_RE.fullmatch(revision):
-        raise EnvironmentError("Control snapshot requires an exact committed revision")
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    if directory.resolve() != directory or any(c in str(directory) for c in ",\n\r"):
-        raise EnvironmentError("Unsafe control snapshot directory")
-    with (directory / ".lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        root, manifest = directory / revision, directory / (revision + ".json")
-        if root.exists() or manifest.exists():
-            try:
-                snapshot = json.loads(manifest.read_text())
-                if snapshot["source"] != str(root) or snapshot["revision"] != revision:
-                    raise ValueError("Snapshot identity differs")
-                verify_snapshot(snapshot)
-                return snapshot
-            except (OSError, ValueError, KeyError) as exc:
-                raise EnvironmentError(
-                    "Control snapshot cache is incomplete or changed"
-                ) from exc
-        with tempfile.TemporaryDirectory(
-            prefix=".snapshot-", dir=directory
-        ) as temporary:
-            temporary = Path(temporary)
-            archive = temporary / "control.tar"
-            # Only tracked runtime inputs; never .git, deployment secrets or dirty files.
-            paths = (
-                run(
-                    [
-                        "git",
-                        "-C",
-                        str(control_root),
-                        "ls-tree",
-                        "--name-only",
-                        revision,
-                        "--",
-                        "scripts",
-                        "api_contract",
-                        "envsetup.sh",
-                    ]
-                )
-                .decode()
-                .splitlines()
-            )
-            if "scripts" not in paths:
-                raise EnvironmentError("Committed control scripts are missing")
-            run(
-                [
-                    "git",
-                    "-C",
-                    str(control_root),
-                    "archive",
-                    "--format=tar",
-                    "--output=" + str(archive),
-                    revision,
-                    "--",
-                    *paths,
-                ]
-            )
-            extracted = temporary / "tree"
-            extract_verified_archive(archive, extracted, file_digest(archive), 0)
-            for path in [extracted, *extracted.rglob("*")]:
-                if not path.is_symlink():
-                    path.chmod(
-                        0o755 if path.is_dir() or path.stat().st_mode & 0o111 else 0o644
-                    )
-            digest = tree_digest(extracted)
-            os.replace(extracted, root)
-            snapshot = dict(source=str(root), revision=revision, sha256=digest)
-            atomic_json(manifest, snapshot)
-            return snapshot
+        raise EnvironmentError("Control mount requires an exact committed revision")
+    if not root.is_absolute() or root.resolve() != root or any(c in str(root) for c in ",\n\r"):
+        raise EnvironmentError("Unsafe control checkout directory")
+    # Mount only runtime inputs; .git, state and deployment credentials stay outside.
+    files = run([
+        "git", "-C", str(root), "ls-tree", "-r", "--name-only", "-z", revision,
+        "--", "scripts", "api_contract", "envsetup.sh",
+    ]).decode().split("\0")
+    paths, directories = set(), set()
+    for name in filter(None, files):
+        path = root / name
+        if path.resolve() != path:
+            raise EnvironmentError("Control runtime inputs must not contain symlinks")
+        paths.add(Path(name).parts[0])
+        # The updater runs with umask 0077. Make only tracked runtime inputs
+        # readable to the container UID, without changing executable bits.
+        mode = 0o755 if path.stat().st_mode & 0o111 else 0o644
+        if path.stat().st_mode & 0o777 != mode:
+            path.chmod(mode)
+        directories.update(parent for parent in path.parents if parent != root and root in parent.parents)
+    if "scripts" not in paths:
+        raise EnvironmentError("Committed control scripts are missing")
+    for directory in directories:
+        if directory.stat().st_mode & 0o777 != 0o755:
+            directory.chmod(0o755)
+    return dict(source=str(root), revision=revision, paths=sorted(paths))
 
 
-def mount_arguments(snapshot):
+def mounts(control):
+    # Old stopped runs can still use their exported directory during cleanup.
     return [
-        "--mount",
-        "type=bind,source="
-        + snapshot["source"]
-        + ",target="
-        + CONTROL_TARGET
-        + ",readonly,bind-recursive=disabled",
+        {"source": str(Path(control["source"]) / path),
+         "target": str(Path(CONTROL_TARGET) / path)}
+        for path in control.get("paths", [""])
     ]
 
 
-def verify_mount(info, snapshot):
-    mounts = [
-        m for m in info.get("Mounts", []) if m.get("Destination") == CONTROL_TARGET
-    ]
-    if (
-        len(mounts) != 1
-        or mounts[0].get("Type") != "bind"
-        or mounts[0].get("Source") != snapshot["source"]
-        or mounts[0].get("RW") is not False
-    ):
-        raise EnvironmentError(
-            "Control snapshot mount identity or readonly mode changed"
+def mount_arguments(control):
+    return [
+        argument
+        for mount in mounts(control)
+        for argument in (
+            "--mount",
+            "type=bind,source=" + mount["source"] + ",target=" + mount["target"]
+            + ",readonly,bind-recursive=disabled",
         )
+    ]
+
+
+def verify_mount(info, control):
+    for expected in mounts(control):
+        actual = [m for m in info.get("Mounts", []) if m.get("Destination") == expected["target"]]
+        if (
+            len(actual) != 1
+            or actual[0].get("Type") != "bind"
+            or actual[0].get("Source") != expected["source"]
+            or actual[0].get("RW") is not False
+        ):
+            raise EnvironmentError("Control mount identity or readonly mode changed")

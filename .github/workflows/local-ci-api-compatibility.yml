@@ -9,6 +9,7 @@ on:
 permissions: {contents: read}
 jobs:
   api-compatibility:
+    name: Compare public API
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

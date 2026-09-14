@@ -22,6 +22,7 @@ from prepare.runtime import EnvironmentManager
 from prepare.artifacts import atomic_json, safe_source
 from prepare.control_update import read_update_request, update_request_path
 from prepare.runtime_probe import runtime_status
+from agent_ci.state import run_state_paths
 
 
 def iso(value: float | None = None) -> str:
@@ -53,7 +54,7 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
         config.get("heartbeat_stale_seconds", 180)
     )
     tasks, uploads = [], []
-    for file in sorted((state / "runs").glob("*/*/state.json")):
+    for file in run_state_paths(state):
         try:
             record = json.loads(file.read_text())
             if record.get("abandoned") or record.get("phase") == "published":

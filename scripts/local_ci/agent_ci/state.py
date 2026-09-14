@@ -10,7 +10,24 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .protocol import ContractError, atomic_json, canonical, current_key
+from .protocol import ContractError, atomic_json, canonical, current_key, result_task_prefix
+
+
+def run_state_paths(state_dir):
+    """Known run layouts only; never descend into logs or task artifacts."""
+    runs = Path(state_dir) / "runs"
+    return sorted(
+        path
+        for pattern in ("*/*/state.json", "pr/*/*/*/*/state.json", "push/*/*/*/state.json")
+        for path in runs.glob(pattern)
+    )
+
+
+def local_run_dir(state_dir, task, run_id):
+    root = Path(state_dir)
+    legacy = root / "runs" / task["task_id"]
+    parent = legacy if legacy.is_dir() else root / result_task_prefix(task)
+    return parent / run_id
 
 
 class Journal:
@@ -20,6 +37,10 @@ class Journal:
         self.root = Path(root)
         self.runs = self.root / "runs"
         self.runs.mkdir(parents=True, exist_ok=True)
+        self._task_dirs = {
+            path.parent.parent.name: path.parent.parent
+            for path in run_state_paths(self.root)
+        }
         self.guard = threading.RLock()
 
     @staticmethod
@@ -34,13 +55,18 @@ class Journal:
         return value
 
     def run_dir(self, task_id, run_id=None):
-        parent = self.runs / self._component(task_id)
+        parent = self._task_dirs.get(self._component(task_id))
+        if parent is None:
+            raise ContractError("Unknown task")
         if run_id:
             return parent / self._component(run_id)
         candidates = sorted(parent.glob("*/state.json"))
         if not candidates:
             raise ContractError("Unknown task")
         return candidates[-1].parent
+
+    def has_task(self, task_id):
+        return task_id in self._task_dirs
 
     def _state(self, task_id):
         return json.loads((self.run_dir(task_id) / "state.json").read_text())
@@ -55,7 +81,8 @@ class Journal:
             + "-"
             + uuid.uuid4().hex[:8]
         )
-        directory = self.run_dir(task["task_id"], run_id)
+        self._component(task["task_id"])
+        directory = local_run_dir(self.root, task, run_id)
         for name in ("logs", "artifacts"):
             (directory / name).mkdir(parents=True, exist_ok=True)
         atomic_json(directory / "task.json", task)
@@ -71,12 +98,12 @@ class Journal:
                 "delivery": None,
             },
         )
+        self._task_dirs[task["task_id"]] = directory.parent
         return self.task(task["task_id"])
 
     def register(self, task):
         with self.guard:
-            parent = self.runs / self._component(task["task_id"])
-            if any(parent.glob("*/state.json")):
+            if self.has_task(task["task_id"]):
                 row = self.task(task["task_id"])
                 if json.loads(row["manifest"]) != task:
                     raise ContractError("Immutable task manifest changed")
@@ -100,9 +127,7 @@ class Journal:
     def tasks(self, *, active=True):
         with self.guard:
             rows = [
-                self.task(path.name)
-                for path in self.runs.iterdir()
-                if path.is_dir() and any(path.glob("*/state.json"))
+                self.task(task_id) for task_id in self._task_dirs
             ]
             return sorted(
                 [r for r in rows if not active or r["phase"] != "published"],

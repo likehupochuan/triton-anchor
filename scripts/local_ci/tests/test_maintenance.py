@@ -6,14 +6,19 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from maintenance import health
 from maintenance.retention import retain_local
 from maintenance.health import public_snapshot
 from maintenance.watchdog import evaluate
 
 
-def make_run(root, run, phase, published):
-    path = root / "runs" / ("a" * 64) / run
+RUN_LAYOUTS = ["", "pr/branch-main/pr-56", "push/branch-release%2F3.0"]
+
+
+def make_run(root, run, phase, published, layout=""):
+    path = root / "runs" / layout / ("a" * 64) / run
     (path / "artifacts").mkdir(parents=True)
     (path / "logs").mkdir()
     (path / "inputs/candidate/checkout").mkdir(parents=True)
@@ -28,13 +33,14 @@ def make_run(root, run, phase, published):
     return path
 
 
-def test_retention_expires_only_published_and_preserves_summary(tmp_path):
+@pytest.mark.parametrize("layout", RUN_LAYOUTS, ids=["legacy", "pr", "push"])
+def test_retention_expires_only_published_and_preserves_summary(tmp_path, layout):
     now = 40 * 86400
-    expired = make_run(tmp_path, "old", "published", 86400)
+    expired = make_run(tmp_path, "old", "published", 86400, layout)
     # Earlier cleanup left the input clones behind even after recording expiry.
     (expired / "retention.json").write_text("{}")
-    pending = make_run(tmp_path, "pending", "publish_pending", 86400)
-    fresh = make_run(tmp_path, "fresh", "published", now - 86400)
+    pending = make_run(tmp_path, "pending", "publish_pending", 86400, layout)
+    fresh = make_run(tmp_path, "fresh", "published", now - 86400, layout)
     report = retain_local(
         {"state_dir": str(tmp_path), "state_min_free_bytes": 0}, now=now
     )
@@ -45,6 +51,34 @@ def test_retention_expires_only_published_and_preserves_summary(tmp_path):
     assert (pending / "artifacts/report.json").exists()
     assert (pending / "inputs/candidate/checkout/source.py").exists()
     assert (fresh / "logs/command.log").exists()
+
+
+def test_retention_rejects_linked_branch_directory(tmp_path):
+    external = tmp_path / "external"
+    run = make_run(external, "old", "published", 86400)
+    branch = tmp_path / "runs/pr/branch-main"
+    branch.mkdir(parents=True)
+    (branch / "pr-56").symlink_to(external / "runs", target_is_directory=True)
+    report = retain_local(
+        {"state_dir": str(tmp_path), "state_min_free_bytes": 0}, now=40 * 86400
+    )
+    assert report["errors"] == [{"run": "old", "reason": "symlink"}]
+    assert (run / "artifacts/report.json").exists()
+
+
+@pytest.mark.parametrize("layout", RUN_LAYOUTS, ids=["legacy", "pr", "push"])
+def test_health_reports_active_runs_in_each_layout(tmp_path, layout):
+    make_run(tmp_path, "active", "running", 0, layout)
+    make_run(tmp_path, "pending", "publish_pending", 0, layout)
+    make_run(tmp_path, "done", "published", 1, layout)
+    report = health.collect(
+        {"state_dir": str(tmp_path), "monitor_services": []},
+        manager=SimpleNamespace(health=lambda: {}),
+    )
+    assert {row["run_id"] for row in report["tasks"]} == {"active", "pending"}
+    assert report["active_task"]["task_id"] == "a" * 64
+    assert report["active_task"]["run_id"] == "active"
+    assert report["uploads"][0]["task_id"] == "a" * 64
 
 
 def test_retention_budget_pauses_without_deleting_required_pending(tmp_path):

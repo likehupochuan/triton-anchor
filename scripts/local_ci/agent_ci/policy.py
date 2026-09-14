@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from .protocol import ContractError
+from .protocol import ContractError, LLVM_METADATA
 
 # Tool dependencies describe preparation once Codex selects a tool; paths do not
 # expand into an obligatory execution plan.
@@ -89,7 +89,7 @@ def category(path: str) -> str:
         return "docs"
     if p in {".gitignore", ".editorconfig"}:
         return "control"
-    if p.endswith("llvm-hash.txt"):
+    if LLVM_METADATA.fullmatch(p):
         return "llvm"
     if p.endswith("cmakelists.txt") or p.endswith(".cmake"):
         return "compiler"

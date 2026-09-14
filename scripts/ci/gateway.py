@@ -36,6 +36,7 @@ from agent_ci.protocol import (
     current_key,
     digest,
     metadata_digest,
+    llvm_hash_from_files,
     is_legacy_task,
     result_task_prefix,
     validate_task,
@@ -498,6 +499,11 @@ def prepare_task(
         ref = f"ci/{'full' if full else 'push'}/{branch}"
         base_ref, head_ref = f"ci/base/push/{branch}", f"ci/head/push/{branch}"
         external = False
+    llvm_files = gh.request(f"contents/triton/cmake?ref={quote(merge, safe='')}")
+    llvm_hash = llvm_hash_from_files(
+        [entry["path"] for entry in llvm_files if entry["type"] == "file"],
+        lambda path: gh.content(path, merge),
+    )
     task = dict(
         schema=TASK_SCHEMA,
         repository=gh.repository,
@@ -517,7 +523,7 @@ def prepare_task(
         state="open",
         draft=False,
         captured_at=now(),
-        llvm_hash=gh.content("triton/cmake/llvm-hash.txt", merge).decode().strip(),
+        llvm_hash=llvm_hash,
         full=full,
         external_fork=external,
     )
@@ -1189,6 +1195,12 @@ def receive_result(
                                     "mode": "receive",
                                     "task_id": task_id,
                                     "receiver_round": str(round_number + 1),
+                                    "run_title": (
+                                        f"PR #{task['pr_number']} | h:{task['head_sha'][:7]} "
+                                        f"m:{task['tested_sha'][:7]}"
+                                        if task["pr_number"]
+                                        else f"Branch {task['target_branch']} | h:{task['tested_sha'][:7]}"
+                                    ),
                                 },
                             },
                         )

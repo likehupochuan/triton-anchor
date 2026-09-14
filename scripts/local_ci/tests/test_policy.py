@@ -56,10 +56,14 @@ class PolicyTests(unittest.TestCase):
         interface = self.classify("python/triton_anchor/hw_capability.py")
         self.assertIn("backend_smoke", interface["recommended_checks"])
         self.assertNotIn("flaggems", interface["recommended_checks"])
-        llvm = self.classify("triton/cmake/llvm-hash.txt")
-        for tool in ("frontend_build", "backend_smoke", "flaggems", "compile_time"):
-            self.assertIn(tool, llvm["recommended_checks"])
-        self.assertEqual(llvm["classification_evidence"][0]["categories"], ["llvm"])
+        for name in ("llvm-hash.txt", "llvm-info.json", "llvm-info"):
+            with self.subTest(name=name):
+                llvm = self.classify("triton/cmake/" + name)
+                for tool in ("frontend_build", "backend_smoke", "flaggems", "compile_time"):
+                    self.assertIn(tool, llvm["recommended_checks"])
+                self.assertEqual(llvm["classification_evidence"][0]["categories"], ["llvm"])
+        for path in ("triton/cmake/amd-llvm-info.json", "triton/cmake/llvm-build-info.json", "vendor/llvm-info.json"):
+            self.assertNotEqual(policy.category(path), "llvm")
         renamed = self.classify("docs/example.md", old_path="csrc/old.cpp", status="R100")
         self.assertIn("compiler", renamed["categories"])
         self.assertIn("backend_smoke", renamed["recommended_checks"])

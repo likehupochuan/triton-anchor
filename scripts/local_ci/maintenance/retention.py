@@ -12,6 +12,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from prepare.artifacts import atomic_json
+from agent_ci.state import run_state_paths
 
 
 def _timestamp(value):
@@ -58,9 +59,13 @@ def retain_local(config, *, now=None, apply=True):
         "errors": [],
         "applied": apply,
     }
-    for path in sorted(runs.glob("*/*/state.json")):
+    for path in run_state_paths(state):
         run = path.parent
-        if any(p.is_symlink() for p in (run, path, run.parent)):
+        if any(
+            p.is_symlink()
+            for p in (path, *path.parents)
+            if p.is_relative_to(runs)
+        ):
             report["errors"].append({"run": run.name, "reason": "symlink"})
             continue
         try:

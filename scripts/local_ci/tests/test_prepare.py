@@ -10,9 +10,10 @@ from unittest.mock import patch
 
 import pytest
 from prepare import runtime_probe as probe, install, container_fs as fs
-from prepare.runtime import EnvironmentManager, identities, shared_image, validate_shared_profile
+from prepare.runtime import EnvironmentManager, identities, shared_image, validate_shared_profile, resolve_task_profile
 from prepare.artifacts import tree_digest
 from prepare.artifacts import EnvironmentError
+from prepare.control_mount import bind_control, mount_arguments, mounts, verify_mount, CONTROL_TARGET
 
 LOCAL = Path(__file__).resolve().parents[1]
 
@@ -243,6 +244,28 @@ def test_shared_image_rejects_different_profile_images_and_legacy_layers():
             validate_shared_profile(profile)
 
 
+def test_unmapped_branch_selects_unique_llvm_profile_without_overriding_routing():
+    settings = {
+        "profiles": {
+            "triton_v3.0": {"llvm_hash": "a" * 40, "llvm": {"revisions": {"c" * 40: {}}}},
+            "triton_v3.3": {"llvm_hash": "b" * 40},
+        },
+        "branch_profiles": {"CI_dev": "triton_v3.0"},
+    }
+    assert resolve_task_profile(settings, "local-ci-unified", "a" * 40) == "triton_v3.0"
+    assert resolve_task_profile(settings, "feature/change", "c" * 40) == "triton_v3.0"
+    # Explicit selections stay authoritative, even if later LLVM validation fails.
+    assert resolve_task_profile(settings, "CI_dev", "b" * 40) == "triton_v3.0"
+    assert resolve_task_profile(settings, "triton_v3.0", "b" * 40) == "triton_v3.0"
+    with pytest.raises(EnvironmentError, match="No configured profile supports LLVM"):
+        resolve_task_profile(settings, "feature/change", "d" * 40)
+    settings["profiles"]["alternate"] = {"llvm_hash": "a" * 40}
+    with pytest.raises(EnvironmentError, match="Multiple profiles.*branch_profiles"):
+        resolve_task_profile(settings, "local-ci-unified", "a" * 40)
+    settings["branch_profiles"]["local-ci-unified"] = "triton_v3.0"
+    assert resolve_task_profile(settings, "local-ci-unified", "a" * 40) == "triton_v3.0"
+
+
 def test_profiles_use_same_image_without_build_or_control_sha_revalidation(tmp_path):
     cfg = config(tmp_path)
     cfg["image"] = "sha256:" + "a" * 64
@@ -301,10 +324,6 @@ def test_runtime_probe_does_not_execute_wheel_validation_commands(tmp_path):
         commands.append(args)
         return b"container" if args[0] == "create" else b""
     with (
-        patch.object(manager, "_control_snapshot", return_value={}),
-        patch("prepare.runtime.control_mount_arguments", return_value=[]),
-        patch("prepare.runtime.verify_control_mount"),
-        patch("prepare.runtime.verify_snapshot"),
         patch.object(manager, "_inspect", return_value={}),
         patch.object(manager, "_stop_owned"),
         patch.object(manager, "_docker", side_effect=docker),
@@ -314,19 +333,20 @@ def test_runtime_probe_does_not_execute_wheel_validation_commands(tmp_path):
     assert proof["checks"] == ["environment"]
     assert all("must-not-build-wheel" not in command for command in commands)
     assert all("validate_environment.py" not in " ".join(command) for command in commands)
+    assert all(CONTROL_TARGET not in " ".join(command) for command in commands)
     create = commands[0]
     assert create[create.index("--user") + 1] == "11001:11001"
     assert create[create.index("--entrypoint") + 1] == "/bin/sh"
 
 
-def test_task_mounts_expose_only_work_and_artifacts(tmp_path):
+def test_task_mounts_expose_only_work_artifacts_and_readonly_control(tmp_path):
     cfg = {
         "runtime": {
             "kind": "docker-rootless",
             "endpoint": "unix:///run/user/1001/docker.sock",
         },
         "resources": {"cpus": 2, "memory_bytes": 1024**3, "pids_limit": 100},
-        "profiles": {},
+        "profiles": {"triton_v3.0": {"llvm_hash": "b" * 40}},
     }
     manager = EnvironmentManager(cfg, tmp_path)
     image = dict(
@@ -347,33 +367,82 @@ def test_task_mounts_expose_only_work_and_artifacts(tmp_path):
 
     task = dict(
         task_id="a" * 64,
+        pr_number=7,
         target_branch="main",
         llvm_hash="b" * 40,
         worker_revision_sha="c" * 40,
     )
     with (
         patch.object(manager, "_control_revision", return_value="c" * 40),
-        patch.object(manager, "ensure_image", return_value=image),
+        patch.object(manager, "ensure_image", return_value=image) as ensure,
         patch.object(
             manager,
-            "_control_snapshot",
-            return_value={"path": "/fixed", "revision": "c" * 40},
+            "_control_mount",
+            return_value={"source": "/control_anchor", "revision": "c" * 40,
+                          "paths": ["scripts", "api_contract", "envsetup.sh"]},
         ),
-        patch("prepare.runtime.control_mount_arguments", return_value=[]),
         patch.object(manager, "_verify"),
         patch.object(manager, "_helper", return_value={}),
         patch.object(manager, "_docker", side_effect=docker),
     ):
         handle = manager.acquire_task(task, "run-1")
+    ensure.assert_called_once_with("triton_v3.0", "b" * 40)
+    assert handle["target_branch"] == "main"
+    assert handle["profile_branch"] == "triton_v3.0"
     create = next(c for c in calls if c[0] == "create")
     mounts = [create[i + 1] for i, x in enumerate(create) if x == "--mount"]
-    assert len(mounts) == 2
+    assert len(mounts) == 5
     assert mounts[0].endswith(",target=/task")
     assert mounts[1].endswith(",target=/task/artifacts")
+    assert handle["artifacts_host"] == str(
+        tmp_path / "runs/pr/branch-main/pr-7" / task["task_id"] / "run-1/artifacts"
+    )
     assert all("/sealed" not in m and "/logs" not in m for m in mounts)
+    assert all(
+        m == "type=bind,source=/control_anchor/" + path + ",target=" + CONTROL_TARGET
+        + "/" + path + ",readonly,bind-recursive=disabled"
+        for m, path in zip(mounts[2:], ["scripts", "api_contract", "envsetup.sh"])
+    )
     assert create[create.index("--user") + 1] == "11001:11001"
     assert handle["attempt_id"] == handle["run_id"] == "run-1"
     assert handle["uids"] == {"task": 11001}
+
+
+def test_control_mount_uses_checkout_and_repairs_only_tracked_permissions(tmp_path):
+    control = tmp_path / "control_anchor"
+    (control / "scripts/tools").mkdir(parents=True, mode=0o700)
+    (control / "scripts").chmod(0o700)
+    (control / ".git").mkdir(mode=0o700)
+    tool = control / "scripts/tools/check.py"
+    tool.write_text("print('check')")
+    tool.chmod(0o600)
+    setup = control / "envsetup.sh"
+    setup.write_text("#!/bin/sh\n")
+    setup.chmod(0o700)
+    credentials = control / "credentials.env"
+    credentials.write_text("private")
+    credentials.chmod(0o600)
+    with patch("subprocess.check_output", return_value=b"scripts/tools/check.py\0envsetup.sh\0") as run:
+        descriptor = bind_control(control, "a" * 40, run)
+    assert run.call_count == 1 and "ls-tree" in run.call_args.args[0]
+    assert descriptor["source"] == str(control)
+    assert descriptor["paths"] == ["envsetup.sh", "scripts"]
+    assert stat.S_IMODE(tool.stat().st_mode) == 0o644
+    assert stat.S_IMODE(setup.stat().st_mode) == 0o755
+    assert stat.S_IMODE(tool.parent.stat().st_mode) == 0o755
+    assert stat.S_IMODE((control / "scripts").stat().st_mode) == 0o755
+    assert stat.S_IMODE(credentials.stat().st_mode) == 0o600
+    assert stat.S_IMODE((control / ".git").stat().st_mode) == 0o700
+    info = {"Mounts": [dict(Type="bind", Source=m["source"], Destination=m["target"], RW=False)
+                       for m in mounts(descriptor)]}
+    verify_mount(info, descriptor)
+    info["Mounts"][0]["RW"] = True
+    with pytest.raises(EnvironmentError, match="readonly"):
+        verify_mount(info, descriptor)
+    # Pre-upgrade stopped runs still have a single exported root to clean up.
+    legacy = {"source": "/state/environments/control-revisions/" + "b" * 40}
+    assert mount_arguments(legacy) == ["--mount", "type=bind,source=" + legacy["source"]
+                                       + ",target=" + CONTROL_TARGET + ",readonly,bind-recursive=disabled"]
 
 
 def test_workspace_rejects_partial_and_changed_seed(tmp_path, monkeypatch):

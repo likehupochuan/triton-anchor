@@ -1,18 +1,20 @@
 # Local CI Gateway 与接收器
 
-`ci-gateway.yml` 是需要与 `main` 路由保持兼容的稳定入口，展示名为 `Local CI / Orchestrator`。它冻结 PR 的 base/head 和精确 merge SHA，执行前置检查，按需等待外部 fork 的 environment 审批，再复查 PR。源码和需要随任务检出的子模块固定 refs 全部推送到 Gitee 后，才用同一个控制提交发布不可变 `tasks/`、当前 `current/` 和取消 `cancel/`。源码 refs 含完整 task ID，重试不能移动另一任务的源码。可复用检查按功能命名为 `Local CI / Basic Checks`、`Local CI / API Compatibility` 和 `Local CI / Security`；上游巡检使用 `Maintenance / Upstream Triton Watch`。
+`ci-gateway.yml` 是需要与 `main` 路由保持兼容的稳定入口，展示名为 `CI Gateway`。它冻结 PR 的 base/head 和精确 merge SHA，执行前置检查，按需等待外部 fork 的 environment 审批，再复查 PR。源码和需要随任务检出的子模块固定 refs 全部推送到 Gitee 后，才用同一个控制提交发布不可变 `tasks/`、当前 `current/` 和取消 `cancel/`。源码 refs 含完整 task ID，重试不能移动另一任务的源码。可复用检查按功能命名为 `Local CI / Basic Checks`、`Local CI / API Compatibility` 和 `Local CI / Security`；上游巡检使用 `Maintenance / Upstream Triton Watch`。
 
 根目录 `FlagGems` 使用服务器 profile 中预置的依赖，不要求网关提供镜像，也不随任务推送或检出；PR 修改 `FlagGems` 指针不会切换服务器固定依赖。其他子模块仍固定到被测 Git 对象。
 
 旧版 schema 的任务记录保留在 Gitee，网关的取消扫描与接收器识别后跳过，不让旧记录阻断新任务，也不据此回写通过；旧记录不列入新版看板当前任务列表。新版任务仍要求完整 task ID 对应的固定 refs，损坏记录不会被当成旧格式忽略。
 
-`main` 的 `ci-gateway.yml` 保留路由和接收入口，完整执行流程位于 `local-ci-unified`。每次派发自动读取该控制分支的当前 SHA，写入任务并用于执行校验；所有 PR 目标分支均可派发，push 自动触发仍限于 main。
+`main` 的 `ci-gateway.yml` 保留路由和接收入口，完整执行流程位于 `local-ci-unified`。每次派发自动读取该控制分支的当前 SHA，写入任务并用于执行校验；所有 PR 目标分支均可派发，push 自动触发限于 main 和 local-ci-unified。
+
+两个分支的入口展示名统一为 `CI Gateway`，作业按职责命名。自动派发的运行标题例如 `PR #55 | h:079850a | dispatch`、`PR #55 | h:079850a m:adc03ab | receive 1`；接续保留同一任务身份并递增轮次。可选内部参数 `run_title` 只用于展示，不参与任务校验，不需配置仓库变量。
 
 任务成功投递到 Gitee 后，网关才在 `main` 启动 `mode=receive`，没有定时触发。接收器按 `task_id` 等待，每分钟检查一次，每轮最多 5 小时 40 分钟，最多 3 轮；收到有效结果或任务失效立即结束，等不到结果才接续下一轮。轮数固定在代码中，不增加仓库变量。不同任务可以同时等待，接收不依赖新的服务器服务。
 
 每轮先解析 `local-ci-unified` 的 SHA，再按该 SHA 加载接收器。结果就绪后由串行的 `publish` 作业复查任务身份、回写 PR 并生成 Dashboard；只有看板内容变化才上传 Pages 产物，由独立 `deploy-dashboard` 作业部署。生成时间变化不会触发重复部署。`github-pages` 的审批或部署失败不阻塞 PR 结果回写，也不改变测试结论。发布失败仅在这三轮内补收，不重新执行构建；评论发送失败单独记录 `receiver_error`，不将已经发布的测试结论改写为环境错误。Worker 不连接 GitHub。健康采集和 watchdog 暂由 CI 主机上的独立定时器运行，不依赖 Gitee Go。
 
-三轮耗尽后接收停止并报错，不取消服务器上的任务。需要继续收取已有任务时，在 Actions → Local CI / Orchestrator → Run workflow 选择 `main`、`mode=receive`，填写等待运行名称或 Gitee `tasks/` 文件名中的 `task_id`，`receiver_round` 保持 `1`。这只补收已有结果，不重新投递任务。
+三轮耗尽后接收停止并报错，不取消服务器上的任务。需要继续收取已有任务时，在 Actions → CI Gateway → Run workflow 选择 `main`、`mode=receive`，填写任务摘要或 Gitee `tasks/` 文件名中的 `task_id`，`receiver_round` 保持 `1`。这只补收已有结果，不重新投递任务。
 
 部署时配置：
 
