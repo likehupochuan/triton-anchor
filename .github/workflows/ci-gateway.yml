@@ -4,7 +4,7 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, edited, closed, converted_to_draft, labeled, unlabeled]
   push:
-    branches: [main]
+    branches: [main, local-ci-unified]
   workflow_dispatch:
     inputs:
       mode:
