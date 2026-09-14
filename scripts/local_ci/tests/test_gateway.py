@@ -661,6 +661,25 @@ README only
         self.assertEqual(self.gh.statuses[-1][1], "error")
         self.assertFalse(self.gh.comments)
 
+    def test_sha_results_are_selected_by_task_not_just_latest_run(self):
+        results = self.store(g.RESULTS_BRANCH)
+        result = self.result()
+        prefix = g.result_task_prefixes(self.task)[0]
+        other = copy.deepcopy(result)
+        other["run_id"] = "20990101T000000Z-other"
+        other["task"]["task_id"] = "f" * 64
+        own_path = f"{prefix}/{result['run_id']}/result.json"
+        results.put({own_path: result, f"{prefix}/{other['run_id']}/result.json": other})
+        self.assertEqual(g.latest_result(self.task, results), results.root / own_path)
+
+    def test_grouped_task_id_results_remain_readable(self):
+        results = self.store(g.RESULTS_BRANCH)
+        result = self.result()
+        prefix = g.result_task_prefixes(self.task)[1]
+        path = f"{prefix}/{result['run_id']}/result.json"
+        results.put({path: result})
+        self.assertEqual(g.latest_result(self.task, results), results.root / path)
+
     def test_invalid_results_cannot_claim_success(self):
         for mutate in (
             lambda result: result.update(blocking_reasons=["deterministic regression"]),

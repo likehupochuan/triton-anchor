@@ -162,8 +162,9 @@ class Worker:
                 "worker_id": self.config.get("worker_id", "local-ci"),
                 "heartbeat_at": time.time(),
                 "pid": os.getpid(),
+                "head_sha": self.active.task["head_sha"] if self.active else None,
                 "tasks": [
-                    {k: r[k] for k in ("task_id", "phase", "updated")}
+                    {k: r[k] for k in ("task_id", "head_sha", "phase", "updated")}
                     for r in self.journal.tasks()
                 ],
                 **extra,

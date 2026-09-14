@@ -367,6 +367,7 @@ def test_task_mounts_expose_only_work_artifacts_and_readonly_control(tmp_path):
 
     task = dict(
         task_id="a" * 64,
+        head_sha="d" * 40,
         pr_number=7,
         target_branch="main",
         llvm_hash="b" * 40,
@@ -395,8 +396,9 @@ def test_task_mounts_expose_only_work_artifacts_and_readonly_control(tmp_path):
     assert mounts[0].endswith(",target=/task")
     assert mounts[1].endswith(",target=/task/artifacts")
     assert handle["artifacts_host"] == str(
-        tmp_path / "runs/pr/branch-main/pr-7" / task["task_id"] / "run-1/artifacts"
+        tmp_path / "runs/pr/branch-main/pr-7" / task["head_sha"] / "run-1/artifacts"
     )
+    assert handle["workspace_host"] == str(tmp_path / "work" / task["head_sha"] / "run-1")
     assert all("/sealed" not in m and "/logs" not in m for m in mounts)
     assert all(
         m == "type=bind,source=/control_anchor/" + path + ",target=" + CONTROL_TARGET
@@ -508,8 +510,32 @@ def test_missing_container_removes_only_owned_scratch(tmp_path):
     ):
         manager.destroy_task(handle)
     assert not work.exists()
+    assert not work.parent.exists()
     assert (artifacts / "evidence").read_text() == "durable"
     assert manager.generation("run-1")["state"] == "removed"
+
+
+@pytest.mark.parametrize("sibling", [False, True])
+def test_sha_scratch_cleanup_prunes_only_empty_commit_directory(tmp_path, sibling):
+    manager, handle, work, artifacts = cleanup_manager(tmp_path)
+    head = "b" * 40
+    parent = work.parent.with_name(head)
+    work.parent.rename(parent)
+    work = parent / work.name
+    handle.update(head_sha=head, workspace_host=str(work))
+    if sibling:
+        (parent / "other-run").mkdir()
+        (parent / "other-run/keep").write_text("active")
+    with patch.object(manager, "_docker", return_value=b""):
+        manager._remove_scratch(handle)
+    assert not work.exists()
+    assert parent.exists() == sibling
+    assert (artifacts / "evidence").exists()
+    if sibling:
+        assert (parent / "other-run/keep").read_text() == "active"
+    # Retry cleanup of an already absent run is harmless.
+    with patch.object(manager, "_docker", return_value=b""):
+        manager._remove_scratch(handle)
 
 
 def test_failed_missing_scratch_cleanup_stays_pending(tmp_path):

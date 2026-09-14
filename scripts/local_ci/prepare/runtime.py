@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
+import errno
 from datetime import datetime
 import fcntl
 import json
@@ -840,7 +841,12 @@ class EnvironmentManager:
 
     def acquire_task(self, task, run_id):
         task_id = task["task_id"]
-        if not re.fullmatch(r"[a-f0-9]{64}", task_id) or not NAME_RE.fullmatch(run_id):
+        head_sha = task["head_sha"]
+        if (
+            not re.fullmatch(r"[a-f0-9]{64}", task_id)
+            or not SHA_RE.fullmatch(head_sha)
+            or not NAME_RE.fullmatch(run_id)
+        ):
             raise EnvironmentError("Invalid task/run identity")
         revision = self._control_revision()
         if task.get("worker_revision_sha") != revision:
@@ -861,7 +867,7 @@ class EnvironmentManager:
                 "lost",
             }:
                 raise EnvironmentError("Task already has a live run")
-            work = self.state_dir / "work" / task_id / run_id
+            work = self.state_dir / "work" / head_sha / run_id
             artifacts = local_run_dir(self.state_dir, task, run_id) / "artifacts"
             for path in (work, artifacts):
                 path.mkdir(parents=True, exist_ok=True)
@@ -890,6 +896,7 @@ class EnvironmentManager:
                 target_branch=task["target_branch"],
                 profile_branch=profile_branch,
                 task_id=task_id,
+                head_sha=head_sha,
                 run_id=run_id,
                 task=task,
                 attempt_id=ident,
@@ -1177,9 +1184,25 @@ class EnvironmentManager:
 
     def _remove_scratch(self, h):
         work = Path(h["workspace_host"])
-        expected = self.state_dir / "work" / h["task_id"] / h["run_id"]
+        # Pre-upgrade handles keep their original task-id paths for safe cleanup.
+        identity = h.get("head_sha", h["task_id"])
+        pattern = r"[a-f0-9]{40}" if "head_sha" in h else r"[a-f0-9]{64}"
+        if not re.fullmatch(pattern, identity) or not NAME_RE.fullmatch(h["run_id"]):
+            raise EnvironmentError("Invalid scratch cleanup identity")
+        expected = self.state_dir / "work" / identity / h["run_id"]
         if not work.is_absolute() or work != expected or work.resolve() != expected:
             raise EnvironmentError("Task work cleanup escaped its configured path")
+
+        def prune_parent():
+            # rmdir removes only this empty SHA/task directory, never sibling runs.
+            try:
+                work.parent.rmdir()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                if exc.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
+                    raise
+
         name = "local-ci-cleanup-" + fingerprint([h["task_id"], h["run_id"]])[:24]
         existing = (
             self._docker(
@@ -1199,14 +1222,17 @@ class EnvironmentManager:
             self._stop_owned(existing[0], h["attempt_id"], kind="task-cleanup")
             self._docker("rm", existing[0], cancellable=False)
         if not work.exists():
+            prune_parent()
             return
         try:
             shutil.rmtree(work)
-            return
         except PermissionError:
             # Rootless subuid-owned files may be unreadable to the host account.
             # An inert, offline management invocation clears only this work bind.
             pass
+        else:
+            prune_parent()
+            return
         control = h.get("control_mount", h.get("control_snapshot"))
         ident = (
             self._docker(
@@ -1256,6 +1282,7 @@ class EnvironmentManager:
             self._stop_owned(ident, h["attempt_id"], kind="task-cleanup")
             self._docker("rm", ident, cancellable=False)
         shutil.rmtree(work)
+        prune_parent()
 
     def stop_task(self, h):
         row = self._record(h)

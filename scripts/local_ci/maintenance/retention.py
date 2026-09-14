@@ -68,6 +68,7 @@ def retain_local(config, *, now=None, apply=True):
         ):
             report["errors"].append({"run": run.name, "reason": "symlink"})
             continue
+        record = {}
         try:
             record = json.loads(path.read_text())
             delivery = record.get("delivery") or {}
@@ -81,7 +82,7 @@ def retain_local(config, *, now=None, apply=True):
                 or hold_until > now
             ):
                 report["protected"].append(
-                    {"task_id": run.parent.name, "run_id": run.name}
+                    {"task_id": record.get("task_id", run.parent.name), "run_id": run.name}
                 )
                 continue
             if now - published < days * 86400:
@@ -90,7 +91,7 @@ def retain_local(config, *, now=None, apply=True):
                 continue
             marker = {
                 "schema": "triton-anchor-result-retention",
-                "task_id": run.parent.name,
+                "task_id": record.get("task_id", run.parent.name),
                 "run_id": run.name,
                 "expired_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
                 "reason": "retention_expired",
@@ -108,7 +109,7 @@ def retain_local(config, *, now=None, apply=True):
         except (OSError, ValueError, RuntimeError) as exc:
             report["errors"].append(
                 {
-                    "task_id": run.parent.name,
+                    "task_id": record.get("task_id", run.parent.name),
                     "run_id": run.name,
                     "reason": type(exc).__name__,
                 }

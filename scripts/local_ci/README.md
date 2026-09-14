@@ -67,20 +67,28 @@ Codex 短暂中断可恢复同一 CLI 会话；Worker 重启会清理未完成�
 ```text
 state_dir/
 ├── runs/
-│   ├── pr/branch-<目标分支>/pr-<PR号>/<task>/<run>/
-│   └── push/branch-<目标分支>/<task>/<run>/
+│   ├── pr/branch-<目标分支>/pr-<PR号>/<head_sha>/<run_id>/
+│   └── push/branch-<目标分支>/<head_sha>/<run_id>/
 │       ├── task.json, state.json, codex-session.json
 │       ├── logs/            # 本机完整 Codex 日志
 │       ├── artifacts/       # 计划、工具输出和定向用例
 │       └── sealed/          # 待发布或已发布结果及所选文件；PR 目录内部相同
-└── work/<task>/<run>/        # 临时任务目录，结束后清理
+└── work/<head_sha>/<run_id>/ # 临时任务目录，结束后清理运行目录及空的 SHA 父目录
 ```
 
-本地运行目录和 Gitee 结果复用同一套事件、目标分支、PR 与任务命名。PR 使用
-`runs/pr/branch-<目标分支>/pr-<PR号>/<task>/<run>/`，push/manual 使用
-`runs/push/branch-<目标分支>/<task>/<run>/`（分支名中的 `/` 会 URL 编码）。旧的本地
-`runs/<task>/<run>/` 保持原位，重启后仍能去重、恢复和重试上传，不因目录升级重新执行。
+本地运行目录和 Gitee 结果复用同一套事件、目标分支、PR 与源码提交命名。PR 使用
+`runs/pr/branch-<目标分支>/pr-<PR号>/<head_sha>/<run_id>/`，push/manual 使用
+`runs/push/branch-<目标分支>/<head_sha>/<run_id>/`（分支名中的 `/` 会 URL 编码）。
+`head_sha` 使用完整 40 位源码提交号；`task_id` 仍是内部冻结任务摘要，不改变任务协议、
+current/cancel 指针和去重规则。同一 SHA 的不同任务用独立 `run_id` 隔离，接收器按结果内的
+`task_id` 匹配。`health/worker.json` 在顶层显示活动任务的 `head_sha`（空闲时为 null），
+`tasks` 中各项同时保留 `task_id` 和 `head_sha`。
+旧的 `<task_id>` 分组目录及 `runs/<task_id>/<run_id>/` 保持原位，重启后仍能去重、恢复
+和重试上传，不因目录升级重新执行；新运行使用 SHA 目录。清理 work 不删除 runs 中的证据，
+也不删除同一 SHA 下其他运行；清理失败会保留待清理状态而不是报告成功。
 本地私有状态与完整日志不上传；仅将 `sealed/` 中的公开结果与所选文件提交到 Gitee 的对应运行目录。
+结果提交标题参考 `CI_dev_forPR`，使用 `local-ci: <status> <head_sha前12位> <run_id>`，
+其中 status 保留 `pass/fail/infra_error/cancelled` 的真实结果语义；上传重试不产生重复提交。
 不使用 Release 附件或额外交付索引。单文件 2 MiB、总计 10 MiB、
 最多 20 文件，超出时保留本机并注明；本机完整日志默认保留 30 天。
 任务与结果格式只有固定名称，不带版本号；旧格式记录跳过，历史文件不会重新执行。

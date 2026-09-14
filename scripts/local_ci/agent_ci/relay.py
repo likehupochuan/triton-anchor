@@ -17,6 +17,7 @@ from .protocol import (
     llvm_hash_from_files,
     current_key,
     result_task_prefix,
+    result_task_prefixes,
     within,
     validate_result,
 )
@@ -274,7 +275,8 @@ class GitRelay:
                 )
 
     def write(
-        self, branch: str, files: dict[str, bytes], *, immutable: bool = False
+        self, branch: str, files: dict[str, bytes], *, immutable: bool = False,
+        message: str = "local-ci: update relay records",
     ) -> None:
         for relative in files:
             within(self.root, relative)
@@ -341,7 +343,7 @@ class GitRelay:
                                 "commit",
                                 "--quiet",
                                 "-m",
-                                "ci: publish durable task evidence",
+                                message,
                             ],
                             cwd=work,
                         )
@@ -366,6 +368,13 @@ class GitRelay:
         if result["run_id"] != run_id:
             raise ContractError("Sealed result run differs from publication request")
         prefix = f"{result_task_prefix(task)}/{run_id}"
+        # An old sealed outbox must retry its original destination, including when
+        # the previous push succeeded but its response was lost before an upgrade.
+        for legacy in result_task_prefixes(task)[1:]:
+            old_run = Path(legacy) / run_id
+            if directory.parent.parts[-len(old_run.parts):] == old_run.parts:
+                prefix = old_run.as_posix()
+                break
         files = {f"{prefix}/result.json": raw}
         total = 0
         for artifact in result["artifacts"]:
@@ -380,5 +389,8 @@ class GitRelay:
                 raise ContractError("Selected artifacts exceed the Git budget")
             files[f"{prefix}/artifacts/{artifact['path']}"] = content
         # Retrying after a lost push response finds identical files and makes no commit.
-        self.write(self.results_branch, files, immutable=True)
+        self.write(
+            self.results_branch, files, immutable=True,
+            message=f"local-ci: {result['status']} {task['head_sha'][:12]} {run_id}",
+        )
         return hashlib.sha256(raw).hexdigest()

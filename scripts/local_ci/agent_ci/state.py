@@ -10,7 +10,14 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .protocol import ContractError, atomic_json, canonical, current_key, result_task_prefix
+from .protocol import (
+    ContractError,
+    atomic_json,
+    canonical,
+    current_key,
+    result_task_prefix,
+    result_task_prefixes,
+)
 
 
 def run_state_paths(state_dir):
@@ -25,9 +32,11 @@ def run_state_paths(state_dir):
 
 def local_run_dir(state_dir, task, run_id):
     root = Path(state_dir)
-    legacy = root / "runs" / task["task_id"]
-    parent = legacy if legacy.is_dir() else root / result_task_prefix(task)
-    return parent / run_id
+    for prefix in result_task_prefixes(task):
+        existing = root / prefix / run_id
+        if existing.is_dir():
+            return existing
+    return root / result_task_prefix(task) / run_id
 
 
 class Journal:
@@ -37,10 +46,11 @@ class Journal:
         self.root = Path(root)
         self.runs = self.root / "runs"
         self.runs.mkdir(parents=True, exist_ok=True)
-        self._task_dirs = {
-            path.parent.parent.name: path.parent.parent
-            for path in run_state_paths(self.root)
-        }
+        # Several frozen tasks can share a head SHA. Index manifests, not folder names.
+        self._task_runs = {}
+        for path in sorted(run_state_paths(self.root), key=lambda p: p.parent.name):
+            record = json.loads(path.read_text())
+            self._task_runs[record["task_id"]] = path.parent
         self.guard = threading.RLock()
 
     @staticmethod
@@ -55,18 +65,20 @@ class Journal:
         return value
 
     def run_dir(self, task_id, run_id=None):
-        parent = self._task_dirs.get(self._component(task_id))
-        if parent is None:
+        directory = self._task_runs.get(self._component(task_id))
+        if directory is None:
             raise ContractError("Unknown task")
-        if run_id:
-            return parent / self._component(run_id)
-        candidates = sorted(parent.glob("*/state.json"))
-        if not candidates:
-            raise ContractError("Unknown task")
-        return candidates[-1].parent
+        if run_id and self._component(run_id) != directory.name:
+            task = json.loads((directory / "task.json").read_text())
+            candidate = local_run_dir(self.root, task, run_id)
+            manifest = json.loads((candidate / "task.json").read_text())
+            if manifest["task_id"] != task_id:
+                raise ContractError("Run belongs to another task")
+            return candidate
+        return directory
 
     def has_task(self, task_id):
-        return task_id in self._task_dirs
+        return task_id in self._task_runs
 
     def _state(self, task_id):
         return json.loads((self.run_dir(task_id) / "state.json").read_text())
@@ -90,6 +102,7 @@ class Journal:
             directory / "state.json",
             {
                 "task_id": task["task_id"],
+                "head_sha": task["head_sha"],
                 "run_id": run_id,
                 "phase": "preparing",
                 "updated": time.time(),
@@ -98,7 +111,7 @@ class Journal:
                 "delivery": None,
             },
         )
-        self._task_dirs[task["task_id"]] = directory.parent
+        self._task_runs[task["task_id"]] = directory
         return self.task(task["task_id"])
 
     def register(self, task):
@@ -116,6 +129,7 @@ class Journal:
             task = json.loads((self.run_dir(task_id) / "task.json").read_text())
             return {
                 "task_id": task_id,
+                "head_sha": task["head_sha"],
                 "subject": current_key(task),
                 "manifest": canonical(task).decode(),
                 "run_id": state["run_id"],
@@ -126,9 +140,7 @@ class Journal:
 
     def tasks(self, *, active=True):
         with self.guard:
-            rows = [
-                self.task(task_id) for task_id in self._task_dirs
-            ]
+            rows = [self.task(task_id) for task_id in self._task_runs]
             return sorted(
                 [r for r in rows if not active or r["phase"] != "published"],
                 key=lambda r: r["updated"],

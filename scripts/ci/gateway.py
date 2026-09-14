@@ -38,7 +38,7 @@ from agent_ci.protocol import (
     metadata_digest,
     llvm_hash_from_files,
     is_legacy_task,
-    result_task_prefix,
+    result_task_prefixes,
     validate_task,
     validate_result,
     within,
@@ -1113,11 +1113,26 @@ def current_task(gh: GitHub, control: GitStore, task: dict) -> bool:
 
 
 def latest_result(task: dict, results: GitStore) -> Path | None:
-    paths = sorted((results.root / result_task_prefix(task)).glob("*/result.json"))
-    if not paths:
-        # Read results published before the event/branch/PR directory migration.
-        paths = sorted((results.root / "runs" / task["task_id"]).glob("*/result.json"))
-    return paths[-1] if paths else None
+    paths = sorted(
+        (
+            path for prefix in result_task_prefixes(task)
+            for path in (results.root / prefix).glob("*/result.json")
+        ),
+        key=lambda path: path.parent.name,
+        reverse=True,
+    )
+    for path in paths:
+        # SHA directories may contain different frozen tasks. Never mix their results.
+        try:
+            if path.stat().st_size > 2 * 1024 * 1024:
+                return path  # Let read_result reject it; do not reuse an old pass.
+            recorded = json.loads(path.read_bytes()).get("task", {}).get("task_id")
+        except (ValueError, AttributeError):
+            return path
+        if recorded and recorded != task["task_id"]:
+            continue
+        return path
+    return None
 
 
 def read_result(path: Path, task: dict, results: GitStore) -> tuple[dict, str]:

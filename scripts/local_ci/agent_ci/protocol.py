@@ -87,7 +87,7 @@ def current_key(task: dict) -> str:
     return hashlib.sha256(f"{task['repository']}:{subject}".encode()).hexdigest()
 
 
-def result_task_prefix(task: dict) -> str:
+def result_task_prefix(task: dict, *, legacy: bool = False) -> str:
     """Return the shared readable directory for local runs and Gitee results."""
     branch = task.get("target_branch")
     if not isinstance(branch, str) or not branch or any(
@@ -101,9 +101,21 @@ def result_task_prefix(task: dict) -> str:
     pr_number = task.get("pr_number")
     if type(pr_number) is not int or pr_number < 0:
         raise ContractError("Invalid result PR number")
+    identity = task["task_id"] if legacy else task["head_sha"]
+    if not (ID if legacy else SHA).fullmatch(identity):
+        raise ContractError("Invalid result task directory identity")
     if pr_number:
-        return f"runs/pr/{branch_directory}/pr-{pr_number}/{task['task_id']}"
-    return f"runs/push/{branch_directory}/{task['task_id']}"
+        return f"runs/pr/{branch_directory}/pr-{pr_number}/{identity}"
+    return f"runs/push/{branch_directory}/{identity}"
+
+
+def result_task_prefixes(task: dict) -> tuple[str, ...]:
+    """Current SHA layout and both historical task-id layouts, read-only fallback."""
+    return (
+        result_task_prefix(task),
+        result_task_prefix(task, legacy=True),
+        f"runs/{task['task_id']}",
+    )
 
 
 def is_legacy_task(task: dict) -> bool:

@@ -33,6 +33,23 @@ def make_run(root, run, phase, published, layout=""):
     return path
 
 
+def test_sha_directory_health_and_retention_keep_internal_task_identity(tmp_path):
+    run = make_run(tmp_path, "pending", "publish_pending", None, "push/branch-main")
+    sha_parent = run.parent.with_name("b" * 40)
+    run.parent.rename(sha_parent)
+    run = sha_parent / run.name
+    record = json.loads((run / "state.json").read_text())
+    record.update(task_id="a" * 64, head_sha="b" * 40)
+    (run / "state.json").write_text(json.dumps(record))
+    config = {"state_dir": str(tmp_path)}
+    report = retain_local(config, apply=False)
+    assert report["protected"] == [{"task_id": "a" * 64, "run_id": "pending"}]
+    snapshot = health.collect(
+        {**config, "monitor_services": []}, manager=SimpleNamespace(health=lambda: {}),
+    )
+    assert snapshot["active_task"]["task_id"] == "a" * 64
+
+
 @pytest.mark.parametrize("layout", RUN_LAYOUTS, ids=["legacy", "pr", "push"])
 def test_retention_expires_only_published_and_preserves_summary(tmp_path, layout):
     now = 40 * 86400

@@ -28,7 +28,7 @@ python3 bootstrap_control.py \
 
 从旧配置升级时，将 profile 内的 `image` 合并为顶层一个 digest；LLVM 使用 `mode: mount`，原 `archives` / `repositories` 中的依赖改为预置的只读目录。删除旧 `prepare_commands` 与 `validation_commands`，镜像本身需要的安装步骤放在共享镜像配方中。示例配置列出了 LLVM、后端、PPL 和 FlagGems 的挂载位置。构建默认使用 12 路并行，已有配置的 `max_jobs` / `MAX_JOBS` 不会自动覆盖；按服务器资源设置，Codex 也可通过工具的 `jobs` 参数调整（1–64）。
 
-每任务一个容器，Codex、构建和测试共用 `identities.task` / `identities.gid` 的非 root 身份。candidate、base 和临时实验是任务内的数据目录。可写挂载只有 `work/<task>/<run> → /task` 与当前运行目录的 `artifacts → /task/artifacts`；运行目录按 [本地与 Gitee 共用的命名规则](../README.md) 分层。直接将 `control_root`（服务器上的 `control_anchor`）中的 `scripts`、`api_contract` 和 `envsetup.sh` 只读挂载到容器 `/opt/local-ci/control/` 下的对应位置，不再导出 `environments/control-revisions/<SHA>` 快照。LLVM、FlagGems、后端等服务器依赖仍只读挂载；`.git`、凭据、状态、私有日志和已封存结果留在宿主，不能放入上述挂载目录。
+每任务一个容器，Codex、构建和测试共用 `identities.task` / `identities.gid` 的非 root 身份。candidate、base 和临时实验是任务内的数据目录。可写挂载只有 `work/<head_sha>/<run_id> → /task` 与当前运行目录的 `artifacts → /task/artifacts`；运行目录按 [本地与 Gitee 共用的命名规则](../README.md) 分层。任务结束后删除临时运行目录及空的 SHA 父目录，保留其他运行和持久化证据；旧 task_id 工作目录按原句柄安全清理。直接将 `control_root`（服务器上的 `control_anchor`）中的 `scripts`、`api_contract` 和 `envsetup.sh` 只读挂载到容器 `/opt/local-ci/control/` 下的对应位置，不再导出 `environments/control-revisions/<SHA>` 快照。LLVM、FlagGems、后端等服务器依赖仍只读挂载；`.git`、凭据、状态、私有日志和已封存结果留在宿主，不能放入上述挂载目录。
 
 Worker 接单仍校验控制 SHA，并在整个任务期间持有现有 `control.lock`。自动更新拿不到独占锁，或发现本实例尚有任务容器或清理容器未移除时，会延后切换 checkout。挂载前仅将受版本控制的运行文件和目录设为容器可读，兼容服务的 `UMask=0077`。手动更新 `control_anchor` 时，须先停止 Worker、确认任务容器已退出并清理，再更新和启动 Worker。旧任务的快照仍可用于恢复清理，但新任务不再创建快照。
 

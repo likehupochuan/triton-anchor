@@ -60,7 +60,8 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
             if record.get("abandoned") or record.get("phase") == "published":
                 continue
             task = {
-                "task_id": file.parent.parent.name,
+                "task_id": record.get("task_id", file.parent.parent.name),
+                "head_sha": record.get("head_sha"),
                 "run_id": file.parent.name,
                 "stage": record.get("phase", "preparing"),
                 "updated_at": iso(record["updated"])

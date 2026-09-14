@@ -172,7 +172,7 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
     worker.journal = Journal(tmp_path)
     assert worker.journal.register(task)["run_id"] == row["run_id"]
     directory = worker.journal.run_dir(task["task_id"])
-    assert directory == tmp_path / "runs/pr/branch-main/pr-7" / task["task_id"] / row["run_id"]
+    assert directory == tmp_path / "runs/pr/branch-main/pr-7" / task["head_sha"] / row["run_id"]
     # Simulate a pre-upgrade run: reload and retry its saved upload in place.
     legacy = tmp_path / "runs" / task["task_id"]
     directory.parent.rename(legacy)
@@ -189,6 +189,58 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
     worker.journal = Journal(tmp_path)
     worker.scan()
     assert calls == 1 and uploads == 2  # Published old runs remain deduplicated.
+
+
+def test_sha_layout_keeps_distinct_tasks_and_restart_history(tmp_path):
+    first = manifest()
+    second = revised_manifest("f" * 40, "2026-09-12T00:00:00Z")
+    journal = Journal(tmp_path)
+    row1, row2 = journal.register(first), journal.register(second)
+    directory1 = journal.run_dir(first["task_id"])
+    directory2 = journal.run_dir(second["task_id"])
+    assert directory1.parent == directory2.parent
+    assert directory1 != directory2
+    journal.phase(first["task_id"], "published")
+    journal = Journal(tmp_path)
+    assert journal.task(first["task_id"])["phase"] == "published"
+    assert journal.task(second["task_id"])["run_id"] == row2["run_id"]
+    assert journal.task(second["task_id"])["head_sha"] == first["head_sha"]
+    with pytest.raises(ValueError, match="another task"):
+        journal.run_dir(first["task_id"], row2["run_id"])
+    journal.restart(second["task_id"])
+    assert journal.run_dir(second["task_id"]) != directory2
+    assert Journal(tmp_path).task(first["task_id"])["run_id"] == row1["run_id"]
+
+
+@pytest.mark.parametrize("legacy", ["flat", "grouped"])
+def test_new_attempt_uses_sha_but_old_run_remains_readable(tmp_path, legacy):
+    task = manifest()
+    journal = Journal(tmp_path)
+    row = journal.register(task)
+    directory = journal.run_dir(task["task_id"])
+    old_parent = (tmp_path / "runs" if legacy == "flat" else directory.parent.parent) / task["task_id"]
+    directory.parent.rename(old_parent)
+    journal = Journal(tmp_path)
+    assert journal.run_dir(task["task_id"]) == old_parent / row["run_id"]
+    restarted = journal.restart(task["task_id"])
+    assert journal.run_dir(task["task_id"]).parent.name == task["head_sha"]
+    journal = Journal(tmp_path)
+    assert journal.task(task["task_id"])["run_id"] == restarted["run_id"]
+    assert journal.run_dir(task["task_id"], row["run_id"]) == old_parent / row["run_id"]
+
+
+def test_heartbeat_exposes_head_without_replacing_task_identity(tmp_path):
+    from types import SimpleNamespace
+    task = manifest()
+    worker = Worker({"state_dir": str(tmp_path), "simulation": True},
+                    relay=object(), manager=object(), driver=object())
+    worker.journal.register(task)
+    worker.active = SimpleNamespace(task=task)
+    worker.heartbeat()
+    health = json.loads((tmp_path / "health/worker.json").read_text())
+    assert health["head_sha"] == task["head_sha"]
+    assert health["tasks"][0]["head_sha"] == task["head_sha"]
+    assert health["tasks"][0]["task_id"] == task["task_id"]
 
 
 def test_task_waits_for_automatic_control_update(tmp_path):

@@ -43,7 +43,7 @@ PR 评论是追加式历史，不再使用全局 marker 查找并覆盖旧评论
 
 Actions 的 `route`、`enqueue`、`receive`、`publish` 成功只表示相应调度或传输完成，不能替代 `local-ci/summary` 的测试结论。前置 checks 成功与服务器 `infra_error` 可以同时出现。旧版 `local-ci/sophgo-cmodel` 等 commit status 会留在历史提交上；新流程不再写入它们，也不将历史错误改写为通过。仓库门禁应只要求上面的四个当前 context。
 
-结果按事件和目标分支保存。PR 为 `runs/pr/branch-<目标分支>/pr-<PR号>/<task_id>/<run_id>/result.json`，push/manual 为 `runs/push/branch-<目标分支>/<task_id>/<run_id>/result.json`；分支名中的 `/` 使用 URL 编码。所选日志与报告位于同目录的 `artifacts/`；一次 Git 提交同时发布结果和文件。接收器仍兼容读取迁移前的 `runs/<task_id>/<run_id>/` 历史结果。单文件最多 2 MiB，合计最多 10 MiB，最多 20 个文件。超预算文件保留在 CI 主机并在结果中说明，不分片。上传响应丢失后重试相同提交内容，不产生重复结果或重新运行 Agent。
+结果按事件和目标分支保存。PR 为 `runs/pr/branch-<目标分支>/pr-<PR号>/<head_sha>/<run_id>/result.json`，push/manual 为 `runs/push/branch-<目标分支>/<head_sha>/<run_id>/result.json`；分支名中的 `/` 使用 URL 编码，head_sha 为完整 40 位提交号。所选日志与报告位于同目录的 `artifacts/`；一次 Git 提交同时发布结果和文件，标题为 `local-ci: <status> <head_sha前12位> <run_id>`。接收器按结果内部的 task_id 匹配，避免同一 SHA 的不同冻结任务串用结果；仍兼容读取原有分组 `<task_id>` 目录和 `runs/<task_id>/<run_id>/` 历史结果。单文件最多 2 MiB，合计最多 10 MiB，最多 20 个文件。超预算文件保留在 CI 主机并在结果中说明，不分片。上传响应丢失后重试相同提交内容，不产生重复结果或重新运行 Agent。
 
 接收器不修改 Gitee 结果。旧版 schema 保留为历史，新任务使用无版本号的 `triton-anchor-local-ci-task` 与 `triton-anchor-local-ci`。常规任务由 Codex 根据实际 diff 选测，主机封存时要求 `change_validation` 说明影响、验证选择并引用实际证据；显式 full 仍要求全部可用工具覆盖。PR 信息和架构审查继续必需，缺失必需结果、审查或声称通过却不存在的证据文件均不能产生通过结果。
 

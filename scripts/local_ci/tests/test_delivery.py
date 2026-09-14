@@ -191,6 +191,10 @@ def test_git_result_and_selected_file_commit_together_and_retry_is_idempotent(tm
     branch = relay.results_branch
     count = subprocess.check_output(["git", "rev-list", "--count", branch], cwd=remote).strip()
     assert count == b"1"
+    message = subprocess.check_output(
+        ["git", "log", "-1", "--format=%s", branch], cwd=remote,
+    ).decode().strip()
+    assert message == f"local-ci: pass {task()['head_sha'][:12]} {result['run_id']}"
     prefix = f"{branch}:{result_task_prefix(task())}/{result['run_id']}"
     published = json.loads(subprocess.check_output(["git", "show", prefix + "/result.json"], cwd=remote))
     assert published == result
@@ -206,5 +210,29 @@ def test_result_directory_distinguishes_event_branch_and_pr_number():
     assert result_task_prefix(pull_request).startswith(
         "runs/pr/branch-release%2F3.0/pr-7/"
     )
+    assert result_task_prefix(pull_request).endswith("/" + pull_request["head_sha"])
     push = {**pull_request, "event_kind": "push", "pr_number": 0}
     assert result_task_prefix(push).startswith("runs/push/branch-release%2F3.0/")
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_pre_upgrade_sealed_outbox_retries_original_result_path(tmp_path, grouped):
+    result = seal(tmp_path, answer())
+    value = task()
+    old_prefix = (result_task_prefix(value, legacy=True) if grouped
+                  else f"runs/{value['task_id']}")
+    directory = tmp_path / old_prefix / result["run_id"] / "sealed"
+    directory.parent.mkdir(parents=True)
+    (tmp_path / "sealed").rename(directory)
+    remote = tmp_path / "relay.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+    relay = GitRelay(str(remote), tmp_path / "cache", allow_local=True)
+    for _ in range(2):
+        relay.publish_result(value, result["run_id"], directory)
+    paths = subprocess.check_output(
+        ["git", "ls-tree", "-r", "--name-only", relay.results_branch], cwd=remote,
+    ).decode().splitlines()
+    assert paths == [f"{old_prefix}/{result['run_id']}/result.json"]
+    assert subprocess.check_output(
+        ["git", "rev-list", "--count", relay.results_branch], cwd=remote,
+    ).strip() == b"1"
