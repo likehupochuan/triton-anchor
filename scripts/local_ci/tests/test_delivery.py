@@ -103,6 +103,50 @@ def test_missing_referenced_file_is_incomplete_but_large_file_is_omitted(tmp_pat
     assert not (tmp_path / "sealed/artifacts/report.txt").exists()
 
 
+def test_lightweight_diff_evidence_can_pass_but_cannot_replace_explicit_full(tmp_path):
+    from agent_ci.policy import minimum_checks
+
+    artifacts = tmp_path / "run/artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "validation.txt").write_text("Reviewed diff: ordinary comment only; diff check passed.\n")
+    value = answer()
+    value["checks"] = [{
+        "tool_id": "change_validation", "status": "pass",
+        "summary": "Ordinary comment only; reviewed diff and ran a lightweight check; build unnecessary",
+        "evidence": ["validation.txt"],
+    }]
+    for full in (False, True):
+        policy = minimum_checks(
+            [{"path": "python/triton_anchor/__init__.py"}], backend_enabled=True, full=full,
+        )
+        result = seal_result(
+            task(), "20260911-run", value, policy, {"profile": "test"},
+            tmp_path / "run", tmp_path / "sealed",
+        )
+        assert result["status"] == ("infra_error" if full else "pass")
+
+
+@pytest.mark.parametrize("missing", ["summary", "evidence"])
+def test_change_validation_requires_reasoning_and_evidence(tmp_path, missing):
+    artifacts = tmp_path / "run/artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "validation.txt").write_text("Completed targeted validation\n")
+    value = answer()
+    check = {
+        "tool_id": "change_validation", "status": "pass",
+        "summary": "Targeted validation for the changed behavior",
+        "evidence": ["validation.txt"],
+    }
+    check[missing] = " " if missing == "summary" else []
+    value["checks"] = [check]
+    result = seal_result(
+        task(), "20260911-run", value, {"required_checks": ["change_validation"]},
+        {"profile": "test"}, tmp_path / "run", tmp_path / "sealed",
+    )
+    assert result["status"] == "infra_error"
+    assert result["blocking_reasons"]
+
+
 def test_only_selected_files_are_published_and_text_is_redacted(tmp_path):
     artifacts = tmp_path / "run/artifacts"
     artifacts.mkdir(parents=True)

@@ -20,8 +20,11 @@ flowchart TD
   I --> J[GitHub：校验当前任务，回写 Checks / PR comment / Dashboard]
 ```
 
-构建、测试和审查按依赖与相关度交错执行。项目规则给出最低覆盖范围，Codex 自主选择
-命令、选测与补充用例，并可在任务内修复环境或降低编译并行度重试。
+构建、测试和审查按依赖与相关度交错执行。路径分类提供选测建议，Codex 阅读实际 diff，
+选择范围、命令与补充用例，并在 `change_validation` 结果中说明影响、选测理由和实际证据。
+普通注释和文档可轻量验证；普通 Python 可按需直接验证源码；真实编译器/后端行为变化
+仍需相关构建与 smoke/JIT。显式 full 要求全部可用工具对应的覆盖。
+Codex 可在任务内修复环境或降低编译并行度重试。
 PR 信息与架构审查必须完成，严重高风险发现阻塞；其余风险与有效性能回退报告给维护者。
 
 ## 文件结构
@@ -42,7 +45,8 @@ scripts/local_ci/
 GitHub 网关和接收器位于 `scripts/ci/`，页面位于 `dashboard/`。
 [AI_CI_PROGRAM.md](AI_CI_PROGRAM.md) 是唯一 Agent 程序入口；[tools/README.md](tools/README.md)
 说明调用方法。Codex 原生 shell 可直接运行工具、已有测试及定向脚本，无需 MCP、JUnit 或逐命令回执。
-最终以实际结果和必要证据汇总最低检查范围，不重复执行已有有效验证。
+最终以实际结果和必要证据汇总验证范围，不重复执行已有有效验证。先判断是否需要
+FlagGems；非 full 最多 6 个不同算子，空 impact 使用固定六个代表样本，超限须显式 full。
 
 ## 环境与生命周期
 

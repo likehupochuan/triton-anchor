@@ -128,6 +128,11 @@ def seal_result(
             )
             incomplete |= check.get("status") != "fail"
             failed |= check.get("status") == "fail"
+        elif tool_id == "change_validation" and (
+            not check["summary"].strip() or not check["evidence"]
+        ):
+            reasons.append("变更验证必须说明影响范围、选测理由并提供实际证据文件")
+            incomplete = True
     for check in checks:
         if check["status"] in {"fail", "infra_error", "cancelled"}:
             reason = f"{check['tool_id']}：{check['summary'] or check['status']}"

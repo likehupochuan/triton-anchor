@@ -17,6 +17,9 @@
 | compile_time / pass_profile / ir_serialization | 可用后端 | 正确性及有效测量检查，再与同条件基线比较 |
 
 准备条件用于安排工作，工具不会自动递归执行构建、安装或其他阶段。
+路径分类生成的工具与参数是建议，Codex 根据实际 diff 选择，也可直接对源码运行定向检查。
+`frontend_tests` / `frontend_smoke` 本身需要已安装 frontend；不需要安装包的独立源码测试
+使用原生命令执行。`change_validation` 是结果中的影响、选测理由与证据汇总，不是工具。
 编译可调整 `jobs`，并选择 `fresh` 或 `incremental`；共享环境依赖由 `prepare/` 管理，
 生产源码链路经 Gitee。FlagGems 使用服务器预置目录，测试缓存与日志写入任务产物目录。
 
@@ -46,6 +49,11 @@ build 参数为 `jobs`、`build_mode`；install 可用 `wheel` 指定现有 whee
 pytest 参数为 `paths`（相对路径或 node ID）、`keyword`；FlagGems 为
 `mode`（impact/full）、`ops`、`categories`；性能参数为 `kernels`、`repeat`、`warmup`。
 
+先判断 PR 是否需要 FlagGems。非 full 最多 6 个不同算子；显式 ops / categories 展开后
+超过上限直接提示使用 full，不自动截断。空 impact 固定使用 `abs`、`maximum`、`mm`、
+`arange`、`exponential_`、`embedding` 六个样本。需要更广覆盖时说明原因并显式使用 full，
+不要拆批规避上限。full 保留完整算子目录，每个算子仍可包含多个参数化用例。
+
 普通 pytest 输出简单计数，失败、空收集和全部跳过都不会显示为通过。
 性能基线由 `performance_baselines[tool_id]` 指定文件、提交与环境信息；比较时核对
 后端、算子和采样条件。没有可比基线时报告 `not_comparable`；有效性能回退只报告，
@@ -54,5 +62,7 @@ pytest 参数为 `paths`（相对路径或 node ID）、`keyword`；FlagGems 为
 ## 审查与补充验证
 
 `ai_review_tools/` 提供架构及专项审查说明。`ai_custom_tools/` 说明任务内脚本的用途。
-Codex 可以直接运行已有测试、编写定向复现或使用其他命令，在最低检查范围内自主选择
-顺序并补充验证。最终摘要列出已完成检查、审查结论、未完成项与所选重要证据。
+Codex 可以直接运行已有测试、编写定向复现或使用其他命令，自主选择范围和顺序。
+真实编译器、运行时及后端接口改动仍需对应构建与 smoke/JIT；文档和普通注释可轻量验证。
+显式 full 任务保留全部可用工具对应的覆盖要求。
+最终摘要列出实际改动影响、选测理由、已完成检查、审查结论、未完成项与所选重要证据。

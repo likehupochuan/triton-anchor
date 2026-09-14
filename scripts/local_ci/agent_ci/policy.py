@@ -1,4 +1,4 @@
-"""Classify a frozen diff into a trusted floor and optional risk-based checks."""
+"""Describe a frozen diff and suggest checks for Codex to select."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ from pathlib import Path
 
 from .protocol import ContractError
 
-# The runner owns the tool catalogue and dependency graph. Policy only selects
-# required behaviour; it must never introduce a parallel execution registry.
-from tools.basic_tools.runner import TOOL_IDS, dependencies
+# Tool dependencies describe preparation once Codex selects a tool; paths do not
+# expand into an obligatory execution plan.
+from tools.basic_tools.runner import TOOL_IDS
 
 TOOLS = tuple(TOOL_IDS)
 FRONTEND = {
@@ -174,17 +174,6 @@ def category(path: str) -> str:
     return "unknown"
 
 
-def closure(checks: set[str]) -> set[str]:
-    result = set()
-    pending = list(checks)
-    while pending:
-        check = pending.pop()
-        if check not in result:
-            result.add(check)
-            pending.extend(dependencies(check))
-    return result
-
-
 def ordered(checks: set[str]) -> list[str]:
     return [tool for tool in CHECK_ORDER if tool in checks]
 
@@ -230,30 +219,29 @@ def minimum_checks(
                 test_paths.append(item["path"])
 
     runtime_groups = groups - {"docs"}
-    checks = {"control_plane"} if not runtime_groups else {"environment"}
-    recommended: set[str] = set()
-    required_parameters: dict[str, dict] = {}
+    recommended = {"control_plane"} if not runtime_groups else {"environment"}
+    recommended_parameters: dict[str, dict] = {}
     if "control" in runtime_groups:
-        checks.add("control_plane")
-    if runtime_groups & {"frontend", "interface", "packaging"}:
-        checks |= FRONTEND
-        recommended |= {"backend_smoke", "flaggems"}
+        recommended.add("control_plane")
+    if runtime_groups & {"frontend", "interface"}:
+        recommended |= {"frontend_tests", "frontend_smoke"}
+    if "packaging" in runtime_groups:
+        recommended |= FRONTEND
     if "interface" in runtime_groups:
-        checks.add("backend_smoke")
+        recommended.add("backend_smoke")
     if "compiler" in runtime_groups:
-        checks |= FRONTEND | {"backend_tests", "backend_smoke", "flaggems"}
+        recommended |= FRONTEND | {"backend_tests", "backend_smoke", "flaggems"}
         recommended |= {"compile_time", "pass_profile", "ir_serialization"}
     if runtime_groups & {"environment", "llvm"}:
-        checks |= FRONTEND | {"control_plane", "backend_tests", "backend_smoke", "flaggems"}
+        recommended |= FRONTEND | {"control_plane", "backend_tests", "backend_smoke", "flaggems"}
         recommended |= {"compile_time", "pass_profile", "ir_serialization"}
     if "test" in runtime_groups:
         if "tests/test_smoke.py" in test_paths:
-            checks.add("frontend_smoke")
+            recommended.add("frontend_smoke")
             test_paths.remove("tests/test_smoke.py")
-        if test_paths or not checks.intersection({"frontend_smoke"}):
-            checks.add("frontend_tests")
-        # Deleted tests and test-support changes require the corresponding suite.
-        # Individual runnable Python tests can be selected exactly.
+        if test_paths or "frontend_smoke" not in recommended:
+            recommended.add("frontend_tests")
+        # Runnable changed tests are a useful starting point, not a coverage cap.
         selectable = [
             path
             for path in test_paths
@@ -263,16 +251,12 @@ def minimum_checks(
             selectable and len(selectable) == len(test_paths) and not deleted_test
             and runtime_groups <= {"test", "control"}
         ):
-            required_parameters["frontend_tests"] = {"paths": sorted(set(selectable))}
-    full_scope = full or "unknown" in runtime_groups
-    if full_scope:
-        checks |= set(TOOLS)
-        if backend_enabled:
-            required_parameters["flaggems"] = {"mode": "full"}
-        required_parameters.pop("frontend_tests", None)
+            recommended_parameters["frontend_tests"] = {"paths": sorted(set(selectable))}
 
-    if full_scope:
+    if full:
         level = "full"
+    elif "unknown" in runtime_groups:
+        level = "needs_analysis"
     elif runtime_groups & {"compiler", "environment", "llvm"}:
         level = "core"
     elif runtime_groups & {"frontend", "interface", "packaging"}:
@@ -284,30 +268,29 @@ def minimum_checks(
     else:
         level = "non_executable"
 
-    all_required = closure(checks)
     unavailable = BACKEND if not backend_enabled else set()
-    recommended_with_dependencies = closure(recommended)
-    available_recommended = recommended_with_dependencies - all_required - unavailable
+    required = set(TOOLS) - unavailable if full else set()
     return {
         "categories": sorted(groups),
         "classification_evidence": classification_evidence,
         "impact": {
             "level": level,
-            "classification": "risk_assessed"
+            "classification": "path_hint"
             if runtime_groups
             else "documentation_only",
             "active_categories": sorted(runtime_groups),
         },
-        "required_checks": ordered(all_required - unavailable),
-        "required_parameters": required_parameters,
-        "recommended_checks": ordered(available_recommended),
-        "not_applicable": ordered(
-            (all_required | recommended_with_dependencies) & unavailable
-        ),
+        "required_checks": ["change_validation", *ordered(required)],
+        "required_parameters": {"flaggems": {"mode": "full"}} if full and backend_enabled else {},
+        "recommended_checks": ordered(recommended - required - unavailable),
+        "recommended_parameters": {} if full else recommended_parameters,
+        "not_applicable": ordered((set(TOOLS) if full else recommended) & unavailable),
         "capabilities": [t for t in CHECK_ORDER if t not in unavailable],
         "required_reviews": ["pr_info", "architecture"],
         "reason": (
-            "The frozen diff defines a coverage floor. Changed tests execute with their dependencies; "
-            "Codex chooses task order and additional validation. Full includes all supported FlagGems operators."
+            "Path categories only suggest checks. Codex must inspect the actual diff, choose relevant "
+            "validation and record its reasoning and evidence in change_validation. Ordinary comments "
+            "may use lightweight checks; real compiler/runtime changes need relevant builds and smoke/JIT. "
+            "Only explicit full requires every supported tool."
         ),
     }

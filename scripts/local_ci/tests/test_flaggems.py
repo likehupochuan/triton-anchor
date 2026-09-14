@@ -101,4 +101,56 @@ class OperatorSelectionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Unknown FlagGems"):
                 select_entries(args)
             args.ops = ""
-            self.assertEqual([entry.op for entry in select_entries(args)], ["abs"])
+            args.categories = "unary"
+            self.assertEqual([entry.op for entry in select_entries(args)], ["abs", "gelu"])
+
+    def test_empty_impact_uses_six_representative_supported_operators(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "tests").mkdir()
+            operators = ["abs", "maximum", "mm", "arange", "exponential_", "embedding"]
+            (root / "tests/test_ops.py").write_text(
+                "\n".join(f"@pytest.mark.{op}\ndef test_{op}(): pass" for op in operators)
+            )
+            catalogue = ROOT / "tools/basic_tools/flaggems"
+            args = argparse.Namespace(
+                mode="impact", ops="", categories="", flaggems_dir=str(root),
+                whitelist=str(catalogue / "flaggems_pass_whitelist.tsv"),
+                full_list=str(catalogue / "flaggems_all_ops.tsv"),
+            )
+            selected = select_entries(args)
+            self.assertEqual(set(operators), {entry.op for entry in selected})
+            self.assertEqual(6, len({entry.category for entry in selected}))
+
+    def test_nonfull_limit_applies_after_expansion_and_counts_distinct_operators(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "tests").mkdir()
+            (root / "tests/test_ops.py").write_text(
+                "\n".join(f"@pytest.mark.mark{i}\ndef test_{i}(): pass" for i in range(8))
+            )
+            (root / "tests/test_more.py").write_text("@pytest.mark.mark0\ndef test_more(): pass\n")
+            catalogue = root / "ops.tsv"
+            catalogue.write_text("\n".join(f"math op{i} mark{i}" for i in range(8)))
+            args = argparse.Namespace(
+                mode="impact", ops="", categories="math", flaggems_dir=str(root),
+                whitelist=str(catalogue), full_list=str(catalogue), sample_size=6, seed="ci",
+            )
+            with self.assertRaisesRegex(ValueError, "8 operators.*--mode full"):
+                select_entries(args)
+            args.categories = ""
+            args.ops = ",".join(f"op{i}" for i in range(7))
+            with self.assertRaisesRegex(ValueError, "7 operators.*--mode full"):
+                select_entries(args)
+            args.ops = ",".join(f"op{i}" for i in range(6)) + ",op0,mark0"
+            selected = select_entries(args)
+            self.assertEqual(6, len({entry.op for entry in selected}))
+            self.assertEqual(7, len(selected))  # Two test files still represent one operator.
+            args.mode = "full"
+            self.assertEqual(8, len({entry.op for entry in select_entries(args)}))
+            args.mode = "sample"
+            catalogue.write_text("\n".join(f"category{i} op{i} mark{i}" for i in range(8)))
+            self.assertEqual(6, len({entry.op for entry in select_entries(args)}))
+            args.sample_size = 7
+            with self.assertRaisesRegex(ValueError, "--mode full"):
+                select_entries(args)

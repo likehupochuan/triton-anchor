@@ -21,6 +21,9 @@ IGNORED_MARKERS = {
     "xfail",
 }
 MARK_RE = re.compile(r"@pytest\.mark\.([A-Za-z_][A-Za-z0-9_]*)")
+MAX_IMPACT_OPS = 6
+# One known-supported operator from each category in the pass whitelist.
+DEFAULT_IMPACT_OPS = ("abs", "maximum", "mm", "arange", "exponential_", "embedding")
 
 
 @dataclass(frozen=True)
@@ -138,36 +141,26 @@ def group_entries_by_category(entries: list[Entry]) -> dict[str, list[Entry]]:
 def select_sample_entries(
     entries: list[Entry], requested_size: int, seed: str
 ) -> list[Entry]:
+    if not 1 <= requested_size <= MAX_IMPACT_OPS:
+        raise ValueError(
+            "FlagGems sample size must be 1..6; use --mode full for broader coverage"
+        )
     rng = random.Random(seed) if seed else random.SystemRandom()
     grouped = group_entries_by_category(entries)
     categories = sorted(grouped)
-    sample_size = min(max(requested_size, len(categories), 1), len(entries))
-
-    if requested_size < len(categories):
-        print(
-            f"warning: requested sample size {requested_size} is smaller than "
-            f"the {len(categories)} whitelist categories; selecting one operator "
-            "from every category",
-            file=sys.stderr,
-        )
-
-    selected: list[Entry] = []
-    selected_keys: set[tuple[str, str, str]] = set()
+    rng.shuffle(categories)
+    selected_ops: set[str] = set()
     for category in categories:
-        chosen = rng.choice(grouped[category])
-        selected.append(chosen)
-        selected_keys.add((chosen.op, chosen.marker, chosen.test_file))
-
-    remaining = sample_size - len(selected)
-    if remaining > 0:
-        pool = [
-            entry
-            for entry in entries
-            if (entry.op, entry.marker, entry.test_file) not in selected_keys
-        ]
-        selected.extend(rng.sample(pool, remaining))
-
-    return selected
+        available = sorted({entry.op for entry in grouped[category]} - selected_ops)
+        if available:
+            selected_ops.add(rng.choice(available))
+        if len(selected_ops) == requested_size:
+            break
+    pool = sorted({entry.op for entry in entries} - selected_ops)
+    selected_ops.update(
+        rng.sample(pool, min(requested_size - len(selected_ops), len(pool)))
+    )
+    return [entry for entry in entries if entry.op in selected_ops]
 
 
 def select_entries(args: argparse.Namespace) -> list[Entry]:
@@ -180,9 +173,13 @@ def select_entries(args: argparse.Namespace) -> list[Entry]:
 
     entries = read_entries(Path(args.whitelist))
     if args.mode == "impact":
-        ops = {value for value in getattr(args, "ops", "").split(",") if value}
+        ops = {
+            value.strip() for value in getattr(args, "ops", "").split(",") if value.strip()
+        }
         categories = {
-            value for value in getattr(args, "categories", "").split(",") if value
+            value.strip()
+            for value in getattr(args, "categories", "").split(",")
+            if value.strip()
         }
         # Explicitly affected operators may be outside the historical pass list.
         # They must still be tested, rather than being silently discarded.
@@ -199,13 +196,15 @@ def select_entries(args: argparse.Namespace) -> list[Entry]:
             if entry.op in ops or entry.marker in ops or entry.category in categories
         ]
         if not ops and not categories:
-            # Unknown/broad impact uses every known-supported operator. Unlike
-            # legacy random sampling, this is deterministic and reproducible.
-            selected = entries
+            missing = set(DEFAULT_IMPACT_OPS) - {entry.op for entry in entries}
+            if missing:
+                raise ValueError(
+                    f"Default FlagGems operators missing from pass whitelist: {sorted(missing)}"
+                )
+            selected = [entry for entry in entries if entry.op in DEFAULT_IMPACT_OPS]
         if not selected:
             raise ValueError("Impact selection contains no operators")
-        return attach_discovered_files(selected, marker_files)
-    if args.mode == "single":
+    elif args.mode == "single":
         selected = [entry for entry in entries if args.op in (entry.op, entry.marker)]
         if not selected:
             raise ValueError(
@@ -214,6 +213,12 @@ def select_entries(args: argparse.Namespace) -> list[Entry]:
     else:
         selected = select_sample_entries(entries, args.sample_size, args.seed)
 
+    count = len({entry.op for entry in selected})
+    if count > MAX_IMPACT_OPS:
+        raise ValueError(
+            f"FlagGems non-full selection contains {count} operators (maximum 6); "
+            "use --mode full for broader coverage"
+        )
     return attach_discovered_files(selected, marker_files)
 
 

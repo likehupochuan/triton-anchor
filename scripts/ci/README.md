@@ -35,6 +35,6 @@ Actions 的 `route`、`enqueue`、`receive`、`publish` 成功只表示相应调
 
 结果按事件和目标分支保存。PR 为 `runs/pr/branch-<目标分支>/pr-<PR号>/<task_id>/<run_id>/result.json`，push/manual 为 `runs/push/branch-<目标分支>/<task_id>/<run_id>/result.json`；分支名中的 `/` 使用 URL 编码。所选日志与报告位于同目录的 `artifacts/`；一次 Git 提交同时发布结果和文件。接收器仍兼容读取迁移前的 `runs/<task_id>/<run_id>/` 历史结果。单文件最多 2 MiB，合计最多 10 MiB，最多 20 个文件。超预算文件保留在 CI 主机并在结果中说明，不分片。上传响应丢失后重试相同提交内容，不产生重复结果或重新运行 Agent。
 
-接收器不修改 Gitee 结果。旧版 schema 保留为历史，新任务使用无版本号的 `triton-anchor-local-ci-task` 与 `triton-anchor-local-ci`。最低必检、PR 信息和架构审查在主机封存时汇总；缺失检查、审查或声称通过却不存在的证据文件均不能产生通过结果。
+接收器不修改 Gitee 结果。旧版 schema 保留为历史，新任务使用无版本号的 `triton-anchor-local-ci-task` 与 `triton-anchor-local-ci`。常规任务由 Codex 根据实际 diff 选测，主机封存时要求 `change_validation` 说明影响、验证选择并引用实际证据；显式 full 仍要求全部可用工具覆盖。PR 信息和架构审查继续必需，缺失必需结果、审查或声称通过却不存在的证据文件均不能产生通过结果。
 
 本地回归：`python3 -m pytest scripts/local_ci/tests -q`。测试使用本地 bare Git 与模拟 GitHub 边界，不发布真实结果。
