@@ -14,28 +14,28 @@ through temporary build mounts; installation packages are not image layers.
 
 Keep the wheel checksums and build log alongside the foundation recipe. APT
 packages follow the Ubuntu repositories at build time.
-The final image is pinned by immutable digest in the private profile.
-For offline BuildKit, `local_image_tag` can name a local alias. The manager
-checks that alias against the pinned image digest before and after building and
-passes `--pull=false`; a missing or mismatched alias fails closed. Do not retag
-the foundation while an image build is in progress.
+Pin the final image with the top-level `image` digest in the private configuration
+and load it into the server's Rootless Docker daemon. Every profile uses this
+same image; the manager does not build per-profile derived images. An optional
+profile `local_image_tag` must resolve to the configured digest.
 
-`configure.py` switches only the Triton 3.0 profile after saving a private rollback
-configuration. It retains the pinned frontend/backend repositories and existing
-LLVM/PPL mounts, adds a verified FlagGems source mount, and removes the FlagGems
-wheel install. Image preparation copies `enable_flaggems.py` into the build payload at
-`/opt/local-ci/runtime/enable_flaggems.py`; it adds a `.pth` entry for the trusted
-source's `src` directory without reading the absent build-time mount. Candidate/base venvs inherit this entry. Git trusts only
-the exact read-only mount path, not every repository. Cache/output paths must
-remain task-private, not inside the mount. `validate_flaggems.py` verifies source
-imports, no installed distribution/C extension, and a numerical Sophgo add.
+`configure.py --config <path> --image <digest> --flaggems-source <directory>
+--flaggems-commit <SHA>` sets the shared image and adds a verified FlagGems source
+mount to the Triton 3.0 profile after saving a private rollback configuration.
+First migrate LLVM, backend and PPL dependencies to read-only mounts and remove
+old profile `archives`, `repositories`, `prepare_commands` and `validation_commands`.
+Task preparation writes a `.pth` entry in each candidate/base venv for that
+profile's mounted FlagGems `src` directory. Git trusts only the exact read-only
+mount path. Cache/output paths remain task-private. `validate_flaggems.py` is
+available for formal backend smoke tests; it checks source imports and a numerical
+Sophgo add.
 
-Compatible Triton branches can reuse the foundation layers while mounting their
+Compatible Triton branches use the same image while mounting their
 exact LLVM revision (and PPL/FlagGems where needed). A shared base is not a shared
 mutable Python environment: each task still builds its own frontend/backend
-wheels and uses isolated venvs. Every version must pass its own validation.
-Python ABI, C++ runtime, Torch/TPU and backend compatibility can require a separate
-base or dependency profile; changing LLVM alone is not a universal guarantee.
+wheels and uses isolated venvs. Environment preparation only probes basic tools,
+imports and mounts, without rebuilding Wheels before the task. The shared image's
+Python ABI, C++ runtime and Torch/TPU must support every configured profile.
 
 Keep the previous validated release until the new release and formal runtime
 preflight pass. Do not run global image pruning. This recipe does not publish CI results or start worker services.

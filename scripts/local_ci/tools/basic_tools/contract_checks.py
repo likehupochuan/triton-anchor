@@ -113,7 +113,13 @@ def check(root: Path, base: str, tested: str) -> dict:
         suffix = path.suffix.lower()
         control = relative.startswith(
             (".github/", "scripts/", "api_contract/", "dashboard/")
-        ) or path.name in {"pyproject.toml", "setup.py", "setup.cfg", ".gitmodules"}
+        ) or path.name.lower() in {
+            "pyproject.toml", "setup.py", "setup.cfg", ".gitmodules",
+            "license", "notice", ".gitignore", ".editorconfig",
+        }
+        static_asset = relative.startswith(("docs/", "assets/")) and suffix in {
+            ".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif",
+        }
         if (
             suffix
             not in {
@@ -135,9 +141,17 @@ def check(root: Path, base: str, tested: str) -> dict:
                 ".html",
             }
             and not control
+            and not static_asset
         ):
             continue
         raw = path.read_bytes()
+        if static_asset and suffix != ".svg":
+            rows.append({
+                "path": relative,
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "checks": ["diff_check"],
+            })
+            continue
         if b"\0" in raw:
             continue
         text = raw.decode("utf-8")

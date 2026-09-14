@@ -602,7 +602,6 @@ class EnvironmentManager:
             self._stop_owned(container, kind="image-validation")
             self._docker("rm", container, cancellable=False)
             self._validation_container = None
-            self._validation_container = None
 
     def _foundation_reference(self, profile):
         local = profile.get("local_image_tag")
@@ -749,8 +748,8 @@ class EnvironmentManager:
     def import_foundation(self, archive, sha256, image_ref):
         """Import an administrator-provided offline foundation, not a PR snapshot.
 
-        This is provenance only. A release must still be built from the trusted
-        recipe and pass ensure_image validation before any task may acquire it.
+        Each dependency profile must pass the ensure_image environment probe
+        before a task may use this shared image.
         """
         if not IMAGE_RE.fullmatch(image_ref):
             raise EnvironmentError(

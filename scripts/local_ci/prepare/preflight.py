@@ -16,7 +16,7 @@ from pathlib import Path
 
 LOCAL_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(LOCAL_ROOT))
-from prepare.artifacts import DIGEST_RE, NAME_RE, SHA_RE, safe_source
+from prepare.artifacts import NAME_RE, SHA_RE, safe_source
 from prepare.runtime_probe import (
     runtime_status,
     probe_runtime,
@@ -199,20 +199,6 @@ def check_configuration(
             )
         except (OSError, ValueError, RuntimeError) as exc:
             check(prefix + ":dependency_mounts", False, str(exc))
-        if mode == "archive":
-            source(prefix + ":llvm_source", llvm.get("archive", llvm.get("url")))
-            check(
-                prefix + ":llvm_checksum",
-                bool(DIGEST_RE.fullmatch(str(llvm.get("sha256", "")))),
-                "Trusted LLVM archive SHA256 is mandatory",
-            )
-            check(
-                prefix + ":llvm_provenance",
-                llvm.get("commit") == profile.get("llvm_hash"),
-                "Archive provenance must name the profile LLVM commit",
-            )
-        elif mode == "source":
-            source(prefix + ":llvm_source", llvm.get("repository"))
         if backend:
             backend_required = (
                 "BACKEND_PATH",

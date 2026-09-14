@@ -50,7 +50,7 @@ def main():
     config["image"] = args.image
     for item in config["profiles"].values():
         item.pop("image", None)
-    profile["env"]["FLAGGEMS_CLONE_DIR"] = "/workspace/deps/flaggems"
+    profile["env"]["FLAGGEMS_CLONE_DIR"] = target
     profile["env"]["BACKEND_TEST_COMMAND"] = (
         '"$PYTHON_BIN" tests/test_smoke.py && "$PYTHON_BIN" tests/test_jit.py && '
         '"$PYTHON_BIN" -I /opt/local-ci/control/scripts/local_ci/prepare/profiles/slim/validate_flaggems.py'

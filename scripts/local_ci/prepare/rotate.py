@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and validate one trusted image release; never accepts PR build recipes."""
+"""Refresh one profile's dependencies and probe the shared runtime image."""
 
 import argparse
 import json

@@ -182,7 +182,7 @@ def active_images(config):
             or release.get("llvm_hash") != config["profiles"][branch].get("llvm_hash")
         ):
             raise ValueError(
-                "Build and validate a trusted image release before probing: " + branch
+                "Prepare the shared image and profile dependencies before probing: " + branch
             )
         selected[branch] = release["image_id"]
     return selected

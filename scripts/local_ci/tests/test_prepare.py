@@ -201,7 +201,7 @@ def test_active_image_selection_uses_real_public_registry_and_rejects_wrong_rele
         changed = copy.deepcopy(registry)
         changed["images"]["release-1"][field] = value
         manager.registry.write_text(json.dumps(changed))
-        with pytest.raises(ValueError, match="Build and validate"):
+        with pytest.raises(ValueError, match="Prepare the shared image"):
             probe.active_images(settings)
 
 
