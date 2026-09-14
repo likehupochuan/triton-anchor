@@ -493,8 +493,9 @@ README only
                 [],
             )
         snapshot = json.loads((self.root / "dashboard/tasks.json").read_text())
-        self.assertEqual(snapshot["tasks"][0]["status"], "infra_error")
-        self.assertEqual(self.gh.statuses[-1][1], "error")
+        self.assertEqual(snapshot["tasks"][0]["status"], "pass")
+        self.assertIn("receiver_error", snapshot["tasks"][0])
+        self.assertEqual(self.gh.statuses[-1][1], "success")
         result_revision = git(results.root, "rev-parse", "HEAD")
         self.assertEqual(
             len(g.collect_results(self.gh, control, results, self.root / "dashboard")),
@@ -792,6 +793,94 @@ README only
         self.assertEqual(request.call_args.args[:2], ("check-runs", "POST"))
         self.assertNotIn("conclusion", request.call_args.args[2])
 
+    def test_new_task_cancels_only_superseded_trusted_pending_checks(self):
+        gh = g.GitHub(g.REPOSITORY, token="fixture")
+        old = {"id": 11, "name": "local-ci/basic", "status": "queued",
+               "external_id": "triton-anchor-local-ci:basic:old-task",
+               "app": {"slug": "github-actions"}}
+        runs = [old, {**old, "id": 12, "status": "completed", "conclusion": "failure"},
+                {**old, "id": 13, "app": {"slug": "other"}}]
+        with patch.object(gh, "request", return_value={"check_runs": runs}) as request:
+            gh.check(self.task, "basic", "queued", None, "等待执行", "新任务")
+        writes = [call for call in request.call_args_list if len(call.args) > 1]
+        self.assertEqual([call.args[:2] for call in writes], [("check-runs/11", "PATCH"), ("check-runs", "POST")])
+        self.assertEqual(writes[0].args[2]["conclusion"], "cancelled")
+
+    def test_returning_task_identity_gets_newest_check_instead_of_reusing_old_wait(self):
+        gh = g.GitHub(g.REPOSITORY, token="fixture")
+        old = {"id": 11, "name": "local-ci/basic", "status": "queued",
+               "external_id": f"triton-anchor-local-ci:basic:{self.task['task_id']}",
+               "app": {"slug": "github-actions"}}
+        newer = {**old, "id": 12, "external_id": "triton-anchor-local-ci:basic:other-task"}
+        with patch.object(gh, "request", return_value={"check_runs": [old, newer]}) as request:
+            gh.check(self.task, "basic", "queued", None, "等待执行", "重新请求")
+        writes = [call for call in request.call_args_list if len(call.args) > 1]
+        self.assertEqual([call.args[:2] for call in writes], [
+            ("check-runs/11", "PATCH"), ("check-runs/12", "PATCH"), ("check-runs", "POST")])
+
+    def test_preflight_reports_cancelled_and_unexecuted_without_passing_them(self):
+        with patch.object(self.gh, "check", return_value=True) as check:
+            g.publish_preflight_checks(self.gh, self.task,
+                                      {"basic": "failure", "api": "skipped", "security": "cancelled"}, False)
+        self.assertEqual([call.args[3] for call in check.call_args_list],
+                         ["failure", "action_required", "cancelled"])
+        self.assertIn("未执行", check.call_args_list[1].args[4])
+        stages = {key: "cancelled" for key in ("prepare", *g.CHECK_NAMES)}
+        g.finalize_preflight(self.gh, self.task, stages)
+        self.assertEqual(self.gh.statuses[-1][1], "error")
+
+    def test_failed_card_is_not_reported_as_a_rejected_approval(self):
+        stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
+        g.finalize_preflight(self.gh, self.task, {**stages, "card": "failure", "approval": "skipped"})
+        self.assertIn("审批卡发布未完成", self.gh.comments[-1])
+        self.assertNotIn("人工审批未通过", self.gh.comments[-1])
+
+    def test_approval_card_has_frozen_identity_evidence_and_admission_boundary(self):
+        stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
+        with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "12345"}):
+            card = g.approval_card(self.task, stages, True)
+        for field in ("head_sha", "base_sha", "tested_sha", "worker_revision_sha", "task_id"):
+            self.assertIn(self.task[field], card)
+        for text in ("基础检查 | 通过", "API 兼容性 | 通过", "安全检查 | 通过",
+                     "等待维护者审批", "local-ci-fork-approval", "/actions/runs/12345",
+                     "并不代表代码安全或测试通过"):
+            self.assertIn(text, card)
+        blocked = g.approval_card(self.task, {**stages, "basic": "failure"}, False)
+        self.assertIn("未进入 Local CI", blocked)
+        self.assertNotIn("等待维护者审批", blocked)
+        config_error = g.approval_card(self.task, stages, False, "缺少 required reviewers")
+        self.assertIn("缺少 required reviewers", config_error)
+        internal = g.approval_card({**self.task, "external_fork": False}, stages, True)
+        self.assertIn("无需外部 fork 审批", internal)
+
+    def test_result_comment_is_chinese_scoped_to_run_and_separates_unexecuted_checks(self):
+        result = self.result()
+        result["summary"] = "仅调整 CI；已核对任务协议。"
+        result["checks"][0].update(summary="通过定向验证", evidence=["validation.md"])
+        result["checks"].append({"tool_id": "frontend_build", "status": "not_selected", "summary": "无需构建"})
+        result["findings"] = [{"summary": "<script> @owner [点此](https://evil.invalid)", "blocking": False}]
+        rendered = g.result_comment(result, "https://gitee.com/example/result.json",
+                                    {"validation.md": "https://gitee.com/example/validation.md"})
+        for text in ("本次要求的检查已通过", self.head, self.tested, result["run_id"],
+                     "CI 流程验证 | 通过", "PR 意图与属性核对 | 通过", "架构契约审查 | 通过",
+                     "合入阻塞与重要限制", "前端构建：本次未选择", "证据 1", "新结果追加评论"):
+            self.assertIn(text, rendered)
+        self.assertNotIn("| 前端构建 |", rendered)
+        self.assertNotIn("<script>", rendered)
+        self.assertNotIn("@owner", rendered)
+        self.assertNotIn("[点此](https://evil.invalid)", rendered)
+        self.assertNotIn("| pass |", rendered)
+        self.assertIn(f"/blob/{self.tested}/README.md", rendered)
+        again = g.result_comment({**result, "run_id": "retry-2"})
+        self.assertNotEqual(rendered, again)
+
+    def test_review_evidence_links_only_safe_paths_on_the_frozen_revision(self):
+        self.assertEqual(g.feedback_evidence({"kind": "architecture", "evidence": [
+            "../secret", "/absolute/path", "https://evil.invalid",
+        ]}, self.task, {}), "")
+        link = g.feedback_evidence({"kind": "architecture", "evidence": ["src/file.py:17"]}, self.task, {})
+        self.assertIn(f"/blob/{self.tested}/src/file.py#L17", link)
+
     def test_new_preflight_resets_summary_and_all_checks(self):
         with patch.object(self.gh, "check") as check:
             g.begin_preflight(self.gh, self.task)
@@ -822,7 +911,8 @@ README only
         stages.update(approval="failure", enqueue="skipped")
         g.finalize_preflight(self.gh, self.task, stages)
         self.assertEqual(self.gh.statuses[-1][1], "error")
-        self.assertIn("approval", self.gh.latest_statuses[self.task['task_id']][1])
+        self.assertIn("人工审批", self.gh.latest_statuses[self.task['task_id']][1])
+        self.assertIn("准入结果", self.gh.comments[-1])
         before = len(self.gh.statuses)
         with patch.object(self.gh, "owns_preflight", return_value=False):
             g.finalize_preflight(self.gh, self.task, stages)
@@ -940,7 +1030,7 @@ README only
             data = json.loads(request.data)
             calls.append((method, path, data))
             if method == "POST" and path.endswith("/comments"):
-                comments.append({"id": 11, "user": {"type": "Bot"}, **data})
+                comments.append({"id": len(comments) + 11, "user": {"type": "Bot", "login": "github-actions[bot]"}, **data})
             elif method == "POST" and path.startswith("statuses/"):
                 statuses.setdefault(path.rsplit("/", 1)[1], []).insert(0, data)
             elif method == "PATCH":
@@ -956,8 +1046,14 @@ README only
             client.comment(self.task, "first report")
             client.comment(self.task, "updated report")
             self.assertEqual(len(calls), 4)
-            self.assertEqual(calls[-1][0], "PATCH")
+            self.assertEqual(calls[-1][0], "POST")
             self.assertTrue(comments[0]["body"].startswith(g.MARKER))
+            self.assertTrue(comments[0]["body"].endswith("first report"))
+            client.comment(self.task, "first report")
+            self.assertEqual(len(calls), 4)  # Retry after a later event is also idempotent.
+            client.comment({**self.task, "task_id": "a" * 64}, "first report")
+            self.assertEqual(len(comments), 3)  # Another task never reuses an old comment.
+            self.assertFalse(any(call[0] == "PATCH" for call in calls))
             self.assertTrue(
                 client.status_matches(self.task, "pending", "Queued"), statuses
             )
@@ -980,6 +1076,13 @@ README only
             ) as error:
                 client.request("forbidden")
             self.assertNotIn("token", str(error.exception))
+
+    def test_prepare_error_comment_does_not_require_a_frozen_task(self):
+        gh = g.GitHub(g.REPOSITORY, token="fixture")
+        context = {"head_sha": self.head, "tested_sha": self.head, "pr_number": 7}
+        with patch.object(gh, "request", return_value=[]) as request:
+            self.assertTrue(gh.comment(context, "CI 准备未完成"))
+        self.assertEqual(request.call_args.args[:2], ("issues/7/comments", "POST"))
 
 
 class WorkflowStructureTests(unittest.TestCase):
@@ -1023,7 +1126,12 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertNotIn("environment", jobs["receive"])
         self.assertEqual(jobs["publish"]["needs"], "receive")
         self.assertIn("needs.receive.outputs.state == 'ready'", jobs["publish"]["if"])
-        self.assertEqual(jobs["publish"]["environment"], "github-pages")
+        self.assertNotIn("environment", jobs["publish"])
+        self.assertNotIn("id-token", jobs["publish"]["permissions"])
+        self.assertEqual(jobs["deploy-dashboard"]["environment"], "github-pages")
+        self.assertEqual(jobs["deploy-dashboard"]["needs"], "publish")
+        self.assertIn("dashboard_changed", jobs["deploy-dashboard"]["if"])
+        self.assertEqual(jobs["finalize-preflight"]["permissions"]["pull-requests"], "write")
         self.assertEqual(jobs["publish"]["concurrency"]["cancel-in-progress"], "false")
         self.assertIn("inputs.task_id", data["concurrency"]["group"])
         self.assertIn("inputs.mode != 'receive'", data["concurrency"]["cancel-in-progress"])

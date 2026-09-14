@@ -271,6 +271,33 @@ class GitHub:
         # A rerun must not reopen a completed check with its previous conclusion.
         if existing and status != "completed" and existing.get("status") == "completed":
             existing = None
+        if status == "queued":
+            trusted = [
+                run for run in runs
+                if run.get("name") == name
+                and (run.get("app") or {}).get("slug") == "github-actions"
+                and str(run.get("external_id", "")).startswith(
+                    (f"triton-anchor-local-ci:{key}:", f"triton-anchor-ci-v4:{key}:")
+                )
+            ]
+            # Returning to a previously used task identity still needs the newest
+            # Check Run ID; otherwise owns_preflight would select its successor.
+            if existing and any(int(run["id"]) > int(existing["id"]) for run in trusted):
+                existing = None
+            for run in trusted:
+                if run.get("status") != "completed" and (
+                    not existing or run["id"] != existing["id"]
+                ):
+                    self.request(
+                        f"check-runs/{run['id']}", "PATCH",
+                        {
+                            "status": "completed", "conclusion": "cancelled",
+                            "output": {
+                                "title": "旧任务已被替代",
+                                "summary": "同一提交已有新的冻结任务；请查看最新检查。",
+                            },
+                        },
+                    )
         output_data = {"title": str(title)[:255], "summary": str(summary)[:65535]}
         desired_url = url or ""
         if existing and all(
@@ -353,7 +380,7 @@ class GitHub:
                     self.status(
                         {"tested_sha": sha, "head_sha": sha},
                         "error",
-                        "Local CI cancelled: PR closed or became draft",
+                        "Local CI：PR 已关闭或转为草稿，验证取消",
                     )
                 break
             if len(statuses) < 100:
@@ -379,8 +406,8 @@ class GitHub:
                             "status": "completed",
                             "conclusion": "cancelled",
                             "output": {
-                                "title": "Local CI cancelled",
-                                "summary": "PR closed or became draft.",
+                                "title": "Local CI 已取消",
+                                "summary": "PR 已关闭或转为草稿。",
                             },
                         },
                     )
@@ -398,26 +425,23 @@ class GitHub:
             comments.extend(rows)
             if len(rows) < 100:
                 break
-        existing = next(
-            (
-                row
-                for row in comments
-                if row.get("user", {}).get("type") == "Bot"
-                and str(row.get("body", "")).startswith(
-                    (MARKER, "<!-- triton-anchor-ci-v4 -->")
-                )
-            ),
-            None,
-        )
-        content = {"body": f"{MARKER}\n{body}"[:60000]}
-        if existing:
-            if existing.get("body") != content["body"]:
-                self.request(f"issues/comments/{existing['id']}", "PATCH", content)
-                return True
         else:
-            self.request(path, "POST", content)
-            return True
-        return False
+            raise ValueError("Cannot deduplicate PR comments from an incomplete listing")
+        # Immutable feedback events: new task, phase or result appends a comment.
+        # A transport retry of identical content is a no-op, even after other posts.
+        event = digest({
+            "task_id": task.get("task_id"), "head_sha": task["head_sha"],
+            "pr_number": task["pr_number"], "body": body,
+        })
+        marker = f"<!-- local-ci-feedback event={event} -->"
+        if any(
+            row.get("user", {}).get("login") == "github-actions[bot]"
+            and str(row.get("body", "")).startswith(f"{MARKER}\n{marker}\n")
+            for row in comments
+        ):
+            return False
+        self.request(path, "POST", {"body": f"{MARKER}\n{marker}\n{body}"[:60000]})
+        return True
 
 
 def prepare_task(
@@ -782,7 +806,7 @@ def enqueue(task: dict, gh: GitHub, control: GitStore, source: Path) -> None:
         validate_task(old)
         documents[f"tasks/{task['task_id']}.json"] = old
     control.put(documents, (f"tasks/{task['task_id']}.json",))
-    gh.status(task, "pending", "Local CI: task published to Gitee")
+    gh.status(task, "pending", "Local CI：任务已投递到 Gitee，等待服务器结果", workflow_url())
 
 
 def cancel_obsolete(gh: GitHub, control: GitStore, pr_number: int = 0) -> int:
@@ -819,7 +843,7 @@ def cancel_obsolete(gh: GitHub, control: GitStore, pr_number: int = 0) -> int:
                 gh.status(
                     task,
                     "error",
-                    "Local CI cancelled: PR/branch changed, closed or became draft",
+                    "Local CI：PR 或分支已变化、关闭或转为草稿，旧任务取消",
                 )
                 gh.comment(
                     task,
@@ -830,40 +854,129 @@ def cancel_obsolete(gh: GitHub, control: GitStore, pr_number: int = 0) -> int:
     return count
 
 
-def result_comment(result: dict, result_url: str = "") -> str:
-    def safe(value):
-        return html.escape(str(value)).replace("@", "＠").replace("`", "'")
+DISPLAY_STATES = {
+    "pass": "通过", "success": "通过", "fail": "未通过", "failure": "未通过",
+    "infra_error": "验证未完成（环境或执行异常）", "error": "异常",
+    "cancelled": "已取消", "skipped": "未执行", "not_selected": "本次未选择",
+    "not_applicable": "不适用", "queued": "等待执行", "in_progress": "执行中",
+}
+DISPLAY_CHECKS = {
+    "prepare": "PR 信息与任务冻结", "basic": "基础检查", "api": "API 兼容性",
+    "security": "安全检查", "pr_info": "PR 意图与属性核对", "architecture": "架构契约审查",
+    "intent": "专项审查", "environment": "运行环境", "control_plane": "CI 流程验证",
+    "change_validation": "变更影响与验证范围", "frontend_build": "前端构建",
+    "frontend_install": "前端安装", "frontend_smoke": "前端基本功能",
+    "frontend_tests": "前端测试", "backend_build": "后端构建", "backend_install": "后端安装",
+    "backend_smoke": "后端基本功能", "backend_tests": "后端测试", "flaggems": "FlagGems 算子验证",
+    "compile_time": "编译耗时", "pass_profile": "编译阶段性能", "ir_serialization": "IR 序列化性能",
+}
 
+
+def feedback_text(value: object, limit: int = 1600) -> str:
+    """Untrusted PR/model prose is plain text, not Markdown links or mentions."""
+    text = re.sub(r"\s+", " ", str(value)).strip()[:limit]
+    text = html.escape(text).replace("@", "＠").replace("|", "/").replace("`", "'")
+    return re.sub(r"([\\\[\]()*_~#!])", r"\\\1", text)
+
+
+def display_state(value: str) -> str:
+    return DISPLAY_STATES.get(value, "未知状态（" + feedback_text(value) + "）")
+
+
+def feedback_evidence(item: dict, task: dict, artifact_urls: dict) -> str:
+    links = []
+    for reference in item.get("evidence", [])[:3]:
+        if not isinstance(reference, str):
+            continue
+        if reference in artifact_urls:
+            links.append(f"[证据 {len(links) + 1}]({artifact_urls[reference]})")
+        elif item.get("kind"):
+            match = re.fullmatch(r"([\w./-]+)(?::([1-9][0-9]*))?", reference)
+            if match and not match[1].startswith("/") and not {"..", ".", ""}.intersection(match[1].split("/")):
+                url = f"https://github.com/{task['repository']}/blob/{task['tested_sha']}/" + quote(match[1], safe="/")
+                if match[2]:
+                    url += "#L" + match[2]
+                links.append(f"[{feedback_text(reference, 200)}]({url})")
+    return " · ".join(links)
+
+
+def result_comment(result: dict, result_url: str = "", artifact_urls: dict | None = None) -> str:
+    task = result["task"]
+    verdict = {
+        "pass": "本次要求的检查已通过。",
+        "fail": "发现合入阻塞，需要处理后重新验证。",
+        "infra_error": "验证尚未完成，暂不能确认可合入。",
+        "cancelled": "验证已取消，不能作为当前提交的通过依据。",
+    }
     lines = [
-        f"## Local CI · {safe(result['status'])}",
-        "",
-        safe(result["summary"]),
-        "",
-        f"被测提交：`{result['task']['tested_sha'][:12]}`。",
-        "",
-        "| 检查 | 结果 | 说明 |",
-        "| --- | --- | --- |",
+        "## Local CI 审查反馈", "", f"**结论：{verdict[result['status']]}**", "",
+        f"PR 提交：`{task['head_sha']}`；合并后验证提交：`{task['tested_sha']}`。",
+        f"任务：`{task['task_id']}`；运行：`{result['run_id']}`。",
+        "此评论仅对应上述提交与运行；新结果追加评论，发布重试不覆盖历史。",
+        "", "### 变更意图与审查结论", "", feedback_text(result["summary"]),
+        "", "### 检查与审查结果", "", "| 检查 | 结果 | 说明 |", "| --- | --- | --- |",
     ]
-    for check in result["checks"]:
-        summary = safe(check.get("summary", "")).replace("|", "/").replace("\n", " ")
-        lines.append(
-            f"| {safe(check['tool_id'])} | {safe(check['status'])} | {summary} |"
-        )
-    for review in result["reviews"]:
-        lines.extend(
-            [
-                "",
-                f"**{safe(review['kind'])}** · {safe(review['status'])}",
-                safe(review.get("summary", "")),
-            ]
-        )
-    if result["blocking_reasons"]:
-        lines.extend(["", "需要处理："])
-        lines.extend(f"- {safe(reason)}" for reason in result["blocking_reasons"])
+    limitations = []
+    for item in [*result["checks"], *result["reviews"]]:
+        name = item.get("tool_id", item.get("kind", ""))
+        label = DISPLAY_CHECKS.get(name, "补充检查（" + feedback_text(name) + "）")
+        state = display_state(item["status"])
+        detail = feedback_text(item.get("summary", ""))
+        if item["status"] in {"not_selected", "not_applicable", "skipped"}:
+            limitations.append(f"{label}：{state}。{detail}")
+            continue
+        evidence = feedback_evidence(item, task, artifact_urls or {})
+        lines.append(f"| {label} | {state} | {detail} {evidence} |")
+    if len(limitations) == len(result["checks"]) + len(result["reviews"]):
+        lines.append("| 检查与审查 | 未完成 | 尚无可核对的记录 |")
+    blockers = [feedback_text(reason) for reason in result["blocking_reasons"]]
+    findings = []
     for finding in result["findings"]:
-        lines.append(f"- {safe(finding.get('summary', ''))}")
+        text = feedback_text(finding.get("summary", ""))
+        if text:
+            (blockers if finding.get("blocking") else findings).append(text)
+    if findings:
+        lines.extend(["", "### 需要关注的发现", "", *(f"- {x}" for x in dict.fromkeys(findings))])
+    lines.extend(["", "### 合入阻塞与重要限制", ""])
+    lines.extend(f"- {x}" for x in dict.fromkeys(blockers))
+    if not blockers:
+        lines.append("- 已完成的检查未报告合入阻塞。" if result["status"] == "pass" else "- 尚无完整通过结论，请补齐验证。")
+    lines.extend(f"- {x}" for x in dict.fromkeys(limitations))
+    if not any(c["tool_id"].startswith(("frontend_", "backend_")) or c["tool_id"] == "flaggems"
+               for c in result["checks"] if c["status"] in {"pass", "fail"}):
+        lines.append("- 报告未列出编译器构建或运行检查；不能据此声称编译器运行行为已验证。")
     if result_url:
-        lines.extend(["", f"[查看完整结果和所选文件]({result_url})"])
+        lines.extend(["", f"[完整执行报告与所选文件]({result_url})"])
+    return "\n".join(lines)
+
+
+def approval_card(task: dict, stages: dict, eligible: bool, approval_error: str = "") -> str:
+    lines = ["## Local CI 前置检查与审批", "",
+             f"PR #{task['pr_number']}：{feedback_text(task['title'])}", "",
+             "| 前置检查 | 结果 |", "| --- | --- |"]
+    for key in ("prepare", *CHECK_NAMES):
+        lines.append(f"| {DISPLAY_CHECKS[key]} | {display_state(stages.get(key, 'skipped'))} |")
+    lines.extend(["", "### 本次审批对应的固定版本", "",
+                  f"- 目标分支：{feedback_text(task['target_branch'])}"])
+    for key, label in (("head_sha", "PR 提交"), ("base_sha", "目标分支基线"),
+                       ("tested_sha", "被测合并提交"), ("worker_revision_sha", "可信控制代码"),
+                       ("task_id", "冻结任务")):
+        lines.append(f"- {label}：`{task[key]}`")
+    lines.extend(["", "### 任务范围与审批边界", "",
+                  "按显式 full 要求覆盖全部可用工具。" if task.get("full") else
+                  "由服务器 Codex 依据实际 diff 和 PR 意图选择构建、测试及必要验证；不预先声称已执行。",
+                  "每次都需完成变更验证、PR 信息核对和架构契约审查；后端、算子与性能验证受服务器实际 profile 能力限制。",
+                  "审批允许此冻结版本进入服务器任务容器执行，并不代表代码安全或测试通过；提交或 PR 信息变化后旧审批不能复用。"])
+    if approval_error:
+        lines.extend(["", "审批环境配置无法确认，暂不派发：" + feedback_text(approval_error)])
+    if not eligible:
+        lines.extend(["", "**未进入 Local CI。** 请先处理未通过或未完成的前置检查/审批配置。"])
+    elif task.get("external_fork"):
+        lines.extend(["", "**外部 fork：等待维护者审批。** 请在下方工作流的 `local-ci-fork-approval` 环境批准或拒绝本次运行。"])
+    else:
+        lines.extend(["", "**同仓库任务：前置检查已通过，无需外部 fork 审批，准备进入 Local CI。**"])
+    if workflow_url():
+        lines.extend(["", f"[前置检查证据与审批入口]({workflow_url()})"])
     return "\n".join(lines)
 
 
@@ -877,7 +990,7 @@ GITHUB_STATES = {
 
 def publication_description(status: str, result_digest: str) -> str:
     # The digest binds task, run and all evidence without another delivery record.
-    return f"Local CI: {status} (result {result_digest})"
+    return f"Local CI：{display_state(status)}（结果 {result_digest}）"
 
 
 def workflow_url() -> str:
@@ -903,14 +1016,16 @@ def publish_preflight_checks(
     changed = False
     for key in CHECK_NAMES:
         outcome = str(stages.get(key, "skipped"))
-        conclusion = "success" if outcome == "success" else "failure"
+        # GitHub treats skipped/neutral required checks as passing. Keep an
+        # unexecuted prerequisite blocking without misreporting a test failure.
+        conclusion = {"success": "success", "failure": "failure", "cancelled": "cancelled"}.get(outcome, "action_required")
         changed |= gh.check(
             task,
             key,
             "completed",
             conclusion,
-            f"{CHECK_NAMES[key]}: {outcome}",
-            f"Trusted workflow stage: **{check_value(outcome)}**.",
+            f"{DISPLAY_CHECKS[key]}：{display_state(outcome)}",
+            f"可信前置检查：**{display_state(outcome)}**。未执行不等于通过；请查看本次工作流证据。",
             workflow_url(),
         )
     return changed
@@ -919,15 +1034,15 @@ def publish_preflight_checks(
 def begin_preflight(gh: GitHub, task: dict) -> None:
     if not is_current(gh, task):
         raise ValueError("Task changed before preflight initialization")
-    gh.status(task, "pending", "Local CI: running preflight checks", workflow_url())
-    for key, name in CHECK_NAMES.items():
+    gh.status(task, "pending", "Local CI：等待前置检查结果", workflow_url())
+    for key in CHECK_NAMES:
         gh.check(
             task,
             key,
             "queued",
             None,
-            f"{name}: queued",
-            f"Waiting for this task's preflight stage. Task `{task['task_id']}`.",
+            f"{DISPLAY_CHECKS[key]}：等待前置检查结果",
+            f"此门禁等待本任务的前置检查汇总；各阶段实时进度见工作流。任务 `{task['task_id']}`。",
             workflow_url(),
         )
 
@@ -939,13 +1054,24 @@ def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
         # The receiver owns summary after dispatch, possibly already completed.
         return
     publish_preflight_checks(gh, task, stages, False)
-    if any(stages.get(key) != "success" for key in ("prepare", *CHECK_NAMES)):
-        state, description = "failure", "Preflight failed or cancelled; see workflow"
+    if any(stages.get(key) == "failure" for key in ("prepare", *CHECK_NAMES)):
+        state, description = "failure", "Local CI：前置检查未通过，请查看工作流"
+    elif any(stages.get(key) != "success" for key in ("prepare", *CHECK_NAMES)):
+        state, description = "error", "Local CI：前置检查取消或未执行，尚无完整验证结论"
+    elif stages.get("card", "success") != "success":
+        state, description = "error", "Local CI：审批卡发布未完成，尚未进入服务器验证"
     elif task.get("external_fork") and stages.get("approval") != "success":
-        state, description = "error", "Local CI approval failed or cancelled; see workflow"
+        state, description = "error", "Local CI：人工审批未通过或已取消，未进入服务器验证"
     else:
-        state, description = "error", "Local CI dispatch/receiver startup failed; see workflow"
+        state, description = "error", "Local CI：任务投递或接收器启动未完成，请查看工作流"
     gh.status(task, state, description, workflow_url())
+    body = (
+        f"## Local CI 准入结果\n\n{description}\n\n"
+        f"PR 提交：`{task['head_sha']}`；任务：`{task['task_id']}`。"
+    )
+    if workflow_url():
+        body += f"\n\n[检查证据与处理入口]({workflow_url()})"
+    gh.comment(task, body)
 
 
 def current_task(gh: GitHub, control: GitStore, task: dict) -> bool:
@@ -1053,7 +1179,7 @@ def receive_result(
                     gh.status(
                         task,
                         "error",
-                        "Local CI receiver timed out; retry receive without rebuilding",
+                        "Local CI：结果接收超时，请补收结果；不需要重新构建",
                     )
                     raise ValueError(
                         f"Local CI receiver timed out after {RECEIVER_MAX_ROUNDS} rounds; "
@@ -1092,7 +1218,7 @@ def publication_error(gh: GitHub, control: GitStore, task: dict) -> None:
             gh.status(
                 task,
                 "error",
-                "Local CI result validation/publication failed; receiver will retry",
+                "Local CI：结果校验或状态发布未完成，接收器将重试",
             )
     except (ValueError, OSError, RuntimeError):
         pass
@@ -1115,6 +1241,7 @@ def collect_results(
             "status": "pending" if active else "cancelled",
             "result": None,
         }
+        status_published = False
         try:
             path = latest_result(task, results)
             if path:
@@ -1135,12 +1262,13 @@ def collect_results(
                     unchanged = gh.status_matches(task, state, description)
                     if not unchanged:
                         gh.status(task, state, description, result_url)
+                    status_published = True
                     control.refresh()
                     if not current_task(gh, control, task):
                         row["status"] = "cancelled"
                         rows.append(row)
                         continue
-                    changed = gh.comment(task, result_comment(result, result_url))
+                    changed = gh.comment(task, result_comment(result, result_url, artifact_urls))
                     if not unchanged or changed:
                         published.append(
                             {
@@ -1152,12 +1280,13 @@ def collect_results(
                             }
                         )
         except (ValueError, OSError, RuntimeError) as error:
+            if not status_published:
+                row["status"] = "infra_error" if active else "cancelled"
             row.update(
                 receiver_error=type(error).__name__,
-                status="infra_error" if active else "cancelled",
                 receiver_message="结果读取或 GitHub 发布未完成；稍后重试接收，不重跑构建。",
             )
-            if active:
+            if active and not status_published:
                 publication_error(gh, control, task)
         rows.append(row)
     dashboard.mkdir(parents=True, exist_ok=True)
@@ -1354,7 +1483,7 @@ def main() -> int:
             raise ValueError("PR changed before information publication")
         errors = validate_pr_info(task)
         if errors:
-            gh.status(task, "failure", "PR information is incomplete; see PR comment")
+            gh.status(task, "failure", "Local CI：PR 信息不完整，请查看评论", workflow_url())
             gh.comment(
                 task, "## PR 信息需要补充\n\n" + "\n".join(f"- {x}" for x in errors)
             )
@@ -1381,28 +1510,19 @@ def main() -> int:
                     else "Cannot verify required reviewers on local-ci-fork-approval; check repository environment configuration."
                 )
         publish_preflight_checks(gh, task, stages, eligible)
-        body = "## Local CI 前置检查与审批\n\n" + "\n".join(
-            f"- {key}: {value}" for key, value in stages.items()
-        )
-        body += f"\n\n被测提交 `{task['tested_sha']}`；目标 `{html.escape(task['target_branch'])}`。\n"
-        body += "\n通过后由服务器 Codex 根据 PR 意图选择任务，并执行最低必检、架构审查和必要验证。\n"
-        if approval_error:
-            body += "\n人工审批配置未通过：" + html.escape(approval_error) + "\n"
-        body += (
-            "\n外部 fork：请在本次 workflow 的 local-ci-fork-approval environment 审批。"
-            if task.get("external_fork") and eligible
-            else "\n请修复失败检查后更新 PR。"
-            if not eligible
-            else "\n前置检查通过，准备进入 Local CI。"
-        )
+        body = approval_card(task, stages, eligible, approval_error)
         gh.comment(task, body)
-        gh.status(
-            task,
-            "pending" if eligible else "failure",
-            "Awaiting Local CI/approval"
-            if eligible
-            else "Preflight failed; see PR comment",
-        )
+        if os.getenv("GITHUB_STEP_SUMMARY"):
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
+                stream.write(body + "\n")
+        state = "pending" if eligible else "failure" if "failure" in stages.values() else "error"
+        if not eligible:
+            description = "Local CI：前置检查或审批配置未就绪，参见审批卡"
+        elif task.get("external_fork"):
+            description = "Local CI：等待人工审批"
+        else:
+            description = "Local CI：前置检查通过，等待派发"
+        gh.status(task, state, description, workflow_url())
         output("eligible", eligible)
         return 0
     if args.command == "api":
@@ -1510,7 +1630,7 @@ if __name__ == "__main__":
                         client.status(
                             context,
                             "error",
-                            "CI preparation/publication failed; see PR comment",
+                            "Local CI：准备或投递未完成，请查看 PR 评论",
                         )
                         run_id = os.getenv("GITHUB_RUN_ID", "")
                         link = (
@@ -1525,7 +1645,7 @@ if __name__ == "__main__":
                         )
                         client.comment(
                             context,
-                            f"## CI 准备或投递未完成\n\n{html.escape(reason)}\n\n请查看本次工作流证据并修复对应检查或中转配置，然后重试：{link}",
+                            f"## CI 准备或投递未完成\n\n{feedback_text(reason)}\n\n请查看本次工作流证据并修复对应检查或中转配置，然后重试：{link}",
                         )
             except (ValueError, OSError, RuntimeError):
                 print(

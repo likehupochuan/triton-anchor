@@ -239,7 +239,7 @@ jobs:
     needs: [prepare, basic, api, security, review-card, approve-external-fork, enqueue]
     if: ${{ always() && needs.prepare.outputs.task_id != '' && needs.enqueue.result != 'success' }}
     runs-on: ubuntu-latest
-    permissions: {contents: read, pull-requests: read, statuses: write, checks: write}
+    permissions: {contents: read, pull-requests: write, statuses: write, checks: write}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -252,7 +252,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_TASK_DIGEST: ${{ needs.prepare.outputs.task_digest }}
-          STAGES: '{"prepare":"${{ needs.prepare.result }}","basic":"${{ needs.basic.result }}","api":"${{ needs.api.result }}","security":"${{ needs.security.result }}","approval":"${{ needs.approve-external-fork.result }}","enqueue":"${{ needs.enqueue.result }}"}'
+          STAGES: '{"prepare":"${{ needs.prepare.result }}","basic":"${{ needs.basic.result }}","api":"${{ needs.api.result }}","security":"${{ needs.security.result }}","card":"${{ needs.review-card.result }}","approval":"${{ needs.approve-external-fork.result }}","enqueue":"${{ needs.enqueue.result }}"}'
         run: python3 scripts/ci/gateway.py finalize
   validate-worker:
     if: >-
@@ -309,8 +309,9 @@ jobs:
     concurrency:
       group: local-ci-publish
       cancel-in-progress: false
-    environment: github-pages
-    permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: write, pages: write, id-token: write}
+    outputs:
+      dashboard_changed: ${{ steps.dashboard.outputs.changed }}
+    permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: write, pages: read}
     env:
       GH_TOKEN: ${{ github.token }}
       GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
@@ -351,13 +352,9 @@ jobs:
             }
             const content = data => JSON.stringify({schema: data?.schema, tasks: data?.tasks});
             core.setOutput('changed', content(previous) !== content(next));
-      - uses: actions/configure-pages@v5
-        if: steps.dashboard.outputs.changed == 'true'
       - uses: actions/upload-pages-artifact@v3
         if: steps.dashboard.outputs.changed == 'true'
         with: {path: _site}
-      - uses: actions/deploy-pages@v4
-        if: steps.dashboard.outputs.changed == 'true'
       - name: Surface incomplete receiver operations
         if: steps.collect.outputs.receiver_errors != '0'
         run: exit 1
@@ -377,3 +374,16 @@ jobs:
                 receiver_round: String(Number(process.env.RECEIVER_ROUND) + 1)
               }
             });
+  deploy-dashboard:
+    name: 部署看板（不改变测试结论）
+    needs: publish
+    if: needs.publish.outputs.dashboard_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: local-ci-dashboard
+      cancel-in-progress: false
+    environment: github-pages
+    permissions: {pages: write, id-token: write}
+    steps:
+      - uses: actions/deploy-pages@v4
