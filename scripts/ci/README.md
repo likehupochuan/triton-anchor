@@ -10,7 +10,7 @@
 
 任务成功投递到 Gitee 后，网关才在 `main` 启动 `mode=receive`，没有定时触发。接收器按 `task_id` 等待，每分钟检查一次，每轮最多 5 小时 40 分钟，最多 3 轮；收到有效结果或任务失效立即结束，等不到结果才接续下一轮。轮数固定在代码中，不增加仓库变量。不同任务可以同时等待，接收不依赖新的服务器服务。
 
-每轮先解析 `local-ci-unified` 的 SHA，再按该 SHA 加载接收器。结果就绪后由串行的 `publish` 作业复查任务身份、回写 PR 并生成 Dashboard，只有看板内容变化才部署 Pages；生成时间变化不会触发重复部署。发布失败也仅在这三轮内补收，不重新执行构建。Worker 不连接 GitHub。健康采集在 CI 主机独立运行；watchdog 由 Gitee health 仓库的定时流水线运行。
+每轮先解析 `local-ci-unified` 的 SHA，再按该 SHA 加载接收器。结果就绪后由串行的 `publish` 作业复查任务身份、回写 PR 并生成 Dashboard，只有看板内容变化才部署 Pages；生成时间变化不会触发重复部署。发布失败也仅在这三轮内补收，不重新执行构建。Worker 不连接 GitHub。健康采集和 watchdog 暂由 CI 主机上的独立定时器运行，不依赖 Gitee Go。
 
 三轮耗尽后接收停止并报错，不取消服务器上的任务。需要继续收取已有任务时，在 Actions → Local CI / Orchestrator → Run workflow 选择 `main`、`mode=receive`，填写等待运行名称或 Gitee `tasks/` 文件名中的 `task_id`，`receiver_round` 保持 `1`。这只补收已有结果，不重新投递任务。
 

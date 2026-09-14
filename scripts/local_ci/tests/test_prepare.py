@@ -510,10 +510,6 @@ def test_install_prepares_then_starts_user_services(tmp_path):
     config_file.write_text(json.dumps(settings))
     credentials.write_text("FIXTURE=private\n")
     credentials.chmod(0o600)
-    unit_dir = tmp_path / "config/systemd/user"
-    unit_dir.mkdir(parents=True)
-    for name in install.OBSOLETE_UNITS:
-        (unit_dir / name).write_text("old same-host watchdog")
     events = []
     with (
         patch.dict(os.environ, {"XDG_CONFIG_HOME": str(tmp_path / "config")}),
@@ -528,30 +524,14 @@ def test_install_prepares_then_starts_user_services(tmp_path):
     assert events[:2] == ["env", "prepare"]
     assert ["systemctl", "--user", "daemon-reload"] in events
     assert any(isinstance(e, list) and "restart" in e and "triton-anchor-local-ci.service" in e for e in events)
-    assert ["systemctl", "--user", "disable", "--now", *install.OBSOLETE_UNITS] in events
     assert (tmp_path / "config/systemd/user/triton-anchor-local-ci.service").is_file()
-    assert not any((tmp_path / "config/systemd/user" / name).exists() for name in install.OBSOLETE_UNITS)
 
 
-def test_install_backup_supports_obsolete_watchdog_removal_and_rollback(tmp_path):
-    destination, backup = tmp_path / "units", tmp_path / "backup"
-    destination.mkdir()
-    old = destination / "triton-anchor-local-ci-watchdog.timer"
-    old.write_text("old same-host watchdog")
-    units = {"triton-anchor-local-ci.service": "new worker"}
-    manifest = install.install_units(units, destination, backup)
-    assert manifest["units"][old.name] == {"existed": True, "removed": True}
-    assert old.exists()  # The caller stops/disables the loaded unit before unlinking it.
-    old.unlink()
-    assert install.rollback_units(backup, apply=True)["scope"] == "user"
-    assert old.read_text() == "old same-host watchdog"
-
-
-def test_rendered_worker_units_do_not_include_watchdog(tmp_path):
+def test_rendered_worker_units_include_local_watchdog_and_control_update(tmp_path):
     units = install.render_units(
         config(tmp_path), tmp_path / "config.json", tmp_path / "credentials.env"
     )
-    assert not any("watchdog" in name for name in units)
+    assert "triton-anchor-local-ci-watchdog.timer" in units
     assert "triton-anchor-local-ci-health.timer" in units
     assert "triton-anchor-local-ci-retention.timer" in units
     assert "triton-anchor-local-ci-control-update.timer" in units

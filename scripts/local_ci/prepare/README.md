@@ -20,7 +20,7 @@ python3 bootstrap_control.py \
 
 引导脚本不会从可变分支下载后直接执行代码：它在写入前核对远端分支尖端，在浅克隆后再次核对固定 SHA，然后只调用该提交内的正式安装器。目标目录已经存在时，仅接受来源一致、无本地修改且恰好位于该 SHA 的 checkout，不覆盖未知目录。安装失败后保留固定 checkout，修复环境后可用同一命令幂等重试。引导脚本本身仍必须通过受信任通道分发，不能用 `curl <可变分支> | python` 代替。
 
-安装器读取私有 `KEY=value` 凭据文件，值含空格时使用引号；文件必须属于 CI 用户且权限为 600。安装完成后，`triton-anchor-local-ci-control-update.timer` 每约五分钟检查 Gitee，只允许干净 checkout 快进，并在没有任务占用控制锁时切换版本、重启 Worker。非快进或本地修改会使更新失败并保留现场。所有 profile 使用顶层 `image` 指定的同一个镜像 digest，分支差异由只读依赖挂载和环境变量提供，不再构建派生镜像。安装器检查依赖与基础工具是否可用，实测 Rootless Docker 资源限制，然后安装并启动 Worker、control-update、health、retention 用户服务和定时器。watchdog 由 Gitee health 仓库的定时流水线执行；升级安装时会停用并删除旧的同机 watchdog units。已有 units 会备份，可用 `--rollback <备份目录> --apply` 恢复。机器需要已有的 Rootless Docker 用户服务和持久用户会话。
+安装器读取私有 `KEY=value` 凭据文件，值含空格时使用引号；文件必须属于 CI 用户且权限为 600。安装完成后，`triton-anchor-local-ci-control-update.timer` 每约五分钟检查 Gitee，只允许干净 checkout 快进，并在没有任务占用控制锁时切换版本、重启 Worker。非快进或本地修改会使更新失败并保留现场。所有 profile 使用顶层 `image` 指定的同一个镜像 digest，分支差异由只读依赖挂载和环境变量提供，不再构建派生镜像。安装器检查依赖与基础工具是否可用，实测 Rootless Docker 资源限制，然后安装并启动 Worker、control-update、health、watchdog、retention 用户服务和定时器。watchdog 暂由 CI 主机上的独立 timer 运行，不依赖 Gitee Go；同机停机时无法发出离线告警。已有 units 会备份，可用 `--rollback <备份目录> --apply` 恢复。机器需要已有的 Rootless Docker 用户服务和持久用户会话。
 
 不加 `--apply` 输出安装计划；`--render-dir <目录>` 保存 units。`preflight.py --config <配置> --configuration-only` 可单独检查配置；`--probe-runtime` 实测已准备环境。可用 `control_update.py --config <配置>` 预览远端控制版本，带 `--apply` 执行同一安全更新。依赖更新时可运行 `rotate.py --config <配置> --profile <名称>`，登记并探测新的依赖环境，不构建镜像。环境准备不再执行完整 Wheel 构建、安装或 smoke；被测源码的验证在正式任务中完成，单独更新控制代码不会触发环境重校验。以上入口均支持 `--help`。
 
