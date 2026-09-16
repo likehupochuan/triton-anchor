@@ -103,11 +103,20 @@ class FakeGitHub:
     def status_matches(self, task, state, description):
         return self.latest_statuses.get(task["task_id"]) == (state, description)
 
-    def check(self, *_args, **_kwargs):
+    def check(self, *args, **_kwargs):
+        if not hasattr(self, "check_calls"):
+            self.check_calls = []
+        self.check_calls.append(args)
         return False
 
     def owns_preflight(self, task):
         return True
+
+    def retire_open_checks(self, task, **kwargs):
+        pass
+
+    def preflight_finished(self, task):
+        return False
 
     def restore_preflight(self, task):
         pass
@@ -969,23 +978,31 @@ README only
             g.publish_preflight_checks(self.gh, self.task,
                                       {"basic": "failure", "api": "skipped", "security": "cancelled"}, False)
         self.assertEqual([call.args[3] for call in check.call_args_list],
-                         ["failure", "action_required", "cancelled"])
-        self.assertIn("skipped", check.call_args_list[1].args[4])
+                         ["failure"])
         self.assertTrue(all(call.args[4].isascii() and call.args[5].isascii() for call in check.call_args_list))
         stages = {key: "cancelled" for key in ("prepare", *g.CHECK_NAMES)}
         g.finalize_preflight(self.gh, self.task, stages)
-        self.assertEqual(self.gh.statuses[-1][1], "error")
+        self.assertEqual(self.gh.check_calls[-1][1:4], ("preflight", "completed", "cancelled"))
+        self.assertEqual(self.gh.statuses, [])
 
-    def test_stage_completion_updates_only_that_check_without_summary_or_comments(self):
+    def test_stage_completion_advances_only_after_success_without_summary_or_comments(self):
         outcomes = {"success": "success", "failure": "failure",
                     "cancelled": "cancelled", "skipped": "action_required"}
         for stage in g.CHECK_NAMES:
             for outcome, conclusion in outcomes.items():
                 with self.subTest(stage=stage, outcome=outcome), patch.object(self.gh, "check", return_value=True) as check:
-                    self.assertTrue(g.sync_preflight(self.gh, self.task, {stage: outcome}))
-                    check.assert_called_once()
-                    self.assertEqual(check.call_args.args[1:4], (stage, "completed", conclusion))
-                    self.assertEqual(check.call_args.args[4], f"local-ci/{stage}: {outcome}")
+                    changed = g.sync_preflight(self.gh, self.task, {stage: outcome})
+                    if outcome == "skipped":
+                        self.assertFalse(changed)
+                        check.assert_not_called()
+                        continue
+                    self.assertTrue(changed)
+                    self.assertEqual(check.call_args_list[0].args[1:4], (stage, "completed", conclusion))
+                    advances = outcome == "success" and stage != "security"
+                    self.assertEqual(check.call_count, 2 if advances else 1)
+                    if advances:
+                        successor = "api" if stage == "basic" else "security"
+                        self.assertEqual(check.call_args.args[1:4], (successor, "in_progress", None))
         self.assertEqual(self.gh.writes, [])
 
     def test_late_stage_completion_cannot_overwrite_a_new_task(self):
@@ -996,6 +1013,30 @@ README only
         with patch.object(self.gh, "check") as check:
             self.assertFalse(g.sync_preflight(self.gh, self.task, {"security": "cancelled"}))
             check.assert_not_called()
+
+    def test_late_stage_completion_cannot_advance_a_finished_preflight(self):
+        with patch.object(self.gh, "preflight_finished", return_value=True), patch.object(self.gh, "check") as check:
+            self.assertFalse(g.sync_preflight(self.gh, self.task, {"basic": "success"}))
+            check.assert_not_called()
+
+    def test_duplicate_predecessor_cannot_reopen_completed_successor(self):
+        gh = g.GitHub(g.REPOSITORY, token="fixture")
+        row = {"id": 21, "name": "local-ci/api", "status": "completed", "conclusion": "success",
+               "external_id": f"triton-anchor-local-ci:api:{self.task['task_id']}",
+               "app": {"slug": "github-actions"}}
+        with patch.object(gh, "request", return_value={"check_runs": [row]}) as request:
+            self.assertFalse(gh.check(self.task, "api", "in_progress", None, "Running", "Previous stage passed"))
+            self.assertTrue(all(call.args[1:] == () for call in request.call_args_list))
+
+    def test_dispatch_success_precedes_waiting_for_worker_status(self):
+        control = self.store(g.CONTROL_BRANCH)
+        events = []
+        with patch.object(self.gh, "check", side_effect=lambda *args: events.append((args[1], args[2], args[3]))), \
+                patch.object(self.gh, "status", side_effect=lambda *args: events.append(("summary", args[1]))):
+            g.enqueue(self.task, self.gh, control, self.source)
+        self.assertEqual(events, [("preflight", "completed", "success"),
+                                  ("dispatch", "in_progress", None),
+                                  ("dispatch", "completed", "success"), ("summary", "pending")])
 
     def test_push_checks_use_tested_commit_and_cannot_overwrite_a_new_owner(self):
         task = {**self.task, "pr_number": 0, "tested_sha": self.head, "event_kind": "push"}
@@ -1017,7 +1058,7 @@ README only
             "GITHUB_RUN_ID": "1234",
         }):
             self.assertTrue(g.sync_preflight(gh, task, {"basic": "success"}))
-            self.assertEqual(len(writes), 1)
+            self.assertEqual(len(writes), 2)
             path, method, payload = writes[0]
             self.assertEqual((path, method), ("check-runs", "POST"))
             self.assertEqual(payload["head_sha"], task["head_sha"])
@@ -1055,6 +1096,9 @@ README only
             if method == "POST" and path == "check-runs":
                 checks.append({**data, "id": len(checks) + 1, "app": {"slug": "github-actions"}})
                 return {}
+            if method == "PATCH" and path.startswith("check-runs/"):
+                next(row for row in checks if row["id"] == int(path.split("/")[-1])).update(data)
+                return {}
             raise AssertionError((path, method))
 
         with patch.object(g, "is_current", return_value=True), \
@@ -1064,18 +1108,18 @@ README only
             for key in g.CHECK_NAMES:
                 self.assertFalse(g.sync_preflight(gh, task, {key: "success"}))
             g.finalize_preflight(gh, task, {"prepare": "success", "basic": "failure"})
-            self.assertEqual([row["state"] for row in reversed(statuses)], ["pending", "failure"])
-            self.assertEqual(checks, [])
+            self.assertEqual(statuses, [])
+            self.assertEqual([row["name"] for row in checks], ["local-ci/preflight"])
             g.finalize_preflight(gh, task, {"enqueue": "success"})
-            self.assertEqual(len(statuses), 2)
+            self.assertEqual(len(statuses), 0)
 
             # New manual preflight owns the same SHA before its Gitee enqueue.
             g.begin_preflight(gh, manual)
-            self.assertEqual(len(checks), 3)
+            self.assertEqual(len(checks), 2)
             self.assertTrue(gh.owns_preflight(manual))
             self.assertFalse(gh.owns_preflight(task))
             g.finalize_preflight(gh, task, {"basic": "failure"})
-            self.assertEqual(len(statuses), 3)
+            self.assertEqual(len(statuses), 0)
             control = SimpleNamespace(get=lambda path: {"task_id": task["task_id"]}
                                       if path.startswith("current/") else None)
             self.assertFalse(g.current_task(gh, control, task))
@@ -1085,8 +1129,7 @@ README only
             self.assertTrue(gh.owns_preflight(task))
             self.assertFalse(gh.owns_preflight(manual))
             g.finalize_preflight(gh, manual, {"basic": "failure"})
-            self.assertEqual(len(statuses), 4)
-            self.assertEqual(statuses[0]["state"], "pending")
+            self.assertEqual(len(statuses), 0)
             self.assertEqual(len(checks), 3)
             for url in ("https://github.com/example/repo/actions/runs/1",
                         "https://gitee.com/example/results/blob/results/result.json", ""):
@@ -1118,13 +1161,13 @@ README only
             self.assertTrue(g.publication_description(state, "a" * 64).isascii())
         stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
         g.finalize_preflight(self.gh, self.task, {**stages, "approval": "failure"})
-        self.assertTrue(self.gh.latest_statuses[self.task["task_id"]][1].isascii())
+        self.assertTrue(self.gh.check_calls[-1][4].isascii())
         self.assertEqual(self.gh.comments, [])
 
     def test_failed_card_is_not_reported_as_a_rejected_approval(self):
         stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
         g.finalize_preflight(self.gh, self.task, {**stages, "card": "failure", "approval": "skipped"})
-        self.assertIn("card publication failed", self.gh.latest_statuses[self.task['task_id']][1])
+        self.assertIn("card publication failed", self.gh.check_calls[-1][4])
         self.assertEqual(self.gh.comments, [])
 
     def test_approval_card_has_frozen_identity_evidence_and_admission_boundary(self):
@@ -1136,8 +1179,7 @@ README only
         self.assertNotIn("控制版本", card)
         self.assertNotIn(self.task["task_id"], card)
         for text in ("基础检查 | 通过", "API 兼容性 | 通过", "安全检查 | 通过",
-                     "等待维护者审批", "local-ci-fork-approval", "/actions/runs/12345",
-                     "并不代表代码安全或测试通过"):
+                     "等待维护者审批", "local-ci-fork-approval", "/actions/runs/12345"):
             self.assertIn(text, card)
         blocked = g.approval_card(self.task, {**stages, "basic": "failure"}, False)
         self.assertEqual(blocked, "")
@@ -1183,8 +1225,9 @@ README only
         message = self.gh.comments[0]
         for text in ("感谢您的贡献", *errors, "直接更新 PR 描述", "目前无需等待审批"):
             self.assertIn(text, message)
-        self.assertEqual(self.gh.statuses[-1][1], "failure")
-        self.assertTrue(self.gh.latest_statuses[self.task['task_id']][1].isascii())
+        self.assertEqual(self.gh.statuses, [])
+        self.assertEqual(self.gh.check_calls[-1][1:4], ("preflight", "completed", "failure"))
+        self.assertTrue(self.gh.check_calls[-1][4].isascii())
 
     def test_result_comment_is_chinese_scoped_to_run_and_separates_unexecuted_checks(self):
         result = self.result()
@@ -1367,8 +1410,11 @@ README only
         with patch.object(client, "request", side_effect=request):
             context = client.approval_context(self.task)
             card = g.approval_card(self.task, dict.fromkeys(("prepare", *g.CHECK_NAMES), "success"), True, context=context)
-            for text in ("贡献者说明（待服务器验证）", "contributor", "2 个文件，+5 / -1", "CI 工作流或控制脚本", "依赖、构建或安装配置", "/pull/7/files"):
+            for text in ("contributor", "2 个文件，+5 / -1", "CI 工作流或控制脚本", "依赖、构建或安装配置", "/pull/7/files"):
                 self.assertIn(text, card)
+            self.assertNotIn("贡献者说明", card)
+            self.assertNotIn("任务范围与审批边界", card)
+            self.assertLess(card.index("本次审批对应的固定版本"), card.index("本次改动概览"))
             pull["head"] = {**pull["head"], "sha": "e" * 40}
             with self.assertRaisesRegex(ValueError, "PR changed"):
                 client.approval_context(self.task)
@@ -1392,11 +1438,11 @@ README only
         link = g.feedback_evidence({"kind": "architecture", "evidence": ["src/file.py:17"]}, self.task, {})
         self.assertIn(f"/blob/{self.tested}/src/file.py#L17", link)
 
-    def test_new_preflight_resets_summary_and_all_checks(self):
+    def test_new_preflight_creates_only_progress_without_pending_summary(self):
         with patch.object(self.gh, "check") as check:
             g.begin_preflight(self.gh, self.task)
-        self.assertEqual(self.gh.statuses[-1][1], "pending")
-        self.assertEqual([call.args[1] for call in check.call_args_list], list(g.CHECK_NAMES))
+        self.assertEqual(self.gh.statuses, [])
+        self.assertEqual([call.args[1] for call in check.call_args_list], ["preflight"])
         self.assertTrue(all(call.args[2:4] == ("queued", None) for call in check.call_args_list))
 
     def test_new_preflight_blocks_old_result_before_new_gitee_enqueue(self):
@@ -1422,8 +1468,8 @@ README only
         stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
         stages.update(approval="failure", enqueue="skipped")
         g.finalize_preflight(self.gh, self.task, stages)
-        self.assertEqual(self.gh.statuses[-1][1], "error")
-        self.assertIn("approval", self.gh.latest_statuses[self.task['task_id']][1])
+        self.assertEqual(self.gh.check_calls[-1][1:4], ("preflight", "completed", "failure"))
+        self.assertIn("approval", self.gh.check_calls[-1][4])
         self.assertEqual(self.gh.comments, [])
         before = len(self.gh.statuses)
         with patch.object(self.gh, "owns_preflight", return_value=False):
@@ -1700,7 +1746,7 @@ class WorkflowStructureTests(unittest.TestCase):
                 self.assertEqual(step["if"], "steps.dashboard.outputs.changed == 'true'")
         self.assertEqual(
             set(g.REQUIRED_CONTEXTS),
-            {"local-ci/basic", "local-ci/api", "local-ci/security", "local-ci/summary"},
+            {"local-ci/preflight", "local-ci/basic", "local-ci/api", "local-ci/security", "local-ci/summary"},
         )
 
 

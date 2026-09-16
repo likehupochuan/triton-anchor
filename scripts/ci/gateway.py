@@ -61,7 +61,8 @@ CHECK_NAMES = {
     "api": "local-ci/api",
     "security": "local-ci/security",
 }
-REQUIRED_CONTEXTS = (*CHECK_NAMES.values(), "local-ci/summary")
+REQUIRED_CONTEXTS = ("local-ci/preflight", *CHECK_NAMES.values(), "local-ci/summary")
+ALL_CHECK_NAMES = {**CHECK_NAMES, "preflight": "local-ci/preflight", "dispatch": "local-ci/dispatch"}
 CHECK_CONCLUSIONS = {
     "success",
     "failure",
@@ -299,7 +300,7 @@ class GitHub:
         url: str = "",
     ) -> bool:
         """Update only this task's Check Run; preserve other tasks as history."""
-        if key not in CHECK_NAMES or status not in {
+        if key not in ALL_CHECK_NAMES or status not in {
             "queued",
             "in_progress",
             "completed",
@@ -309,9 +310,9 @@ class GitHub:
             conclusion and conclusion not in CHECK_CONCLUSIONS
         ):
             raise ValueError("Invalid CI Check Run conclusion")
-        if has_native_preflight(task):
+        if key in CHECK_NAMES and has_native_preflight(task):
             return False
-        name = CHECK_NAMES[key]
+        name = ALL_CHECK_NAMES[key]
         external_id = f"triton-anchor-local-ci:{key}:{task['task_id']}"
         runs = self.check_runs(task, key)
         owned = [
@@ -324,8 +325,10 @@ class GitHub:
         existing = max(owned, key=lambda run: int(run.get("id", 0)), default=None)
         # A rerun must not reopen a completed check with its previous conclusion.
         if existing and status != "completed" and existing.get("status") == "completed":
+            if status == "in_progress":
+                return False  # A delayed stage publisher must not reopen its successor.
             existing = None
-        if status == "queued":
+        if status in {"queued", "in_progress"}:
             trusted = [
                 run for run in runs
                 if run.get("name") == name
@@ -388,7 +391,7 @@ class GitHub:
         for page in range(1, 21):
             response = self.request(
                 f"commits/{sha or task['tested_sha']}/check-runs?check_name="
-                f"{quote(CHECK_NAMES[key], safe='')}&filter=all&per_page=100&page={page}"
+                f"{quote(ALL_CHECK_NAMES[key], safe='')}&filter=all&per_page=100&page={page}"
             )
             batch = response.get("check_runs", [])
             runs.extend(batch)
@@ -398,6 +401,13 @@ class GitHub:
 
     def owns_preflight(self, task: dict) -> bool:
         """A newly prepared task owns the gate even before its Gitee enqueue."""
+        owners = [row for row in self.check_runs(task, "preflight")
+                  if row.get("name") == ALL_CHECK_NAMES["preflight"]
+                  and (row.get("app") or {}).get("slug") == "github-actions"
+                  and str(row.get("external_id", "")).startswith("triton-anchor-local-ci:preflight:")]
+        if owners:
+            latest_owner = max(owners, key=lambda row: int(row["id"]))
+            return latest_owner["external_id"] == f"triton-anchor-local-ci:preflight:{task['task_id']}"
         latest = self.latest_summary(task)
         owner = urlparse((latest or {}).get("target_url") or "").fragment
         expected = f"local-ci-task={task['task_id']}"
@@ -424,6 +434,32 @@ class GitHub:
             ):
                 return False
         return True
+
+    def retire_open_checks(self, task: dict, *, superseded: bool = False) -> None:
+        """Close existing unfinished checks without creating unreached stages."""
+        for key, name in ALL_CHECK_NAMES.items():
+            for row in self.check_runs(task, key):
+                identity = str(row.get("external_id", ""))
+                ours = identity == f"triton-anchor-local-ci:{key}:{task['task_id']}"
+                if (row.get("name") != name or row.get("status") == "completed"
+                        or (row.get("app") or {}).get("slug") != "github-actions"
+                        or not identity.startswith(("triton-anchor-local-ci:", "triton-anchor-ci-v4:"))
+                        or ours == superseded):
+                    continue
+                self.request(f"check-runs/{row['id']}", "PATCH", {
+                    "status": "completed", "conclusion": "cancelled",
+                    "output": {"title": "Superseded task cancelled" if superseded else "Stage not completed",
+                               "summary": "A newer task owns this commit." if superseded else
+                               "The workflow ended before this stage completed."},
+                })
+
+    def preflight_finished(self, task: dict) -> bool:
+        owned = [row for row in self.check_runs(task, "preflight")
+                 if row.get("external_id") == f"triton-anchor-local-ci:preflight:{task['task_id']}"
+                 and row.get("name") == ALL_CHECK_NAMES["preflight"]
+                 and (row.get("app") or {}).get("slug") == "github-actions"]
+        latest = max(owned, key=lambda row: int(row["id"]), default={})
+        return latest.get("status") == "completed"
 
     def finish_inactive_pr(self, pr_number: int) -> bool:
         """Closing/drafting a PR also terminates checks waiting before dispatch."""
@@ -463,7 +499,7 @@ class GitHub:
             runs = response.get("check_runs", [])
             for run in runs:
                 if (
-                    run.get("name") in CHECK_NAMES.values()
+                    run.get("name") in ALL_CHECK_NAMES.values()
                     and (run.get("app") or {}).get("slug") == "github-actions"
                     and str(run.get("external_id", "")).startswith(
                         ("triton-anchor-local-ci:", "triton-anchor-ci-v4:")
@@ -868,6 +904,10 @@ def enqueue(task: dict, gh: GitHub, control: GitStore, source: Path) -> None:
     validate_task(task)
     if validate_pr_info(task) or not is_current(gh, task) or not gh.owns_preflight(task):
         raise ValueError("PR information or task freshness no longer permits dispatch")
+    gh.check(task, "preflight", "completed", "success", "Preflight and approval passed",
+             "All prerequisites passed; dispatch can start.", workflow_url())
+    gh.check(task, "dispatch", "in_progress", None, "Dispatching Local CI task",
+             "Publishing the frozen task and code to Gitee.", workflow_url())
     checked_out = (
         subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source)
         .decode()
@@ -952,6 +992,8 @@ def enqueue(task: dict, gh: GitHub, control: GitStore, source: Path) -> None:
         validate_task(old)
         documents[f"tasks/{task['task_id']}.json"] = old
     control.put(documents, (f"tasks/{task['task_id']}.json",))
+    gh.check(task, "dispatch", "completed", "success", "Local CI task dispatched",
+             "The immutable task and code were published to Gitee.", workflow_url())
     gh.status(task, "pending", "Local CI: task published to Gitee; awaiting worker results", workflow_url())
 
 
@@ -1123,10 +1165,11 @@ def approval_card(task: dict, stages: dict, eligible: bool, approval_error: str 
              "| 前置检查 | 结果 |", "| --- | --- |"]
     for key in ("prepare", *CHECK_NAMES):
         lines.append(f"| {DISPLAY_CHECKS[key]} | {display_state(stages.get(key, 'skipped'))} |")
-    fields = pr_fields(task.get("description", ""))
-    lines.extend(["", "### 贡献者说明（待服务器验证）", ""])
-    for key, label in (("summary", "改动目的"), ("scope", "影响范围"), ("validation", "已做验证")):
-        lines.append(f"- {label}：{feedback_text(fields.get(key) or '未提供', 800)}")
+    lines.extend(["", "### 本次审批对应的固定版本", "",
+                  f"- 目标分支：{feedback_text(task['target_branch'])}"])
+    for key, label in (("head_sha", "PR 提交"), ("base_sha", "目标分支基线"),
+                       ("tested_sha", "被测合并提交")):
+        lines.append(f"- {label}：`{task[key]}`")
     if context:
         lines.extend(["", "### 本次改动概览", "",
                       f"- 贡献者：{feedback_text(context['author'])}",
@@ -1135,17 +1178,6 @@ def approval_card(task: dict, stages: dict, eligible: bool, approval_error: str 
                       f"- 审批关注：{feedback_text('；'.join(context['attention']) or '请结合文件 diff 判断改动是否符合 PR 意图')}",
                       "", *(f"- {feedback_text(path)}" for path in context['files'][:12]),
                       "", f"[查看完整文件差异](https://github.com/{task['repository']}/pull/{task['pr_number']}/files)"])
-    lines.extend(["", "服务器将执行候选代码的构建/测试脚本并使用计算与模型资源；前置检查通过不代表候选代码已经完成 Local CI 验证。"])
-    lines.extend(["", "### 本次审批对应的固定版本", "",
-                  f"- 目标分支：{feedback_text(task['target_branch'])}"])
-    for key, label in (("head_sha", "PR 提交"), ("base_sha", "目标分支基线"),
-                       ("tested_sha", "被测合并提交")):
-        lines.append(f"- {label}：`{task[key]}`")
-    lines.extend(["", "### 任务范围与审批边界", "",
-                  "按显式 full 要求覆盖全部可用工具。" if task.get("full") else
-                  "由服务器 Codex 依据实际 diff 和 PR 意图选择构建、测试及必要验证；不预先声称已执行。",
-                  "每次都需完成变更验证、PR 信息核对和架构契约审查；后端、算子与性能验证受服务器实际 profile 能力限制。",
-                  "审批允许此冻结版本进入服务器任务容器执行，并不代表代码安全或测试通过；提交或 PR 信息变化后旧审批不能复用。"])
     if approval_error:
         lines.extend(["", "审批环境配置无法确认，暂不派发：" + feedback_text(approval_error)])
     if not eligible:
@@ -1196,7 +1228,11 @@ def publish_preflight_checks(
     for key in CHECK_NAMES:
         if partial and key not in stages:
             continue
+        if not partial and stages.get("prepare", "success") != "success":
+            break
         outcome = str(stages.get(key, "skipped"))
+        if outcome == "skipped":
+            continue
         # GitHub treats skipped/neutral required checks as passing. Keep an
         # unexecuted prerequisite blocking without misreporting a test failure.
         conclusion = {"success": "success", "failure": "failure", "cancelled": "cancelled"}.get(outcome, "action_required")
@@ -1210,38 +1246,37 @@ def publish_preflight_checks(
             f"[Workflow evidence]({workflow_url()})",
             workflow_url(),
         )
+        if not partial and outcome != "success":
+            break
     return changed
 
 
 def sync_preflight(gh: GitHub, task: dict, stages: dict) -> bool:
-    """A trusted completion job updates only its stage, never the CI summary."""
+    """Publish this stage and admit its successor, never changing CI summary."""
     if not isinstance(stages, dict) or not stages or set(stages) - CHECK_NAMES.keys() or any(
         not isinstance(value, str) or value not in {"success", "failure", "cancelled", "skipped"}
         for value in stages.values()
     ):
         raise ValueError("Invalid preflight stage results")
-    if not is_current(gh, task) or not gh.owns_preflight(task):
+    if not is_current(gh, task) or not gh.owns_preflight(task) or gh.preflight_finished(task):
         return False
-    return publish_preflight_checks(gh, task, stages, False, partial=True)
+    changed = publish_preflight_checks(gh, task, stages, False, partial=True)
+    keys = list(CHECK_NAMES)
+    for key, outcome in stages.items():
+        if outcome == "success" and keys.index(key) + 1 < len(keys):
+            next_key = keys[keys.index(key) + 1]
+            changed |= gh.check(task, next_key, "in_progress", None,
+                                f"{CHECK_NAMES[next_key]}: running",
+                                "The preceding check passed; this stage can now run.", workflow_url())
+    return changed
 
 
 def begin_preflight(gh: GitHub, task: dict) -> None:
     if not is_current(gh, task):
         raise ValueError("Task changed before preflight initialization")
-    gh.status(task, "pending", "Local CI: preflight running; approval and worker execution not started", workflow_url())
-    for key in CHECK_NAMES:
-        gh.check(
-            task,
-            key,
-            "queued",
-            None,
-            f"{CHECK_NAMES[key]}: queued",
-            f"Waiting for this task's preflight stage. Task `{task['task_id']}`. "
-            f"[Workflow progress]({workflow_url()})",
-            workflow_url(),
-        )
-    gh.reconcile_legacy_statuses(task, "pending",
-                                "Local CI: preflight running; approval and worker execution not started", workflow_url())
+    gh.check(task, "preflight", "queued", None, "Checking PR information",
+             "Preflight has started; worker dispatch has not started.", workflow_url())
+    gh.retire_open_checks(task, superseded=True)
 
 
 def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
@@ -1251,6 +1286,7 @@ def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
         # The receiver owns summary after dispatch, possibly already completed.
         return
     publish_preflight_checks(gh, task, stages, False)
+    gh.retire_open_checks(task)
     if any(stages.get(key) == "failure" for key in ("prepare", *CHECK_NAMES)):
         state, description = "failure", "Local CI: preflight checks failed; see workflow"
     elif any(stages.get(key) != "success" for key in ("prepare", *CHECK_NAMES)):
@@ -1261,8 +1297,12 @@ def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
         state, description = "error", "Local CI: approval failed or cancelled; worker verification not started"
     else:
         state, description = "error", "Local CI: task dispatch or receiver startup failed; see workflow"
-    gh.status(task, state, description, workflow_url())
-    gh.reconcile_legacy_statuses(task, state, description, workflow_url())
+    key = "dispatch" if stages.get("enqueue") in {"failure", "cancelled"} else "preflight"
+    gh.check(task, key, "completed", "cancelled" if "cancelled" in stages.values() else "failure",
+             description, description, workflow_url())
+    if stages.get("enqueue") in {"failure", "cancelled"}:
+        gh.status(task, state, description, workflow_url())
+        gh.reconcile_legacy_statuses(task, state, description, workflow_url())
 
 
 def current_task(gh: GitHub, control: GitStore, task: dict) -> bool:
@@ -1711,8 +1751,14 @@ def main() -> int:
             raise ValueError("PR changed before information publication")
         errors = validate_pr_info(task)
         if errors:
-            gh.status(task, "failure", "Local CI: PR information incomplete; see PR comment", workflow_url())
+            gh.check(task, "preflight", "completed", "failure", "PR information incomplete",
+                     "Update the PR information before Basic CI can start.", workflow_url())
             gh.comment(task, pr_info_comment(errors))
+        else:
+            gh.check(task, "preflight", "in_progress", None, "Preflight checks running",
+                     "PR information passed; Basic, API and Security run in order.", workflow_url())
+            gh.check(task, "basic", "in_progress", None, "local-ci/basic: running",
+                     "PR information passed; Basic CI can now run.", workflow_url())
         return int(bool(errors))
     if args.command == "card":
         if not is_current(gh, task) or not gh.owns_preflight(task):
@@ -1725,8 +1771,8 @@ def main() -> int:
             # Defense in depth for manual CLI use or an older workflow caller.
             # Failed prerequisites get Checks/status feedback, never an approval card.
             publish_preflight_checks(gh, task, stages, False)
-            gh.status(task, "failure" if "failure" in stages.values() else "error",
-                      "Local CI: preflight not passed; approval and dispatch skipped", workflow_url())
+            gh.check(task, "preflight", "completed", "failure",
+                     "Preflight not passed", "Approval and dispatch were not started.", workflow_url())
             output("eligible", False)
             return 0
         approval_error = ""
@@ -1754,8 +1800,8 @@ def main() -> int:
             description = "Local CI: awaiting maintainer approval"
         else:
             description = "Local CI: preflight passed; awaiting dispatch"
-        gh.status(task, state, description, workflow_url())
-        gh.reconcile_legacy_statuses(task, state, description, workflow_url())
+        gh.check(task, "preflight", "in_progress" if eligible else "completed",
+                 None if eligible else "failure", description, description, workflow_url())
         output("eligible", eligible)
         return 0
     if args.command == "api":
