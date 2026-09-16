@@ -120,7 +120,7 @@ function renderDetail(run) {
     card.append(el('strong','',label+' '),badge(item?.status||'unknown'),el('p','',publicText(item?.summary)||'尚未收到此项审查结果。'));
     evidenceList(card,item?.evidence);ai.append(card);
   }
-  for(const finding of arr(review.findings)){const risk=({critical:'严重',high:'高',medium:'中',low:'低',info:'提示'})[finding.severity]||'未标注';const card=el('div','ci-review');card.append(el('strong','',(finding.blocking?'合入阻塞':'需要人工判断')+' · 风险：'+risk),el('p','',publicText(finding.summary||finding.title)||'发现'));if(finding.qualification)card.append(el('p','ci-muted',publicText(finding.qualification)));evidenceList(card,finding.code_evidence);ai.append(card);}
+  for(const finding of arr(review.findings)){const risk=({critical:'严重',high:'高',medium:'中',low:'低',info:'提示'})[finding.severity]||'未标注';const card=el('div','ci-review');card.append(el('strong','',(finding.blocking?'合入阻塞':'非阻塞发现')+' · 风险：'+risk),el('p','',publicText(finding.summary||finding.title)||'发现'));if(finding.qualification)card.append(el('p','ci-muted',publicText(finding.qualification)));evidenceList(card,finding.code_evidence);ai.append(card);}
   }
   const performance=section(root,'性能变化');performance.append(el('p','ci-muted','性能回退或纯耗时变化仅报告；基准执行失败仍会阻塞。适用能力以该任务的环境声明为准。'));
   if(!arr(run.performance).length)performance.append(el('p','ci-muted','本次没有可展示的性能测量或基线对比。请结合上方检查状态判断是否适用。'));

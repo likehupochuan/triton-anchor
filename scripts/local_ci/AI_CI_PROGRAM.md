@@ -116,7 +116,12 @@ ops 或 categories 展开后超过上限会报错，不自动截断。空 impact
 不要求先把每条规范形式化成 checker。无相关架构变更时说明检查范围即可。
 
 专项审查结合 PR 意图、标签和实际风险。明确严重高风险问题（high/critical）阻塞通过；
-其余风险作为 warning 供维护者判断。不要把风格偏好当作项目契约。
+其余风险作为非阻塞发现报告。能通过阅读代码或补充验证解决的不确定性应先自行核实；
+确需维护者决定时，说明待决事项、已验证事实及取舍。不要把风格偏好当作项目契约。
+
+最终问题清单只写在顶层 `findings`；各项 `reviews` 保留结论和证据，不另存 `findings`。
+汇总时按根因、代码位置和实际行为合并同一问题的说明与证据，避免总体和专项审查重复记录。
+同一文件中的不同问题仍分别保留；无法确认是否同一问题时不要强行合并。
 
 可以补测试、尝试修复、创建独立实验目录，但要区分原始 PR 与修改后实验。
 产品源码修复后通过不能抹去原始代码失败；环境修复后可重新验证原始源码，保留异常与修复记录。
@@ -152,7 +157,7 @@ PR 和 push 任务生成的 `ai_custom_tools/validation.md`，标题、正文、
   "reviews": [
     {"kind": "pr_info", "status": "pass", "summary": "意图和属性的核对结论", "evidence": []},
     {"kind": "architecture", "status": "pass", "summary": "所查契约与判断依据", "evidence": ["代码路径:行号"]},
-    {"kind": "intent", "status": "pass", "summary": "专项审查结论", "findings": [], "evidence": []}
+    {"kind": "intent", "status": "pass", "summary": "专项审查结论", "evidence": []}
   ],
   "findings": [],
   "blocking_reasons": [],

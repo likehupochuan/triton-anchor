@@ -107,7 +107,8 @@ def seal_result(
         raise ContractError("Findings must be a list")
     findings = list(findings)
     for review in reviews:
-        for finding in review.get("findings", []):
+        # Fold older nested findings into the single published findings list.
+        for finding in review.pop("findings", []):
             if finding not in findings:
                 findings.append(finding)
     if any(not isinstance(finding, dict) for finding in findings):
