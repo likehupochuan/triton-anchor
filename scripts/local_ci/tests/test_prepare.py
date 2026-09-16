@@ -761,6 +761,20 @@ def test_deployment_config_preview_atomic_copy_and_structural_noop(tmp_path):
         assert list(destination.parent.iterdir()) == [destination]
 
 
+def test_deployment_config_rejects_parent_symlink_into_control_checkout(tmp_path):
+    from prepare import deployment_config
+
+    control = tmp_path / "control"
+    control.mkdir()
+    alias = tmp_path / "runtime"
+    alias.symlink_to(control, target_is_directory=True)
+    settings = {**config(tmp_path), "control_root": str(control)}
+    with patch.object(deployment_config, "validate_deployment_config"):
+        with pytest.raises(ValueError, match="outside the control checkout"):
+            deployment_config.sync_deployment_config(settings, alias / "local-ci.json", apply=True)
+    assert not list(control.iterdir())
+
+
 def test_install_preview_uses_repository_source_without_creating_runtime_copy(tmp_path, capsys):
     settings = config(tmp_path)
     destination = tmp_path / "local-ci.json"

@@ -38,7 +38,7 @@ def validate_deployment_config(config: dict) -> None:
 def sync_deployment_config(config: dict, destination: Path, *, apply=False) -> dict:
     """Compare parsed JSON; publish atomically only when its content differs."""
     destination = Path(os.path.abspath(destination))
-    if destination.is_relative_to(Path(config["control_root"]).resolve()):
+    if destination.resolve().is_relative_to(Path(config["control_root"]).resolve()):
         raise ValueError("Runtime configuration must be outside the control checkout")
     if destination.is_symlink() or (
         destination.exists()

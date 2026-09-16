@@ -84,10 +84,18 @@ def test_incomplete_minimum_or_review_cannot_claim_pass(tmp_path, missing):
     assert result["blocking_reasons"]
 
 
-def test_high_risk_review_blocks_without_explicit_blocking_flag(tmp_path):
+@pytest.mark.parametrize("location", ["top", "review", "both"])
+def test_high_risk_review_blocks_without_explicit_blocking_flag(tmp_path, location):
     value = answer()
-    value["findings"] = [{"severity": "high", "summary": "Public behavior broken"}]
-    assert seal(tmp_path, value)["status"] == "fail"
+    finding = {"severity": "high", "summary": "Public behavior broken"}
+    if location in {"top", "both"}:
+        value["findings"] = [finding]
+    if location in {"review", "both"}:
+        value["reviews"][1]["findings"] = [finding]
+    result = seal(tmp_path, value)
+    assert result["status"] == "fail"
+    assert result["findings"] == [finding]
+    assert all("findings" not in review for review in result["reviews"])
 
 
 def test_missing_referenced_file_is_incomplete_but_large_file_is_omitted(tmp_path):
