@@ -14,14 +14,24 @@ through temporary build mounts; installation packages are not image layers.
 
 Keep the wheel checksums and build log alongside the foundation recipe. APT
 packages follow the Ubuntu repositories at build time.
-Pin the final image with the top-level `image` digest in the private configuration
-and load it into the server's Rootless Docker daemon. Every profile uses this
+Pin the final image with the top-level `image` digest in the repository's
+`scripts/local_ci/prepare/config.example.json` and load it into the server's
+Rootless Docker daemon. Despite its name, this file is the complete non-sensitive
+deployment configuration for `jiwang_ci`; edits affect deployment. Commit changes
+in the development checkout and deploy through Gitee. The server's
+`/home/jiwang_ci/local_ci/config/local-ci.json` is generated from that source,
+without a local JSON override. Keep credentials in the separate `credentials.env`
+and `codex-source/` locations. Every profile uses this
 same image; the manager does not build per-profile derived images. An optional
 profile `local_image_tag` must resolve to the configured digest.
 
-`configure.py --config <path> --image <digest> --flaggems-source <directory>
+`configure.py --config <repository-config.example.json> --image <digest> --flaggems-source <directory>
 --flaggems-commit <SHA>` sets the shared image and adds a verified FlagGems source
 mount to the Triton 3.0 profile after saving a private rollback configuration.
+Use it only to prepare the repository source in a development checkout that can
+access the dependency directory; review and commit the result. Do not point it
+at the server's runtime copy or modify the deployed control checkout. Its backup
+is not a configuration override and is not used by deployment.
 First migrate LLVM, backend and PPL dependencies to read-only mounts and remove
 old profile `archives`, `repositories`, `prepare_commands` and `validation_commands`.
 Task preparation writes a `.pth` entry in each candidate/base venv for that

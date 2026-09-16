@@ -1,102 +1,109 @@
 {
-  "schema": "triton-anchor-local-ci-config",
-  "state_dir": "/home/SET_ACTUAL_CI_USER/.local/state/triton-anchor-local-ci",
-  "control_root": "/opt/local-ci/control/triton-anchor",
-  "container_control_root": "/opt/local-ci/control",
-  "control_repo_url": "https://gitee.com/SET_ACTUAL_ORG/control_anchor.git",
-  "control_branch": "local-ci-unified",
-  "worker_id": "SET_ACTUAL_WORKER_ID",
-  "gitee_repo_url": "",
-  "gitee_username": "",
-  "health_repo_url": "",
-  "health_token_env": "GITEE_HEALTH_TOKEN",
-  "repositories": [
-    "likehupochuan/triton-anchor"
-  ],
-  "python_bin": "/usr/bin/python3",
-  "container_python": "/opt/venv/bin/python",
-  "docker_bin": "docker",
-  "codex_bin": "",
-  "codex_home": "",
-  "runtime": {
-    "kind": "docker-rootless",
-    "endpoint": "",
-    "context": "",
-    "service": "docker.service"
+  "branch_profiles": {
+    "CI_dev": "triton_v3.0",
+    "main": "triton_v3.0"
   },
-  "resources": {
-    "cpus": null,
-    "memory_bytes": null,
-    "pids_limit": null
-  },
-  "identities": {
-    "task": 11001,
-    "gid": 11001
-  },
-  "poll_interval_seconds": 60,
-  "heartbeat_stale_seconds": 180,
-  "codex_timeout_seconds": 21600,
-  "codex_attempts": 10,
-  "retry_delay_seconds": 30,
-  "results_retention_days": 30,
-  "task_workspace_max_bytes": 107374182400,
   "cleanup_timeout_seconds": 60,
+  "codex_attempts": 10,
+  "codex_bin": "/usr/local/bin/codex",
+  "codex_home": "/home/jiwang_ci/local_ci/config/codex-source",
+  "codex_timeout_seconds": 21600,
+  "container_control_root": "/opt/local-ci/control",
+  "control_branch": "local-ci-unified",
+  "control_repo_url": "https://gitee.com/likehupochuan/triton-anchor.git",
+  "control_root": "/home/jiwang_ci/local_ci/control_anchor",
+  "dependency_root": "/home/jiwang_ci/local_ci/workspace/dependencies",
+  "docker_bin": "docker",
+  "evidence_max_bytes": 107374182400,
+  "generation_retention_hours": 72,
+  "gitee_repo_url": "https://gitee.com/likehupochuan/triton-anchor-local-ci-results.git",
+  "gitee_username": "likehupochuan",
+  "health_repo_url": "https://gitee.com/likehupochuan/triton-anchor-worker-health.git",
+  "health_stale_seconds": 1200,
+  "health_token_env": "GITEE_HEALTH_TOKEN",
+  "heartbeat_stale_seconds": 180,
+  "identities": {
+    "gid": 11001,
+    "task": 11001
+  },
+  "image": "jiwang-ci/slim-foundation@sha256:82e76ff18491237f1cacd5562feb322eecf3b44cd047b3f2b0d04c373132e35a",
   "management_timeout_seconds": 600,
   "max_jobs": 12,
-  "generation_retention_hours": 72,
   "minimum_free_bytes": 10737418240,
+  "monitor_services": [
+    "triton-anchor-local-ci.service",
+    "triton-anchor-local-ci-health.timer",
+    "triton-anchor-local-ci-watchdog.timer"
+  ],
+  "poll_interval_seconds": 60,
   "profiles": {
     "triton_v3.0": {
-      "name": "triton-3.0",
-      "triton_version": "3.0",
-      "llvm_hash": "10dc3a8e916d73291269e5e2b82dd22681489aa1",
       "backend_enabled": true,
-      "workspace_container": "/workspace",
-      "llvm": {
-        "mode": "mount",
-        "commit": "10dc3a8e916d73291269e5e2b82dd22681489aa1"
-      },
+      "devices": [],
       "env": {
-        "PYTHON_VENV_ACTIVATE": "/opt/venv/bin/activate",
-        "BACKEND_PROFILE": "",
-        "BACKEND_PATH": "/opt/local-ci/runtime/deps/backend",
-        "BACKEND_WHEEL_PATTERN": "",
-        "BACKEND_ENVSETUP": "",
-        "BACKEND_ENVSETUP_ARGS": "",
-        "BACKEND_TEST_COMMAND": "",
-        "EXPECTED_TRITON_BACKEND": "",
-        "PPL_ROOT": "/opt/local-ci/runtime/deps/ppl",
-        "FLAGGEMS_CLONE_DIR": "/opt/local-ci/runtime/deps/flaggems",
+        "BACKEND_ENVSETUP": "/workspace/deps/deploy-tools/sophgo-env.sh",
+        "BACKEND_ENVSETUP_ARGS": "PIO_CMODEL",
+        "BACKEND_PATH": "/workspace/deps/backend-src",
+        "BACKEND_PROFILE": "sophgo-cmodel",
+        "BACKEND_TEST_COMMAND": "\"$PYTHON_BIN\" tests/test_smoke.py && \"$PYTHON_BIN\" tests/test_jit.py && \"$PYTHON_BIN\" -I /opt/local-ci/control/scripts/local_ci/prepare/profiles/slim/validate_flaggems.py",
+        "BACKEND_TEST_PATHS": "tests",
+        "BACKEND_WHEEL_PATTERN": "triton_sophgo_backend-*.whl",
+        "CMAKE_BUILD_PARALLEL_LEVEL": "8",
+        "EXPECTED_TRITON_BACKEND": "sophgo",
+        "FLAGGEMS_CLONE_DIR": "/workspace/deps/flaggems",
         "MAX_JOBS": "12",
-        "BACKEND_TEST_PATHS": "tests"
+        "PACKAGE_TOOL": "pip",
+        "PIP_FIND_LINKS": "/workspace/deps/deploy-tools/wheels",
+        "PIP_NO_INDEX": "1",
+        "PPL_PROJECT_ROOT": "/workspace/deps/ppl",
+        "PPL_ROOT": "/workspace/deps/ppl",
+        "PYTHON_BIN": "/opt/venv/bin/python",
+        "PYTHON_VENV_ACTIVATE": "/opt/venv/bin/activate",
+        "SEED_PYTHON": "/opt/venv/bin/python",
+        "TRITON_BUILD_PROTON": "OFF",
+        "TRITON_DISABLE_NVIDIA_TOOLCHAIN": "1"
       },
+      "llvm": {
+        "commit": "10dc3a8e916d73291269e5e2b82dd22681489aa1",
+        "mode": "mount"
+      },
+      "llvm_hash": "10dc3a8e916d73291269e5e2b82dd22681489aa1",
+      "local_image_tag": "jiwang-ci/slim-foundation:torch2.8-tpu0.17",
       "mounts": [
         {
-          "source": "",
-          "target": "/opt/local-ci/runtime/deps/llvm-10dc3a8e916d73291269e5e2b82dd22681489aa1",
           "read_only": true,
-          "sha256": ""
+          "sha256": "51d5be74afb88d256cebecccdf0ce8f46cb2a78dc20f9059ec2d7eece4e2f7b3",
+          "source": "/home/jiwang_ci/local_ci/workspace/dependencies/llvm-10dc3a8e916d73291269e5e2b82dd22681489aa1",
+          "target": "/opt/local-ci/runtime/deps/llvm-10dc3a8e916d73291269e5e2b82dd22681489aa1"
         },
         {
-          "source": "",
-          "target": "/opt/local-ci/runtime/deps/backend",
           "read_only": true,
-          "sha256": ""
+          "sha256": "f8fc018713d913266b24320067a936c55cac830cc05fc3b7019cb22900b096e4",
+          "source": "/home/jiwang_ci/local_ci/workspace/dependencies/ppl-1.7.141",
+          "target": "/opt/local-ci/runtime/deps/ppl"
         },
         {
-          "source": "",
-          "target": "/opt/local-ci/runtime/deps/ppl",
           "read_only": true,
-          "sha256": ""
+          "sha256": "5fd5888437a61aa7677028cb568a460e8f54cc173c9f6eb5a196c8bce5b3088d",
+          "source": "/home/jiwang_ci/local_ci/workspace/dependencies/flaggems-e8520e965ecb4e2e0aff6ffcb578cbb3fd90c396",
+          "target": "/opt/local-ci/runtime/deps/flaggems"
         },
         {
-          "source": "",
-          "target": "/opt/local-ci/runtime/deps/flaggems",
           "read_only": true,
-          "sha256": ""
+          "sha256": "8280c7fd315ff7d1fe6bbe2d525d818837332ab3ff448387cb7f61535cd98269",
+          "source": "/home/jiwang_ci/local_ci/workspace/dependencies/backend-837a2ccee76257aa57c3f33d9d2721623908bcb3",
+          "target": "/opt/local-ci/runtime/deps/backend-src"
+        },
+        {
+          "read_only": true,
+          "sha256": "882bba8e59be7d23900c0d50e3b50dff7b5ced7bf3d4e921aa0af742b9640755",
+          "source": "/home/jiwang_ci/local_ci/workspace/dependencies/deploy-tools-unified-v1",
+          "target": "/opt/local-ci/runtime/deps/deploy-tools"
         }
       ],
-      "devices": []
+      "name": "triton-3.0",
+      "triton_version": "3.0",
+      "workspace_container": "/workspace"
     },
     "triton_v3.3": {
       "name": "triton-3.3",
@@ -104,22 +111,27 @@
       "llvm_hash": "a66376b0dc3b2ea8a84fda26faca287980986f78",
       "backend_enabled": false,
       "workspace_container": "/workspace",
+      "local_image_tag": "jiwang-ci/slim-foundation:torch2.8-tpu0.17",
       "llvm": {
         "mode": "mount",
         "commit": "a66376b0dc3b2ea8a84fda26faca287980986f78"
       },
       "env": {
+        "PYTHON_BIN": "/opt/venv/bin/python",
         "PYTHON_VENV_ACTIVATE": "/opt/venv/bin/activate",
-        "MAX_JOBS": "12"
+        "SEED_PYTHON": "/opt/venv/bin/python",
+        "MAX_JOBS": "12",
+        "CMAKE_BUILD_PARALLEL_LEVEL": "8"
       },
       "mounts": [
         {
-          "source": "",
+          "source": "/home/jiwang_ci/local_ci/workspace/dependencies/llvm-a66376b0dc3b2ea8a84fda26faca287980986f78",
           "target": "/opt/local-ci/runtime/deps/llvm-a66376b0dc3b2ea8a84fda26faca287980986f78",
           "read_only": true,
-          "sha256": ""
+          "sha256": "c8fcec4fb5d07a4ec87578a4d598d3f83403a4bc0b29e0a6469864ad6e7963c1"
         }
-      ]
+      ],
+      "devices": []
     },
     "triton_v3.6": {
       "name": "triton-3.6",
@@ -127,29 +139,48 @@
       "llvm_hash": "a992f29451b9e140424f35ac5e20177db4afbdc0",
       "backend_enabled": false,
       "workspace_container": "/workspace",
+      "local_image_tag": "jiwang-ci/slim-foundation:torch2.8-tpu0.17",
       "llvm": {
         "mode": "mount",
         "commit": "a992f29451b9e140424f35ac5e20177db4afbdc0"
       },
       "env": {
+        "PYTHON_BIN": "/opt/venv/bin/python",
         "PYTHON_VENV_ACTIVATE": "/opt/venv/bin/activate",
-        "MAX_JOBS": "12"
+        "SEED_PYTHON": "/opt/venv/bin/python",
+        "MAX_JOBS": "12",
+        "CMAKE_BUILD_PARALLEL_LEVEL": "8"
       },
       "mounts": [
         {
-          "source": "",
+          "source": "/home/jiwang_ci/local_ci/workspace/dependencies/llvm-a992f29451b9e140424f35ac5e20177db4afbdc0",
           "target": "/opt/local-ci/runtime/deps/llvm-a992f29451b9e140424f35ac5e20177db4afbdc0",
           "read_only": true,
-          "sha256": ""
+          "sha256": "67af697c9ecdc8ee156de961b4a75e226286a7d2cdae9b47b8e434b21d197eb9"
         }
-      ]
+      ],
+      "devices": []
     }
   },
-  "branch_profiles": {
-    "CI_dev": "triton_v3.0"
+  "python_bin": "/home/jiwang_ci/local_ci/local-ci-control-venv/bin/python",
+  "repositories": [
+    "likehupochuan/triton-anchor"
+  ],
+  "resources": {
+    "cpus": 256,
+    "memory_bytes": 412316860416,
+    "pids_limit": 131072
   },
-  "health_stale_seconds": 1200,
-  "evidence_max_bytes": 107374182400,
-  "image": "",
-  "dependency_root": ""
+  "results_retention_days": 30,
+  "retry_delay_seconds": 30,
+  "runtime": {
+    "context": "jiwang-ci-rootless",
+    "endpoint": "unix:///run/user/1007/docker.sock",
+    "kind": "docker-rootless",
+    "service": "docker.service"
+  },
+  "schema": "triton-anchor-local-ci-config",
+  "state_dir": "/home/jiwang_ci/local_ci/state",
+  "task_workspace_max_bytes": 107374182400,
+  "worker_id": "jiwang-ci-race-1"
 }

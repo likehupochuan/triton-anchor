@@ -604,7 +604,6 @@ def test_cleanup_rejects_any_path_except_this_task_run(tmp_path, other_path):
 def test_install_prepares_then_starts_user_services(tmp_path):
     settings = config(tmp_path)
     config_file, credentials = tmp_path / "config.json", tmp_path / "credentials.env"
-    config_file.write_text(json.dumps(settings))
     credentials.write_text("FIXTURE=private\n")
     credentials.chmod(0o600)
     unit_dir = tmp_path / "config/systemd/user"
@@ -623,11 +622,15 @@ def test_install_prepares_then_starts_user_services(tmp_path):
         patch.object(sys, "argv", ["install.py", "--config", str(config_file),
                                   "--credentials-env", str(credentials), "--apply"]),
         patch.object(install.os, "geteuid", return_value=1001),
+        patch.object(install, "load_deployment_config", return_value=settings),
+        patch("prepare.deployment_config.validate_deployment_config"),
         patch.object(install, "load_environment", side_effect=lambda *a: events.append("env")),
         patch.object(install, "prepare_environments", side_effect=lambda *a: events.append("prepare")),
         patch.object(install.subprocess, "run", side_effect=systemd),
     ):
         assert install.main() == 0
+    assert json.loads(config_file.read_text()) == settings
+    assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
     assert events[:2] == ["env", "prepare"]
     assert ["systemctl", "--user", "daemon-reload"] in events
     assert any(isinstance(e, list) and "restart" in e and "triton-anchor-local-ci.service" in e for e in events)
@@ -701,6 +704,8 @@ def test_install_preserves_obsolete_timer_file_when_disable_fails(tmp_path):
             ],
         ),
         patch.object(install.os, "geteuid", return_value=1001),
+        patch.object(install, "load_deployment_config", return_value=settings),
+        patch("prepare.deployment_config.validate_deployment_config"),
         patch.object(install, "load_environment"),
         patch.object(install, "prepare_environments"),
         patch.object(install.subprocess, "run", side_effect=systemd),
@@ -720,6 +725,8 @@ def test_install_failure_does_not_start_services(tmp_path):
         patch.object(sys, "argv", ["install.py", "--config", str(config_file),
                                   "--credentials-env", str(credentials), "--apply"]),
         patch.object(install.os, "geteuid", return_value=1001),
+        patch.object(install, "load_deployment_config", return_value=settings),
+        patch("prepare.deployment_config.validate_deployment_config"),
         patch.object(install, "load_environment"),
         patch.object(install, "prepare_environments", side_effect=ValueError("environment unavailable")),
         patch.object(install.subprocess, "run") as run,
@@ -727,6 +734,47 @@ def test_install_failure_does_not_start_services(tmp_path):
         assert install.main() == 1
     assert not run.called
     assert not (tmp_path / "config/systemd/user").exists()
+
+
+def test_deployment_config_preview_atomic_copy_and_structural_noop(tmp_path):
+    from prepare import deployment_config
+
+    settings = config(tmp_path)
+    destination = tmp_path / "config/local-ci.json"
+    with patch.object(deployment_config, "validate_deployment_config"):
+        assert deployment_config.sync_deployment_config(settings, destination)["changed"]
+        assert not destination.exists()
+        deployment_config.sync_deployment_config(settings, destination, apply=True)
+        assert json.loads(destination.read_text()) == settings
+        assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+        assert destination.stat().st_uid == os.getuid()
+        # Formatting and key order differences must not rewrite the runtime copy.
+        destination.write_text(json.dumps(settings, sort_keys=True))
+        before = destination.read_bytes(), destination.stat().st_mtime_ns
+        assert not deployment_config.sync_deployment_config(settings, destination, apply=True)["changed"]
+        assert (destination.read_bytes(), destination.stat().st_mtime_ns) == before
+        changed = {**settings, "codex_attempts": 10}
+        with patch.object(deployment_config.os, "replace", side_effect=OSError("disk error")):
+            with pytest.raises(OSError, match="disk error"):
+                deployment_config.sync_deployment_config(changed, destination, apply=True)
+        assert destination.read_bytes() == before[0]
+        assert list(destination.parent.iterdir()) == [destination]
+
+
+def test_install_preview_uses_repository_source_without_creating_runtime_copy(tmp_path, capsys):
+    settings = config(tmp_path)
+    destination = tmp_path / "local-ci.json"
+    with (
+        patch.object(sys, "argv", ["install.py", "--config", str(destination),
+                                  "--credentials-env", str(tmp_path / "credentials.env")]),
+        patch.object(install, "load_deployment_config", return_value=settings),
+        patch("prepare.deployment_config.validate_deployment_config"),
+        patch.object(install, "prepare_environments") as prepare,
+    ):
+        assert install.main() == 0
+        prepare.assert_not_called()
+    assert json.loads(capsys.readouterr().out)["configuration"]["changed"]
+    assert not destination.exists()
 
 
 def test_artifact_collection_makes_files_readable_without_following_links(tmp_path, monkeypatch):

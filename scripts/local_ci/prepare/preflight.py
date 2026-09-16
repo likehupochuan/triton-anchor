@@ -28,7 +28,8 @@ from prepare.runtime import validate_branch_profiles, shared_image, validate_sha
 
 
 def check_configuration(
-    config: dict, *, runtime: bool = True, require_notifications: bool = True
+    config: dict, *, runtime: bool = True, require_notifications: bool = True,
+    verify_content: bool = True,
 ) -> dict:
     checks = []
 
@@ -204,7 +205,7 @@ def check_configuration(
             "Prebuild LLVM and configure its versioned read-only mount",
         )
         try:
-            mounts = dependency_mounts(config, profile, verify_content=True)
+            mounts = dependency_mounts(config, profile, verify_content=verify_content)
             validate_mounted_llvm(profile, mounts)
             check(
                 prefix + ":dependency_mounts",

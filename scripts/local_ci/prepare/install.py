@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from prepare.preflight import check_configuration
 from prepare.runtime import EnvironmentManager
 from prepare.runtime_probe import probe_runtime
+from prepare.deployment_config import load_deployment_config, sync_deployment_config
 
 
 OBSOLETE_UNITS = (
@@ -222,6 +223,7 @@ def main():
     parser.add_argument("--rollback")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
+    control_lock = None
     try:
         if args.apply and os.geteuid() == 0:
             raise ValueError(
@@ -247,10 +249,11 @@ def main():
         if not args.config or not args.credentials_env:
             parser.error("--config and --credentials-env are required")
         config_path, credentials = (
-            Path(args.config).resolve(),
+            Path(os.path.abspath(args.config)),
             Path(args.credentials_env).resolve(),
         )
-        config = json.loads(config_path.read_text())
+        config = load_deployment_config(Path(__file__).resolve().parents[3])
+        config_plan = sync_deployment_config(config, config_path)
         units = render_units(config, config_path, credentials)
         if args.render_dir:
             output = Path(args.render_dir)
@@ -275,6 +278,16 @@ def main():
                 raise ValueError(
                     "Installation is restricted to the current CI user's systemd/user directory"
                 )
+            import fcntl
+
+            previous = json.loads(config_path.read_text()) if config_path.exists() else config
+            state_dir = Path(previous["state_dir"])
+            state_dir.mkdir(parents=True, exist_ok=True)
+            control_lock = (state_dir / "control.lock").open("a")
+            try:
+                fcntl.flock(control_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError("An active task is using the deployment; retry installation when idle") from None
             load_environment(credentials)
             prepare_environments(config)
             backup = (
@@ -302,6 +315,7 @@ def main():
                 name for name in units if name.endswith(".timer")
             ]
             subprocess.run(["systemctl", "--user", "enable", *services], check=True)
+            sync_deployment_config(config, config_path, apply=True)
             subprocess.run(["systemctl", "--user", "restart", *services], check=True)
             print(
                 json.dumps(
@@ -309,16 +323,20 @@ def main():
                         "installed": manifest,
                         "backup": str(backup),
                         "services_started": services,
+                        "configuration": config_plan,
                     },
                     indent=2,
                 )
             )
         else:
-            print(json.dumps({"planned_units": units, "applied": False}, indent=2))
+            print(json.dumps({"planned_units": units, "configuration": config_plan, "applied": False}, indent=2))
         return 0
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"Local CI service installation failed: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if control_lock is not None:
+            control_lock.close()
 
 
 if __name__ == "__main__":

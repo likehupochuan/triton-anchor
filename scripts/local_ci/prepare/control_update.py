@@ -19,6 +19,7 @@ if str(LOCAL_ROOT) not in sys.path:
 
 from prepare.artifacts import SHA_RE, atomic_json, safe_source, utc_now
 from prepare.runtime import EnvironmentManager
+from prepare.deployment_config import load_deployment_config, sync_deployment_config
 
 
 UPDATE_SCHEMA = "triton-anchor-local-ci-control-update"
@@ -248,6 +249,7 @@ def oldest_forward_request(
 def update_control(
     config: dict,
     *,
+    config_path: Path,
     apply: bool = False,
     allow_local: bool = False,
     expected_revision: str | None = None,
@@ -305,9 +307,6 @@ def update_control(
         "restarted": False,
         "applied": apply,
     }
-    if not apply:
-        return result
-
     lock_path = state_dir / "control.lock"
     marker_path = state_dir / "control-update.json"
     with lock_path.open("w") as lock:
@@ -365,37 +364,53 @@ def update_control(
             )
             if ancestor.returncode:
                 raise ValueError("control_repo_url would replace history; only fast-forward updates are allowed")
-            if target != current:
-                # A crashed Worker releases its lock before Docker stops its task.
-                # Leave the checkout intact until normal Worker recovery cleans up.
-                manager = EnvironmentManager(config, state_dir)
-                containers = manager._docker(
-                    "ps", "-aq", "--filter", "label=local-ci.owner=" + manager.owner,
-                    "--format", '{{.Label "local-ci.kind"}}',
-                    timeout=30,
-                ).decode().splitlines()
-                if {"task", "task-cleanup"}.intersection(containers):
-                    result["state"] = "deferred-active-task"
-                    return result
-                _git(root, ["checkout", "--quiet", "--detach", target], environment)
-                if (
-                    _git(root, ["rev-parse", "HEAD^{commit}"], environment)
-                    .stdout.strip()
-                    != target
-                ):
-                    raise RuntimeError("Control checkout did not reach the fetched commit")
-                result["changed"] = True
+
+        desired = load_deployment_config(root, target)
+        # These paths/runtime settings are also embedded in installed systemd units.
+        if any(desired.get(key) != config.get(key)
+               for key in ("control_root", "state_dir", "python_bin", "runtime")):
+            raise ValueError("Deployment paths or runtime changed; apply them with install.py")
+        config_plan = sync_deployment_config(desired, config_path)
+        result.update(config_changed=config_plan["changed"],
+                      config_digest=config_plan["digest"],
+                      config_fields=config_plan["fields"])
+        if not apply:
+            return result
 
         try:
             marker = json.loads(marker_path.read_text())
         except (FileNotFoundError, OSError, ValueError):
             marker = {}
-        if result["changed"] or marker.get("revision") != target:
+        restart_needed = (
+            target != current or config_plan["changed"]
+            or marker.get("revision") != target
+            or marker.get("config_digest") != config_plan["digest"]
+        )
+        if restart_needed:
+            # A crashed Worker can release its lock before Docker stops its task.
+            # Configuration-only changes must respect the same task boundary.
+            manager = EnvironmentManager(config, state_dir)
+            containers = manager._docker(
+                "ps", "-aq", "--filter", "label=local-ci.owner=" + manager.owner,
+                "--format", '{{.Label "local-ci.kind"}}', timeout=30,
+            ).decode().splitlines()
+            if {"task", "task-cleanup"}.intersection(containers):
+                result["state"] = "deferred-active-task"
+                return result
+            # A failed restart must be retried even after repairing same-SHA drift.
+            marker_path.unlink(missing_ok=True)
+        if target != current:
+            _git(root, ["checkout", "--quiet", "--detach", target], environment)
+            if _git(root, ["rev-parse", "HEAD^{commit}"], environment).stdout.strip() != target:
+                raise RuntimeError("Control checkout did not reach the fetched commit")
+            result["changed"] = True
+        sync_deployment_config(desired, config_path, apply=True)
+        if restart_needed:
             restart_worker()
             result["restarted"] = True
             atomic_json(marker_path, {**result, "restarted_at": utc_now()})
         on_success()
-        result["state"] = "updated" if result["changed"] else "current"
+        result["state"] = "updated" if result["changed"] or result["config_changed"] else "current"
     return result
 
 
@@ -439,6 +454,7 @@ def main(argv=None) -> int:
 
         result = update_control(
             config,
+            config_path=Path(args.config),
             apply=args.apply,
             expected_revision=request["revision"] if request else args.expected_revision,
             on_success=clear_completed_request if request else _noop,
