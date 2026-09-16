@@ -232,6 +232,42 @@ class GitHub:
                 },
             )
 
+    def reconcile_legacy_statuses(self, task: dict, state: str, description: str, url: str) -> None:
+        """Forward existing legacy contexts to the current verdict; never create new ones."""
+        if not task.get("pr_number") or not task.get("task_id") or not is_current(self, task):
+            return
+        canonical_status = self.latest_summary(task)
+        owner = urlparse((canonical_status or {}).get("target_url") or "").fragment
+        if not canonical_status or canonical_status.get("state") != state or (
+            owner.startswith("local-ci-task=") and owner != f"local-ci-task={task['task_id']}"
+        ):
+            return
+        url = url or canonical_status.get("target_url") or f"https://github.com/{self.repository}/commit/{task['tested_sha']}"
+        for sha in dict.fromkeys((task["head_sha"], task["tested_sha"])):
+            latest = {}
+            for page in range(1, 21):
+                rows = self.request(f"commits/{sha}/statuses?per_page=100&page={page}")
+                for row in rows:
+                    latest.setdefault(row.get("context"), row)
+                if len(rows) < 100:
+                    break
+            else:
+                raise ValueError("Cannot reconcile an incomplete legacy status listing")
+            for context in ("local-ci/summary", "local-ci/sophgo-cmodel"):
+                if context == "local-ci/summary" and sha == task["tested_sha"]:
+                    continue
+                old = latest.get(context)
+                if not old or (old.get("creator") or {}).get("login") != "github-actions[bot]":
+                    continue
+                detail = description if context == "local-ci/summary" else "Retired context; follows local-ci/summary: " + state
+                target = url.split("#", 1)[0] + f"#local-ci-task={task['task_id']}"
+                if (old.get("state"), old.get("description"), old.get("target_url")) == (state, detail[:140], target):
+                    continue
+                if not is_current(self, task):
+                    return
+                self.request(f"statuses/{sha}", "POST", {"context": context, "state": state,
+                             "description": detail[:140], "target_url": target})
+
     def latest_summary(self, task: dict) -> dict | None:
         for page in range(1, 21):
             rows = self.request(f"commits/{task['tested_sha']}/statuses?per_page=100&page={page}")
@@ -402,22 +438,24 @@ class GitHub:
         return True
 
     def _finish_inactive_sha(self, sha: str, seen: set) -> None:
+        latest = {}
         for page in range(1, 21):
             statuses = self.request(f"commits/{sha}/statuses?per_page=100&page={page}")
-            latest = next(
-                (row for row in statuses if row.get("context") == "local-ci/summary"),
-                None,
-            )
-            if latest:
-                if latest.get("state") == "pending":
-                    self.status(
-                        {"tested_sha": sha, "head_sha": sha},
-                        "error",
-                        "Local CI cancelled: PR closed or became draft",
-                    )
-                break
+            for row in statuses:
+                latest.setdefault(row.get("context"), row)
             if len(statuses) < 100:
                 break
+        else:
+            raise ValueError("Cannot finish an incomplete status listing")
+        for context in ("local-ci/summary", "local-ci/sophgo-cmodel"):
+            old = latest.get(context) or {}
+            if old.get("state") != "pending":
+                continue
+            if context != "local-ci/summary" and (old.get("creator") or {}).get("login") != "github-actions[bot]":
+                continue
+            self.request(f"statuses/{sha}", "POST", {"context": context, "state": "error",
+                         "description": "Local CI cancelled: PR closed or became draft",
+                         "target_url": old.get("target_url") or ""})
         for page in range(1, 21):
             response = self.request(
                 f"commits/{sha}/check-runs?filter=latest&per_page=100&page={page}"
@@ -474,7 +512,37 @@ class GitHub:
             else:
                 raise ValueError("Missing preflight evidence for this task")
 
-    def comment(self, task: dict, body: str) -> bool:
+    def approval_context(self, task: dict) -> dict:
+        if not task["pr_number"]:
+            return {}
+        pull = self.request(f"pulls/{task['pr_number']}")
+        if not is_current(self, task):
+            raise ValueError("PR changed before approval context collection")
+        files = []
+        for page in range(1, 31):
+            batch = self.request(f"pulls/{task['pr_number']}/files?per_page=100&page={page}")
+            files.extend(batch)
+            if len(batch) < 100:
+                break
+        complete = len(files) == pull.get("changed_files", len(files))
+        if not is_current(self, task):
+            raise ValueError("PR changed during approval context collection")
+        paths = [row["filename"] for row in files]
+        attention = []
+        if any(path.startswith((".github/", "scripts/ci/", "scripts/local_ci/")) for path in paths):
+            attention.append("涉及 CI 工作流或控制脚本")
+        if any(re.search(r"(^|/)(setup\.py|pyproject\.toml|.*requirements.*|.*lock|Dockerfile.*|llvm-(hash|info).*)$", path) for path in paths):
+            attention.append("涉及依赖、构建或安装配置")
+        if any(path.startswith(("api_contract/", "include/")) for path in paths):
+            attention.append("涉及公共接口或契约文件")
+        return {"author": (pull.get("user") or {}).get("login", "未记录"),
+                "source": pull["head"]["repo"]["full_name"], "branch": pull["head"]["ref"],
+                "files": paths, "complete": complete, "attention": attention,
+                "additions": sum(row.get("additions", 0) for row in files),
+                "deletions": sum(row.get("deletions", 0) for row in files)}
+
+    def comment(self, task: dict, body: str, *, event_key: dict | None = None,
+                legacy_result_url: str = "") -> bool:
         if not task["pr_number"]:
             return False
         path = f"issues/{task['pr_number']}/comments"
@@ -488,11 +556,23 @@ class GitHub:
             raise ValueError("Cannot deduplicate PR comments from an incomplete listing")
         # Immutable feedback events: new task, phase or result appends a comment.
         # A transport retry of identical content is a no-op, even after other posts.
-        event = digest({
+        event = digest(event_key if event_key is not None else {
             "task_id": task.get("task_id"), "head_sha": task["head_sha"],
             "pr_number": task["pr_number"], "body": body,
         })
-        marker = f"<!-- local-ci-feedback event={event} -->"
+        marker_kind = "result" if event_key and event_key.get("kind") == "result" else "event"
+        marker = f"<!-- local-ci-feedback {marker_kind}={event} -->"
+        # Old result comments have body-based markers. Recognize their immutable
+        # report URL during migration, without editing or reposting the comment.
+        if legacy_result_url and any(
+            row.get("user", {}).get("login") == "github-actions[bot]"
+            and str(row.get("body", "")).startswith(MARKER)
+            and "<!-- local-ci-feedback result=" not in row.get("body", "")
+            and "## Local CI 审查反馈" in row.get("body", "")
+            and f"]({legacy_result_url})" in row.get("body", "")
+            for row in comments
+        ):
+            return False
         if any(
             row.get("user", {}).get("login") == "github-actions[bot]"
             and str(row.get("body", "")).startswith(f"{MARKER}\n{marker}\n")
@@ -980,7 +1060,8 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
         f"PR 提交：`{task['head_sha']}`", "",
         f"合并后验证提交：`{task['tested_sha']}`",
         "", "### 变更意图与审查结论", "", feedback_text(result["summary"]),
-        "", "### 检查与审查结果", "", "| 检查 | 结果 | 说明 |", "| --- | --- | --- |",
+        "", "<details>", "<summary>审查项详情</summary>", "",
+        "| 检查 | 结果 | 说明 |", "| --- | --- | --- |",
     ]
     limitations = []
     for item in [*result["checks"], *result["reviews"]]:
@@ -994,11 +1075,15 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
         lines.append(f"| {label} | {state} | {detail} |")
     if len(limitations) == len(result["checks"]) + len(result["reviews"]):
         lines.append("| 检查与审查 | 未完成 | 尚无可核对的记录 |")
+    lines.extend(["", "</details>"])
     blockers = [feedback_text(reason) for reason in result["blocking_reasons"]]
     findings = []
     for finding in result["findings"]:
         text = feedback_text(finding.get("summary", ""))
         if text:
+            if not finding.get("blocking"):
+                risk = {"critical": "严重", "high": "高", "medium": "中", "low": "低", "info": "提示"}.get(finding.get("severity"), "未标注")
+                text = f"【风险：{risk}】{text}"
             (blockers if finding.get("blocking") else findings).append(text)
     if findings:
         lines.extend(["", "### 需要关注的发现", "", *(f"- {x}" for x in dict.fromkeys(findings))])
@@ -1029,7 +1114,8 @@ def pr_info_comment(errors: list[str]) -> str:
     )
 
 
-def approval_card(task: dict, stages: dict, eligible: bool, approval_error: str = "") -> str:
+def approval_card(task: dict, stages: dict, eligible: bool, approval_error: str = "",
+                  context: dict | None = None) -> str:
     if not preflight_passed(stages):
         return ""
     lines = ["## Local CI 前置检查与审批", "",
@@ -1037,6 +1123,19 @@ def approval_card(task: dict, stages: dict, eligible: bool, approval_error: str 
              "| 前置检查 | 结果 |", "| --- | --- |"]
     for key in ("prepare", *CHECK_NAMES):
         lines.append(f"| {DISPLAY_CHECKS[key]} | {display_state(stages.get(key, 'skipped'))} |")
+    fields = pr_fields(task.get("description", ""))
+    lines.extend(["", "### 贡献者说明（待服务器验证）", ""])
+    for key, label in (("summary", "改动目的"), ("scope", "影响范围"), ("validation", "已做验证")):
+        lines.append(f"- {label}：{feedback_text(fields.get(key) or '未提供', 800)}")
+    if context:
+        lines.extend(["", "### 本次改动概览", "",
+                      f"- 贡献者：{feedback_text(context['author'])}",
+                      f"- 来源：{feedback_text(context['source'])} / {feedback_text(context['branch'])}",
+                      f"- 改动：{len(context['files'])} 个文件，+{context['additions']} / -{context['deletions']} 行" + ("" if context['complete'] else "（列表不完整）"),
+                      f"- 审批关注：{feedback_text('；'.join(context['attention']) or '请结合文件 diff 判断改动是否符合 PR 意图')}",
+                      "", *(f"- {feedback_text(path)}" for path in context['files'][:12]),
+                      "", f"[查看完整文件差异](https://github.com/{task['repository']}/pull/{task['pr_number']}/files)"])
+    lines.extend(["", "服务器将执行候选代码的构建/测试脚本并使用计算与模型资源；前置检查通过不代表候选代码已经完成 Local CI 验证。"])
     lines.extend(["", "### 本次审批对应的固定版本", "",
                   f"- 目标分支：{feedback_text(task['target_branch'])}"])
     for key, label in (("head_sha", "PR 提交"), ("base_sha", "目标分支基线"),
@@ -1129,7 +1228,7 @@ def sync_preflight(gh: GitHub, task: dict, stages: dict) -> bool:
 def begin_preflight(gh: GitHub, task: dict) -> None:
     if not is_current(gh, task):
         raise ValueError("Task changed before preflight initialization")
-    gh.status(task, "pending", "Local CI: awaiting preflight results", workflow_url())
+    gh.status(task, "pending", "Local CI: preflight running; approval and worker execution not started", workflow_url())
     for key in CHECK_NAMES:
         gh.check(
             task,
@@ -1141,6 +1240,8 @@ def begin_preflight(gh: GitHub, task: dict) -> None:
             f"[Workflow progress]({workflow_url()})",
             workflow_url(),
         )
+    gh.reconcile_legacy_statuses(task, "pending",
+                                "Local CI: preflight running; approval and worker execution not started", workflow_url())
 
 
 def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
@@ -1161,6 +1262,7 @@ def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
     else:
         state, description = "error", "Local CI: task dispatch or receiver startup failed; see workflow"
     gh.status(task, state, description, workflow_url())
+    gh.reconcile_legacy_statuses(task, state, description, workflow_url())
 
 
 def current_task(gh: GitHub, control: GitStore, task: dict) -> bool:
@@ -1335,9 +1437,13 @@ def publication_error(gh: GitHub, control: GitStore, task: dict) -> None:
 
 
 def collect_results(
-    gh: GitHub, control: GitStore, results: GitStore, dashboard: Path
+    gh: GitHub, control: GitStore, results: GitStore, dashboard: Path,
+    task_id: str | None = None,
 ) -> list[dict]:
-    """Publish current results; stale runs remain history and never replace a new task."""
+    """Read all dashboard rows; publish only the explicitly received task."""
+    task_id = os.getenv("RECEIVER_TASK_ID", "") if task_id is None else task_id
+    if task_id and not ID.fullmatch(task_id):
+        raise ValueError("Receiver task ID must be an exact task identity")
     rows, published = [], []
     for current in sorted((control.root / "current").glob("*.json")):
         pointer = json.loads(current.read_text())
@@ -1364,7 +1470,7 @@ def collect_results(
                     artifact_urls=artifact_urls,
                 )
                 control.refresh()
-                if active and current_task(gh, control, task):
+                if task["task_id"] == task_id and active and current_task(gh, control, task):
                     gh.restore_preflight(task)
                     state = GITHUB_STATES[result["status"]]
                     description = publication_description(
@@ -1379,7 +1485,13 @@ def collect_results(
                         row["status"] = "cancelled"
                         rows.append(row)
                         continue
-                    changed = gh.comment(task, result_comment(result, result_url, artifact_urls))
+                    gh.reconcile_legacy_statuses(task, state, description, result_url)
+                    changed = gh.comment(
+                        task, result_comment(result, result_url, artifact_urls),
+                        event_key={"kind": "result", "task_id": task["task_id"],
+                                   "run_id": result["run_id"], "result_digest": result_digest},
+                        legacy_result_url=result_url,
+                    )
                     if not unchanged or changed:
                         published.append(
                             {
@@ -1397,7 +1509,7 @@ def collect_results(
                 receiver_error=type(error).__name__,
                 receiver_message="结果读取或 GitHub 发布未完成；稍后重试接收，不重跑构建。",
             )
-            if active and not status_published:
+            if task["task_id"] == task_id and active and not status_published:
                 publication_error(gh, control, task)
         rows.append(row)
     dashboard.mkdir(parents=True, exist_ok=True)
@@ -1412,7 +1524,7 @@ def collect_results(
         )
         + b"\n"
     )
-    output("receiver_errors", sum(bool(row.get("receiver_error")) for row in rows))
+    output("receiver_errors", sum(bool(row.get("receiver_error")) and row["task"]["task_id"] == task_id for row in rows))
     return published
 
 
@@ -1629,7 +1741,8 @@ def main() -> int:
                     else "Cannot verify required reviewers on local-ci-fork-approval; check repository environment configuration."
                 )
         publish_preflight_checks(gh, task, stages, eligible)
-        body = approval_card(task, stages, eligible, approval_error)
+        context = gh.approval_context(task) if eligible else None
+        body = approval_card(task, stages, eligible, approval_error, context)
         gh.comment(task, body)
         if os.getenv("GITHUB_STEP_SUMMARY"):
             with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
@@ -1642,6 +1755,7 @@ def main() -> int:
         else:
             description = "Local CI: preflight passed; awaiting dispatch"
         gh.status(task, state, description, workflow_url())
+        gh.reconcile_legacy_statuses(task, state, description, workflow_url())
         output("eligible", eligible)
         return 0
     if args.command == "api":
@@ -1695,7 +1809,7 @@ def main() -> int:
                         if received["task_id"] != args.task_id:
                             raise ValueError("Receiver task manifest identity differs")
                         cancel_obsolete(gh, control, received["pr_number"], received["target_branch"])
-                    collect_results(gh, control, results, args.dashboard)
+                    collect_results(gh, control, results, args.dashboard, args.task_id)
             finally:
                 results.close()
     finally:

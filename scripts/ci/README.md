@@ -4,7 +4,7 @@
 
 根目录 `FlagGems` 使用服务器 profile 中预置的依赖，不要求网关提供镜像，也不随任务推送或检出；PR 修改 `FlagGems` 指针不会切换服务器固定依赖。其他子模块仍固定到被测 Git 对象。
 
-取消旧任务按仓库和任务对象定位唯一 `current` 指针：PR 只处理该 PR，push/manual 只处理当前分支的非 PR 任务。接收发布沿用本次任务的范围；不带任务 ID 的手工 `collect` 只汇总结果，不执行取消扫描。
+取消旧任务按仓库和任务对象定位唯一 `current` 指针：PR 只处理该 PR，push/manual 只处理当前分支的非 PR 任务。`collect --task-id <ID>` 只向 GitHub 回写该任务；Dashboard 仍读取全部记录。不带任务 ID 的手工 `collect` 只汇总结果，不发评论、改状态或执行取消扫描。其他任务的展示错误不触发本次接收重试。
 
 旧版 schema 的任务记录保留在 Gitee，网关的取消扫描与接收器识别后跳过，不让旧记录阻断新任务，也不据此回写通过；旧记录不列入新版看板当前任务列表。新版任务仍要求完整 task ID 对应的固定 refs，损坏记录不会被当成旧格式忽略。
 
@@ -39,11 +39,15 @@ GitHub Checks 的名称、结论、标题、状态说明，以及 `local-ci/summ
 
 PR 信息、Basic、API、Security 必须全部通过才显示审批卡；失败、取消、跳过或缺失结果均不显示卡片，也不进入人工审批或投递服务器任务。该条件同时由 workflow 和网关检查。失败详情继续同步英文 Checks/status；PR 信息缺失时保留带感谢、明确补充项和更新描述指引的中文提示，不重复发送准入结果汇总。历史评论不自动删除。
 
-PR 评论是追加式历史，不再使用全局 marker 查找并覆盖旧评论。任务 ID 与完整反馈内容共同确定隐藏事件标记；新提交、新运行各自追加，同一事件的发布重试只查重。旧格式评论原样保留。最终结果以中文展示结论，“PR 提交”与“合并后验证提交”分行显示，不展示 task_id/run_id；检查与审查表不再逐项附日志证据，完整报告链接仍保留。未选/未执行范围与阻塞项继续展示；机器状态枚举、工具 ID 和原始诊断保留原值，Agent 的解释与最终答复要求中文。
+PR 结果评论以 `result + task_id + run_id + result_digest` 确定稳定事件标记，不依赖展示正文；同一结果在格式调整后也不重复发送。旧格式机器人结果评论通过相同的不可变报告 URL 查重，原文保留。新运行追加新评论。最终结果以中文展示，“PR 提交”与“合并后验证提交”分行显示，不展示 task_id/run_id；“审查项详情”默认折叠，仅调整标题和展示容器，表内检查、结果与说明保持不变。完整报告链接、未选/未执行范围与阻塞项保留。需要人工判断的发现显示报告中的风险等级；缺失等级显示“未标注”。
+
+审批卡在全部前置检查通过后展示贡献者、来源仓库/分支、PR 的改动目的/范围/已做验证、文件数/增删行数、关键改动位置和完整 diff 链接。贡献者声明标为待验证；关键路径提示不是安全审查结论。采集前后复核冻结 PR 身份，防止展示与待批准任务不一致的文件列表。
+
+审批前 summary 保持 pending，以阻止旧通过结果被重复使用；英文说明明确区分前置检查、等待审批和等待服务器结果。GitHub 对 commit status 的 pending 使用 `Waiting for status to be reported`，不能用 success 代替等待状态。
 
 部署此状态修复时，`main` 路由文件的 `receive` job 也须包含 `checks: read`，供接收器核对任务身份；其 `publish`/`deploy-dashboard` 拆分也须同步，因为 `mode=receive` 工作流在 main 运行。`local-ci-unified` 中的 prepare/finalize 使用 `checks: write`；finalize 只读 PR，不再需要写评论权限，审批验证使用 `checks: read`。仅更新控制分支不会自动改变 main 上的工作流定义。
 
-Actions 的 `route`、`enqueue`、`receive`、`publish` 成功只表示相应调度或传输完成，不能替代 `local-ci/summary` 的测试结论。前置 checks 成功与服务器 `infra_error` 可以同时出现。旧版 `local-ci/sophgo-cmodel` 等 commit status 会留在历史提交上；新流程不再写入它们，也不将历史错误改写为通过。PR 门禁应使用上面的四个当前 context；控制分支自身 push 的规则不能要求已省略的三个汇总。
+Actions 的 `route`、`enqueue`、`receive`、`publish` 成功只表示相应调度或传输完成，不能替代 `local-ci/summary` 的测试结论。前置 checks 成功与服务器 `infra_error` 可以同时出现。对当前 PR head 上已有的机器人 summary，以及 head/tested 上已有的 `local-ci/sophgo-cmodel`，在身份有效且 canonical summary 状态匹配时追加与当前结论一致的状态，避免旧失败/pending 悬挂；后者明确标为 `Retired context; follows local-ci/summary`，不声称旧后端测试重新通过。没有旧 context 时不创建，不修改其他机器人状态，历史记录保留。PR 门禁应使用上面的四个当前 context；控制分支自身 push 的规则不能要求已省略的三个汇总。
 
 结果按事件和目标分支保存。PR 为 `runs/pr/branch-<目标分支>/pr-<PR号>/<head_sha>/<run_id>/result.json`，push/manual 为 `runs/push/branch-<目标分支>/<head_sha>/<run_id>/result.json`；分支名中的 `/` 使用 URL 编码，head_sha 为完整 40 位提交号。所选日志与报告位于同目录的 `artifacts/`；一次 Git 提交同时发布结果和文件，标题为 `local-ci: <status> <head_sha前12位> <run_id>`。接收器按结果内部的 task_id 匹配，避免同一 SHA 的不同冻结任务串用结果；仍兼容读取原有分组 `<task_id>` 目录和 `runs/<task_id>/<run_id>/` 历史结果。单文件最多 2 MiB，合计最多 10 MiB，最多 20 个文件。超预算文件保留在 CI 主机并在结果中说明，不分片。上传响应丢失后重试相同提交内容，不产生重复结果或重新运行 Agent。
 

@@ -112,7 +112,13 @@ class FakeGitHub:
     def restore_preflight(self, task):
         pass
 
-    def comment(self, task, content):
+    def reconcile_legacy_statuses(self, *args):
+        pass
+
+    def approval_context(self, task):
+        return {}
+
+    def comment(self, task, content, **kwargs):
         if self.comments and self.comments[-1] == content:
             return False
         self.comments.append(content)
@@ -155,6 +161,9 @@ class GatewayBehaviorTests(unittest.TestCase):
         git(self.root, "init", "--bare", "-q", str(self.remote))
         self.gh = FakeGitHub(self.base, self.head, self.tested)
         self.task = g.prepare_task(self.gh, self.base, 7)
+        receiver_env = patch.dict(g.os.environ, {"RECEIVER_TASK_ID": self.task["task_id"]})
+        receiver_env.start()
+        self.addCleanup(receiver_env.stop)
         self.stores = []
 
     def tearDown(self):
@@ -1262,6 +1271,119 @@ README only
         self.assertEqual(old["result"]["checks"][1]["details"]["flaggems-summary"]["mode"], "full")
         self.assertTrue(old["artifact_urls"]["flaggems-summary.json"].startswith("https://gitee.com/"))
         self.assertEqual(len(g.history_rows(store, [{"task": self.task, "result": result}])), 1)
+
+    def test_result_comment_retries_ignore_presentation_and_recognize_legacy_report(self):
+        client = g.GitHub(g.REPOSITORY, token="fixture")
+        comments, writes = [], []
+        def request(path, method="GET", data=None):
+            if method == "GET":
+                return comments
+            self.assertEqual(method, "POST")
+            writes.append(data)
+            comments.append({**data, "user": {"login": "github-actions[bot]"}})
+            return {}
+        identity = {"kind": "result", "task_id": self.task["task_id"], "run_id": "run-1", "result_digest": "a" * 64}
+        url = "https://gitee.com/example/results/blob/results/run-1/result.json"
+        with patch.object(client, "request", side_effect=request):
+            self.assertTrue(client.comment(self.task, "first rendering", event_key=identity))
+            self.assertFalse(client.comment(self.task, "<details>new rendering</details>", event_key=identity))
+            self.assertTrue(client.comment(self.task, "first rendering", event_key={**identity, "run_id": "run-2"}))
+            linked_body = "## Local CI 审查反馈\n[报告](" + url + ")"
+            linked_identity = {**identity, "run_id": "linked"}
+            self.assertTrue(client.comment(self.task, linked_body, event_key=linked_identity, legacy_result_url=url))
+            self.assertTrue(client.comment(self.task, linked_body, event_key={**linked_identity, "result_digest": "b" * 64}, legacy_result_url=url))
+            comments.append({"user": {"login": "github-actions[bot]"},
+                             "body": g.MARKER + "\n<!-- old marker -->\n## Local CI 审查反馈\n[完整报告](" + url + ")"})
+            self.assertFalse(client.comment(self.task, "new heading", event_key={**identity, "run_id": "old"}, legacy_result_url=url))
+            comments[-1]["user"]["login"] = "contributor"
+            self.assertTrue(client.comment(self.task, "new heading", event_key={**identity, "run_id": "old"}, legacy_result_url=url))
+        self.assertEqual(len(writes), 5)
+
+    def test_collection_only_writes_selected_task_and_readonly_collection_is_quiet(self):
+        control, results = self.store(g.CONTROL_BRANCH), self.store(g.RESULTS_BRANCH)
+        other = {**self.task, "pr_number": 8}
+        other["task_id"] = g.compute_task_id(other)
+        for field, suffix in (("task_ref", "tested"), ("base_task_ref", "base"), ("head_task_ref", "head")):
+            other[field] = f"ci/pr-8/{other['task_id']}/{suffix}"
+        for task in (self.task, other):
+            g.validate_task(task)
+            control.put({f"current/{g.current_key(task)}.json": {"task_id": task["task_id"]},
+                         f"tasks/{task['task_id']}.json": task})
+            result = {**self.result(), "task": task}
+            results.put({f"runs/{task['task_id']}/{result['run_id']}/result.json": result})
+        with patch.object(g, "current_task", return_value=True):
+            published = g.collect_results(self.gh, control, results, self.root / "dashboard", self.task["task_id"])
+            self.assertEqual([row["task_id"] for row in published], [self.task["task_id"]])
+            self.assertEqual([row[0] for row in self.gh.statuses], [self.task["task_id"]])
+            self.assertEqual(len(self.gh.comments), 1)
+            self.gh.writes.clear()
+            self.assertEqual(g.collect_results(self.gh, control, results, self.root / "dashboard", ""), [])
+            self.assertEqual(self.gh.writes, [])
+        feed = json.loads((self.root / "dashboard/tasks.json").read_bytes())
+        self.assertEqual(len(feed["tasks"]), 2)
+
+    def test_legacy_head_statuses_follow_current_verdict_without_new_contexts(self):
+        client = g.GitHub(g.REPOSITORY, token="fixture")
+        snapshots = {self.head: [
+            {"context": "local-ci/summary", "state": "pending", "creator": {"login": "github-actions[bot]"}},
+            {"context": "local-ci/sophgo-cmodel", "state": "error", "creator": {"login": "github-actions[bot]"}},
+            {"context": "external/build", "state": "failure", "creator": {"login": "another-bot"}},
+        ], self.tested: [{"context": "local-ci/summary", "state": "success"}]}
+        writes = []
+        def request(path, method="GET", data=None):
+            if path == "pulls/7":
+                return self.gh.pull
+            if method == "GET":
+                return snapshots[path.split("/")[1]]
+            writes.append((path, data))
+            snapshots[path.split("/")[1]].insert(0, {**data, "creator": {"login": "github-actions[bot]"}})
+            return {}
+        with patch.object(client, "request", side_effect=request):
+            client.reconcile_legacy_statuses(self.task, "success", "Local CI: pass", "https://gitee.com/report")
+            self.assertEqual(len(writes), 2)
+            self.assertTrue(all(path == f"statuses/{self.head}" and data["state"] == "success" for path, data in writes))
+            self.assertIn("Retired context", writes[1][1]["description"])
+            client.reconcile_legacy_statuses(self.task, "success", "Local CI: pass", "https://gitee.com/report")
+            self.assertEqual(len(writes), 2)
+            snapshots[self.tested][0]["state"] = "failure"
+            client.reconcile_legacy_statuses(self.task, "failure", "Local CI: preflight failed", "https://gitee.com/report")
+            self.assertTrue(all(data["state"] == "failure" for path, data in writes[2:]))
+            before = len(writes)
+            snapshots[self.tested][0]["target_url"] = "https://gitee.com/report#local-ci-task=" + "f" * 64
+            client.reconcile_legacy_statuses(self.task, "failure", "foreign ownership", "https://gitee.com/report")
+            self.assertEqual(len(writes), before)
+            self.gh.pull["head"]["sha"] = "f" * 40
+            before = len(writes)
+            client.reconcile_legacy_statuses(self.task, "success", "stale pass", "https://gitee.com/report")
+            self.assertEqual(len(writes), before)
+
+    def test_approval_context_is_frozen_and_displays_contributor_claims_safely(self):
+        client = g.GitHub(g.REPOSITORY, token="fixture")
+        pull = {**self.gh.pull, "user": {"login": "contributor"}, "changed_files": 2}
+        files = [{"filename": ".github/workflows/test.yml", "additions": 3, "deletions": 1},
+                 {"filename": "pyproject.toml", "additions": 2, "deletions": 0}]
+        def request(path, method="GET", data=None):
+            return files if "/files?" in path else pull
+        with patch.object(client, "request", side_effect=request):
+            context = client.approval_context(self.task)
+            card = g.approval_card(self.task, dict.fromkeys(("prepare", *g.CHECK_NAMES), "success"), True, context=context)
+            for text in ("贡献者说明（待服务器验证）", "contributor", "2 个文件，+5 / -1", "CI 工作流或控制脚本", "依赖、构建或安装配置", "/pull/7/files"):
+                self.assertIn(text, card)
+            pull["head"] = {**pull["head"], "sha": "e" * 40}
+            with self.assertRaisesRegex(ValueError, "PR changed"):
+                client.approval_context(self.task)
+
+    def test_collapsible_review_details_preserve_table_rows_and_show_finding_risk(self):
+        result = self.result()
+        result["findings"] = [{"summary": "Need benchmark", "severity": "medium", "blocking": False},
+                              {"summary": "Unrated", "blocking": False}]
+        body = g.result_comment(result)
+        self.assertIn("<details>\n<summary>审查项详情</summary>\n\n| 检查 | 结果 | 说明 |", body)
+        self.assertLess(body.index("</details>"), body.index("### 合入阻塞与重要限制"))
+        self.assertNotIn("检查与审查结果", body)
+        self.assertIn("【风险：中】Need benchmark", body)
+        self.assertIn("【风险：未标注】Unrated", body)
+        self.assertIn("| 架构契约审查 | 通过 | Compatible |", body)
 
     def test_review_evidence_links_only_safe_paths_on_the_frozen_revision(self):
         self.assertEqual(g.feedback_evidence({"kind": "architecture", "evidence": [

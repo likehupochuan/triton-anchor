@@ -262,6 +262,14 @@ test('blockers render one concise section without duplicate reviews or expandabl
   assert.equal(detail.filter(node=>node.tag==='h3'&&node.textContent==='阻塞原因').length,1);
   assert.ok(!detail.some(node=>node.tag==='h3'&&node.textContent==='Codex 审查与定向验证'));
   assert.ok(!detail.some(node=>node.textContent==='查看详情'));
+  context.run=errorRun({status:'pass',findings:[
+    {summary:'Coverage needs human review',severity:'medium',blocking:false},
+    {summary:'Missing severity',blocking:false},
+  ]});
+  vm.runInNewContext('renderDetail(run);',context);
+  const riskText=flatten(document.getElementById('taskDetail')).map(node=>node.textContent);
+  assert.ok(riskText.includes('需要人工判断 · 风险：中'));
+  assert.ok(riskText.includes('需要人工判断 · 风险：未标注'));
 });
 
 test('profile errors and unknown execution summaries are not lost behind missing reviews', () => {
