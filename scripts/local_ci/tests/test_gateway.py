@@ -364,6 +364,16 @@ README only
         self.assertEqual(
             g.validate_pr_info({**self.task, "description": heading_body}), []
         )
+        for headings in (("变更概述", "影响范围", "验证情况"), ("Summary", "Scope", "Validation"),
+                         ("变更概述 / Summary", "影响范围 / Scope", "验证情况 / Validation")):
+            description = "\n".join(f"### {heading}\n{value}" for heading, value in
+                                    zip(headings, ("Clarify behavior", "Docs only", "Reviewed diff")))
+            description += "\n### 自定义字段 / Custom notes\nRollout details\n"
+            with self.subTest(headings=headings):
+                self.assertEqual(g.validate_pr_info({**self.task, "description": description, "labels": []}), [])
+                self.assertEqual(g.pr_fields(description)["validation"], "Reviewed diff")
+        template = (ROOT / ".github/PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
+        self.assertEqual(len(g.validate_pr_info({**self.task, "description": template})), 3)
         for field in g.FIELD_NAMES:
             missing = body().replace(f"<!-- field:{field} -->", "<!-- field:unused -->")
             with self.subTest(field=field):
@@ -1303,7 +1313,7 @@ README only
             self.assertEqual(g.main(), 1)
         self.assertEqual(len(self.gh.comments), 1)
         message = self.gh.comments[0]
-        for text in ("感谢您的贡献", *errors, "直接更新 PR 描述", "目前无需等待审批"):
+        for text in ("感谢您的贡献", *errors, "直接更新 PR 描述", "PR 信息检查通过后会进入后续检查与必要验证"):
             self.assertIn(text, message)
         self.assertEqual(self.gh.statuses, [])
         self.assertEqual(self.gh.check_calls[-1][1:4], ("basic", "completed", "failure"))
@@ -1500,8 +1510,11 @@ README only
         with patch.object(client, "request", side_effect=request):
             context = client.approval_context(self.task)
             card = g.approval_card(self.task, dict.fromkeys(("prepare", *g.CHECK_NAMES), "success"), True, context=context)
-            for text in ("contributor", "2 个文件，+5 / -1", "CI 工作流或控制脚本", "依赖、构建或安装配置", "/pull/7/files"):
+            for text in ("contributor", "2 个文件，+5 / -1", "CI 与结果展示 1 个文件", "依赖与构建配置 1 个文件", "/pull/7/files", "| PR 信息 | 通过 |"):
                 self.assertIn(text, card)
+            self.assertNotIn("审批关注", card)
+            self.assertNotIn(".github/workflows/test.yml", card)
+            self.assertNotIn("pyproject.toml", card)
             self.assertNotIn("贡献者说明", card)
             self.assertNotIn("任务范围与审批边界", card)
             self.assertLess(card.index("本次审批对应的固定版本"), card.index("本次改动概览"))

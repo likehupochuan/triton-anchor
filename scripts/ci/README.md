@@ -31,7 +31,7 @@
 
 PR 分支保护应要求 `local-ci/basic`、`local-ci/api`、`local-ci/security`、`local-ci/approve`、`local-ci/dispatch`、`local-ci/summary`。前五项是 Check Runs，summary 是 commit status，统一发布到 `tested_sha`。部署时从必检项中移除 `local-ci/preflight`，增加 approve 和 dispatch；dispatch 在投递完成前保持未完成，防止同一提交的旧通过结果绕过本次流程。旧 head-only 前置结果仅在任务身份匹配且成功时复制到 tested_sha；缺失或失败的证据不能被补成通过。取消和失败不标为 skipped/neutral。PR 关闭或转为草稿时结束现有等待检查。
 
-冻结新任务后只创建 Basic，先检查 PR 信息，再运行 Basic CI；Basic 通过后才创建 API，API 通过后才创建 Security，全部前置通过后才创建 approve，并提供审批入口。审批通过后才创建 dispatch。源码和不可变任务成功发布到 Gitee 后才首次创建 summary pending，等待服务器结果。审批拒绝或校验失败显示 approve failure，取消显示 cancelled；不创建 Dispatch 或 Summary。前置失败只结束已经到达的检查，不补建后续阶段。投递成功但接收器启动失败时更新已有 summary，允许单独重试接收。
+冻结新任务后只创建 Basic，先检查 PR 信息，再运行 Basic CI；Basic 通过后才创建 API，API 通过后才创建 Security，全部前置通过后才创建 approve，并提供审批入口。审批通过后才创建 dispatch。源码和不可变任务成功发布到 Gitee 后才首次创建 summary pending，等待服务器结果。审批拒绝或校验失败显示 approve failure，取消显示 cancelled；不创建 Dispatch 或 Summary。前置失败只结束已经到达的检查，不补建后续阶段。投递成功但接收器启动失败时更新已有 summary，允许单独重试接收。 Basic → API → Security 的执行只依赖上游检查成功；basic-result、api-result 与下一检查并行回写，回写失败或排队不阻塞下一检查。审批卡仍等待全部检查及回写作业成功；页面状态可能因回写延迟短暂落后于实际执行。
 
 控制分支自身 push 继续使用原生 Basic/API/Security，不增加重复汇总或提前创建后续检查。普通任务以 Basic Check Run 为当前任务起点；控制分支自身 push 复用已有原生 `Prepare exact task`，通过 GitHub 运行信息确认来源。新轮次不复用旧检查结论，按需创建各阶段；同任务遗留的旧等待检查也会结束。已存在的旧 summary 标记为结果已被替代，成功投递后切换为本次等待状态。GitHub 历史记录不能删除，页面排列、原生工作流作业和分支保护的 Expected 占位由 GitHub 控制；逐阶段规则控制的是额外回写的 `local-ci/*` Check Runs。
 
@@ -43,7 +43,7 @@ PR 信息、Basic、API、Security 必须全部通过才显示审批卡；失败
 
 PR 结果评论以 `result + task_id + run_id + result_digest` 确定稳定事件标记，不依赖展示正文；同一结果在格式调整后也不重复发送。旧格式机器人结果评论通过相同的不可变报告 URL 查重，原文保留。新运行追加新评论。最终结果以中文展示，“PR 提交”与“合并后验证提交”分行显示，不展示 task_id/run_id；“查看审查详情”与“变更意图与审查结论”并列，折叠内容先简述检查与审查数量，再展示原有表格。未选/未执行项目保留在详情表中，不逐条放入“合入阻塞与重要限制”；真实阻塞项和完整报告链接保留。需要人工判断的发现显示报告中的风险等级；缺失等级显示“未标注”。
 
-审批卡在全部前置检查通过后展示贡献者、来源仓库/分支、文件数/增删行数、关键改动位置和完整 diff 链接；不展示“贡献者说明”和“任务范围与审批边界”。采集前后复核冻结 PR 身份。
+审批卡在全部前置检查通过后展示贡献者、来源仓库/分支、文件数/增删行数、按文件路径归类的简短范围统计和完整 diff 链接；不逐一列出文件，不展示“贡献者说明”“任务范围与审批边界”或笼统的“审批关注”。分类仅帮助定位改动范围，不代表内容审查或风险结论。采集前后复核冻结 PR 身份。
 
 当前任务由 Basic 或原生任务准备检查的 ID 和工作流运行 ID 确认。自定义 Check 的运行 ID 保存于说明中的隐藏标记，不使用 GitHub 会改写的 `details_url` 判断归属；同一次运行的失败作业重跑仍可继续，新一轮完整流程以新的起点 Check ID 区分。旧 preflight/dispatch 仅用于已有任务的读取兼容；旧控制分支自身 push 的 Dispatch 若缺少运行标记，需重新 request，不能通过详情链接猜测归属。旧流程不能回写新一轮检查，接收器还要求 Dispatch 属于本轮且已成功，防止同任务重跑时旧结果在审批前回写。summary 仅在派发成功后首次创建。GitHub 对 pending commit status 可显示 `Waiting for status to be reported`；必检项自身的 Expected 占位无法由发布代码隐藏。
 

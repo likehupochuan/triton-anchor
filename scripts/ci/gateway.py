@@ -653,13 +653,24 @@ class GitHub:
         if not is_current(self, task):
             raise ValueError("PR changed during approval context collection")
         paths = [row["filename"] for row in files]
-        attention = []
-        if any(path.startswith((".github/", "scripts/ci/", "scripts/local_ci/")) for path in paths):
-            attention.append("涉及 CI 工作流或控制脚本")
-        if any(re.search(r"(^|/)(setup\.py|pyproject\.toml|.*requirements.*|.*lock|Dockerfile.*|llvm-(hash|info).*)$", path) for path in paths):
-            attention.append("涉及依赖、构建或安装配置")
-        if any(path.startswith(("api_contract/", "include/")) for path in paths):
-            attention.append("涉及公共接口或契约文件")
+        scopes = {}
+        for path in paths:
+            if path.startswith((".github/", "scripts/ci/", "scripts/local_ci/", "dashboard/")):
+                scope = "CI 与结果展示"
+            elif re.search(r"(^|/)(setup\.py|pyproject\.toml|CMakeLists\.txt|.*\.cmake|.*requirements.*|.*lock|Dockerfile.*|llvm-(hash|info).*|\.gitmodules)$", path):
+                scope = "依赖与构建配置"
+            elif path.startswith(("api_contract/", "include/")):
+                scope = "公共接口与契约"
+            elif re.search(r"(^|/)(tests?|testing)/|(^|/)test_[^/]+$", path):
+                scope = "测试"
+            elif path.startswith("docs/") or path.lower().endswith((".md", ".rst")):
+                scope = "文档"
+            elif path.startswith(("python/", "lib/", "src/", "adapters/", "backends/")):
+                scope = "编译器与运行逻辑"
+            else:
+                scope = "其他文件"
+            scopes[scope] = scopes.get(scope, 0) + 1
+        attention = [f"{scope} {count} 个文件" for scope, count in sorted(scopes.items())]
         return {"author": (pull.get("user") or {}).get("login", "未记录"),
                 "source": pull["head"]["repo"]["full_name"], "branch": pull["head"]["ref"],
                 "files": paths, "complete": complete, "attention": attention,
@@ -1142,7 +1153,7 @@ DISPLAY_STATES = {
     "not_applicable": "不适用", "queued": "等待执行", "in_progress": "执行中",
 }
 DISPLAY_CHECKS = {
-    "prepare": "PR 信息与任务冻结", "basic": "基础检查", "api": "API 兼容性",
+    "prepare": "PR 信息", "basic": "基础检查", "api": "API 兼容性",
     "security": "安全检查", "pr_info": "PR 意图与属性核对", "architecture": "架构契约审查",
     "intent": "专项审查", "environment": "运行环境", "control_plane": "CI 流程验证",
     "change_validation": "变更影响与验证范围", "frontend_build": "前端构建",
@@ -1243,8 +1254,7 @@ def pr_info_comment(errors: list[str]) -> str:
         "## PR 信息需要补充\n\n"
         "感谢您的贡献！为了帮助维护者理解这次改动并安排合适的验证，请补充以下信息：\n\n"
         + "\n".join(f"- {feedback_text(error)}" for error in errors)
-        + "\n\n请直接更新 PR 描述，系统会重新检查。信息检查通过后才会继续前置检查，"
-        "全部通过后再进入后续审批（如需）和 Local CI 验证；目前无需等待审批。"
+        + "\n\n请直接更新 PR 描述，系统会重新检查。PR 信息检查通过后会进入后续检查与必要验证"
     )
 
 
@@ -1267,8 +1277,7 @@ def approval_card(task: dict, stages: dict, eligible: bool, approval_error: str 
                       f"- 贡献者：{feedback_text(context['author'])}",
                       f"- 来源：{feedback_text(context['source'])} / {feedback_text(context['branch'])}",
                       f"- 改动：{len(context['files'])} 个文件，+{context['additions']} / -{context['deletions']} 行" + ("" if context['complete'] else "（列表不完整）"),
-                      f"- 审批关注：{feedback_text('；'.join(context['attention']) or '请结合文件 diff 判断改动是否符合 PR 意图')}",
-                      "", *(f"- {feedback_text(path)}" for path in context['files'][:12]),
+                      f"- 改动范围（按文件路径归类）：{feedback_text('；'.join(context['attention']) or '暂无文件记录')}",
                       "", f"[查看完整文件差异](https://github.com/{task['repository']}/pull/{task['pr_number']}/files)"])
     if approval_error:
         lines.extend(["", "审批环境配置无法确认，暂不派发：" + feedback_text(approval_error)])
@@ -1344,7 +1353,7 @@ def publish_preflight_checks(
 
 
 def sync_preflight(gh: GitHub, task: dict, stages: dict) -> bool:
-    """Publish this stage and admit its successor, never changing CI summary."""
+    """Publish stage progress; workflow dependencies independently gate execution."""
     if not isinstance(stages, dict) or not stages or set(stages) - CHECK_NAMES.keys() or any(
         not isinstance(value, str) or value not in {"success", "failure", "cancelled", "skipped"}
         for value in stages.values()

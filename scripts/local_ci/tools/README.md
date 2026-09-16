@@ -26,10 +26,10 @@
 ## 调用
 
 ```bash
-python3 /opt/local-ci/control/scripts/local_ci/tools/basic_tools/runner.py frontend_build \
+"$PYTHON_BIN" /opt/local-ci/control/scripts/local_ci/tools/basic_tools/runner.py frontend_build \
   --context /task/artifacts/candidate-context.json --parameters '{"jobs":2,"build_mode":"incremental"}' --execute
 
-python3 /opt/local-ci/control/scripts/local_ci/tools/basic_tools/runner.py frontend_tests \
+"$PYTHON_BIN" /opt/local-ci/control/scripts/local_ci/tools/basic_tools/runner.py frontend_tests \
   --context /task/artifacts/candidate-context.json --parameters '{"paths":["tests/test_unit.py::test_add"]}' --execute
 ```
 
@@ -61,7 +61,8 @@ pytest 参数为 `paths`（相对路径或 node ID）、`keyword`；FlagGems 为
 
 ## 审查与补充验证
 
-`ai_review_tools/` 提供架构及专项审查说明。`ai_custom_tools/` 说明任务内脚本的用途。
+`ai_review_tools/` 提供架构及专项审查说明，`ai_custom_tools/` 说明任务内脚本的用途。
+专项方向依据描述和实际 diff 选择，标签仅供参考。
 Codex 可以直接运行已有测试、编写定向复现或使用其他命令，自主选择范围和顺序。
 真实编译器、运行时及后端接口改动仍需对应构建与 smoke/JIT；文档和普通注释可轻量验证。
 显式 full 任务保留全部可用工具对应的覆盖要求。

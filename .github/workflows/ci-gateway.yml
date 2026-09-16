@@ -142,7 +142,7 @@ jobs:
       tested_sha: ${{ needs.prepare.outputs.tested_sha }}
   api:
     name: API compatibility
-    needs: [prepare, basic, basic-result]
+    needs: [prepare, basic]
     permissions: {contents: read}
     uses: ./.github/workflows/local-ci-api-compatibility.yml
     with:
@@ -152,7 +152,7 @@ jobs:
       worker_revision_sha: ${{ github.event_name == 'push' && github.sha || inputs.worker_revision_sha }}
   security:
     name: Security gate
-    needs: [prepare, api, api-result]
+    needs: [prepare, api]
     permissions: {contents: read, security-events: write}
     uses: ./.github/workflows/local-ci-security.yml
     with:
