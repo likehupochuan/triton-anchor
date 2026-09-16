@@ -849,7 +849,7 @@ class EnvironmentManager:
         ):
             raise EnvironmentError("Invalid task/run identity")
         revision = self._control_revision()
-        if task.get("worker_revision_sha") != revision:
+        if task.get("control_policy") != "worker" and task.get("worker_revision_sha") != revision:
             raise EnvironmentError(
                 "Task worker revision differs from installed control"
             )

@@ -109,6 +109,9 @@ class FakeGitHub:
     def owns_preflight(self, task):
         return True
 
+    def restore_preflight(self, task):
+        pass
+
     def comment(self, task, content):
         if self.comments and self.comments[-1] == content:
             return False
@@ -195,12 +198,19 @@ class GatewayBehaviorTests(unittest.TestCase):
         self.assertTrue(self.task["external_fork"])
         for field, value in (
             ("title", "different"),
-            ("worker_revision_sha", "f" * 40),
             ("full", True),
         ):
             changed = {**self.task, field: value}
             with self.subTest(field=field), self.assertRaises(ValueError):
                 g.validate_task(changed)
+        self.assertEqual(self.task["control_policy"], "worker")
+        changed = {**self.task, "worker_revision_sha": "f" * 40}
+        self.assertEqual(g.compute_task_id(changed), self.task["task_id"])
+        g.validate_task(changed)
+        legacy = dict(self.task)
+        legacy.pop("control_policy")
+        self.assertNotEqual(g.compute_task_id(legacy),
+                            g.compute_task_id({**legacy, "worker_revision_sha": "f" * 40}))
         self.gh.pull["head"]["sha"] = "e" * 40
         with self.assertRaises(ValueError):
             g.prepare_task(self.gh, self.base, 7, requested_sha=self.head)
@@ -372,7 +382,7 @@ README only
                 "refs/heads/" + self.task[ref],
             )
             self.assertEqual(actual, self.task[key])
-        retry = {**self.task, "captured_at": "2099-01-01T00:00:00Z"}
+        retry = {**self.task, "captured_at": "2099-01-01T00:00:00Z", "worker_revision_sha": "f" * 40}
         g.enqueue(retry, self.gh, control, self.source)
         self.assertEqual(
             control.get("tasks/" + self.task["task_id"] + ".json"), self.task
@@ -1064,8 +1074,10 @@ README only
         stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
         with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "12345"}):
             card = g.approval_card(self.task, stages, True)
-        for field in ("head_sha", "base_sha", "tested_sha", "worker_revision_sha", "task_id"):
+        for field in ("head_sha", "base_sha", "tested_sha"):
             self.assertIn(self.task[field], card)
+        self.assertNotIn("控制版本", card)
+        self.assertNotIn(self.task["task_id"], card)
         for text in ("基础检查 | 通过", "API 兼容性 | 通过", "安全检查 | 通过",
                      "等待维护者审批", "local-ci-fork-approval", "/actions/runs/12345",
                      "并不代表代码安全或测试通过"):
@@ -1125,18 +1137,83 @@ README only
         result["findings"] = [{"summary": "<script> @owner [点此](https://evil.invalid)", "blocking": False}]
         rendered = g.result_comment(result, "https://gitee.com/example/result.json",
                                     {"validation.md": "https://gitee.com/example/validation.md"})
-        for text in ("本次要求的检查已通过", self.head, self.tested, result["run_id"],
+        for text in ("本次要求的检查已通过", self.head, self.tested,
                      "CI 流程验证 | 通过", "PR 意图与属性核对 | 通过", "架构契约审查 | 通过",
-                     "合入阻塞与重要限制", "前端构建：本次未选择", "证据 1", "新结果追加评论"):
+                     "合入阻塞与重要限制", "前端构建：本次未选择"):
             self.assertIn(text, rendered)
         self.assertNotIn("| 前端构建 |", rendered)
         self.assertNotIn("<script>", rendered)
         self.assertNotIn("@owner", rendered)
         self.assertNotIn("[点此](https://evil.invalid)", rendered)
         self.assertNotIn("| pass |", rendered)
-        self.assertIn(f"/blob/{self.tested}/README.md", rendered)
+        for text in (result["run_id"], self.task["task_id"], "证据 1", "validation.md", "/README.md"):
+            self.assertNotIn(text, rendered)
+        self.assertIn(f"PR 提交：`{self.head}`\n\n合并后验证提交：`{self.tested}`", rendered)
         again = g.result_comment({**result, "run_id": "retry-2"})
         self.assertNotEqual(rendered, again)
+
+    def test_preflight_is_restored_on_tested_commit_before_summary(self):
+        client = g.GitHub(g.REPOSITORY, token="fixture")
+        writes = []
+        migrated = {}
+
+        def request(path, method="GET", data=None):
+            if method == "POST":
+                writes.append((path, data))
+                if path == "check-runs":
+                    migrated[data["name"]] = {**data, "id": 100, "app": {"slug": "github-actions"}}
+                return {}
+            key = next(key for key in g.CHECK_NAMES if f"%2F{key}" in path)
+            name = g.CHECK_NAMES[key]
+            if f"commits/{self.tested}/" in path:
+                return {"check_runs": [migrated[name]] if name in migrated else []}
+            self.assertIn(f"commits/{self.head}/", path)
+            return {"check_runs": [{"id": 1, "name": name, "status": "completed",
+                "conclusion": "success", "app": {"slug": "github-actions"},
+                "external_id": f"triton-anchor-local-ci:{key}:{self.task['task_id']}",
+                "output": {"title": "Passed", "summary": "Verified"}}]}
+
+        with patch.object(client, "request", side_effect=request):
+            client.restore_preflight(self.task)
+            client.restore_preflight(self.task)  # Retry must not duplicate the migrated checks.
+            client.status(self.task, "success", "Local CI: pass")
+        self.assertEqual(len(writes), 4)
+        self.assertEqual([data["head_sha"] for path, data in writes[:3]], [self.tested] * 3)
+        self.assertEqual(writes[-1][0], f"statuses/{self.tested}")
+        with patch.object(client, "check_runs", return_value=[]), patch.object(client, "check") as check:
+            with self.assertRaisesRegex(ValueError, "Missing preflight"):
+                client.restore_preflight(self.task)
+            check.assert_not_called()
+        failure = {"id": 1, "name": "local-ci/basic", "status": "completed", "conclusion": "failure", "app": {"slug": "github-actions"},
+                   "external_id": f"triton-anchor-local-ci:basic:{self.task['task_id']}"}
+        with patch.object(client, "check_runs", return_value=[failure]), patch.object(client, "check") as check:
+            with self.assertRaisesRegex(ValueError, "not successful"):
+                client.restore_preflight(self.task)
+            check.assert_not_called()
+
+    def test_dashboard_history_restores_modern_and_legacy_data_without_gate_writes(self):
+        from types import SimpleNamespace
+        store = SimpleNamespace(root=self.root / "archive", url="https://gitee.com/example/results.git", branch="results")
+        folder = store.root / "runs/pr/branch-main/pr-7" / self.head / "run-1"
+        folder.mkdir(parents=True)
+        result = self.result()
+        (folder / "result.json").write_text(json.dumps(result))
+        legacy = store.root / "runs/ci_full/main" / self.head / "20260724T112410Z-old"
+        legacy.mkdir(parents=True)
+        (legacy / "delivery-summary.txt").write_text(
+            f"target_sha: {self.head}\nbranch: old-main\nstatus: 1\nbackend_profile: sophgo-cmodel\n"
+            "flaggems_test_mode: full\nflaggems_status: fail\ncompile_time_status: pass\n"
+            "backend_rebuild_status: pass\nprivate_path: /private/credentials\n")
+        (legacy / "flaggems-summary.json").write_text(json.dumps({"mode": "full", "results": [{"op": "add", "test_status": "失败"}]}))
+        (legacy / "compile-benchmark.json").write_text(json.dumps({"summary": {"add": {"compile_est": {"median_ms": 12}}}}))
+        rows = g.history_rows(store, [])
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["historical"] for row in rows))
+        self.assertNotIn("private", json.dumps(rows))
+        old = next(row for row in rows if row["task"]["target_branch"] == "old-main")
+        self.assertEqual(old["result"]["checks"][1]["details"]["flaggems-summary"]["mode"], "full")
+        self.assertTrue(old["artifact_urls"]["flaggems-summary.json"].startswith("https://gitee.com/"))
+        self.assertEqual(len(g.history_rows(store, [{"task": self.task, "result": result}])), 1)
 
     def test_review_evidence_links_only_safe_paths_on_the_frozen_revision(self):
         self.assertEqual(g.feedback_evidence({"kind": "architecture", "evidence": [
@@ -1206,7 +1283,7 @@ README only
 
         with patch.object(gh, "request", side_effect=request):
             self.assertTrue(gh.finish_inactive_pr(7))
-        self.assertEqual([path for path, _ in writes], [f"statuses/{self.head}", "check-runs/12"])
+        self.assertEqual([path for path, _ in writes], [f"statuses/{self.tested}", "check-runs/12", f"statuses/{self.head}"])
         self.assertEqual(writes[0][1]["state"], "error")
         self.assertEqual(writes[1][1]["conclusion"], "cancelled")
 
@@ -1309,12 +1386,12 @@ README only
             client.comment(self.task, "first report")
             client.comment(self.task, "first report")
             client.comment(self.task, "updated report")
-            self.assertEqual(len(calls), 4)
+            self.assertEqual(len(calls), 3)
             self.assertEqual(calls[-1][0], "POST")
             self.assertTrue(comments[0]["body"].startswith(g.MARKER))
             self.assertTrue(comments[0]["body"].endswith("first report"))
             client.comment(self.task, "first report")
-            self.assertEqual(len(calls), 4)  # Retry after a later event is also idempotent.
+            self.assertEqual(len(calls), 3)  # Retry after a later event is also idempotent.
             client.comment({**self.task, "task_id": "a" * 64}, "first report")
             self.assertEqual(len(comments), 3)  # Another task never reuses an old comment.
             self.assertFalse(any(call[0] == "PATCH" for call in calls))
@@ -1325,8 +1402,10 @@ README only
             self.assertFalse(
                 client.status_matches(self.task, "pending", "Different result")
             )
-            self.assertEqual(calls[1][2]["context"], "local-ci/summary")
-            statuses[self.head].insert(
+            self.assertEqual(calls[0][1], f"statuses/{self.tested}")
+            self.assertEqual(calls[0][2]["context"], "local-ci/summary")
+            self.assertNotIn(self.head, statuses)
+            statuses[self.tested].insert(
                 0,
                 {
                     "context": "local-ci/summary",

@@ -503,6 +503,12 @@ tbody tr:hover {
   font-size: 12px;
 }
 
+.measurement-source {
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .worker-identity {
   flex-wrap: wrap;
   justify-content: flex-end;

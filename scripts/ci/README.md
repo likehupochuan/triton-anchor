@@ -27,11 +27,11 @@
 | `GITEE_USERNAME` / secret `GITEE_TOKEN` | 该仓库的 Git 读写权限 |
 | `local-ci-fork-approval` environment | 外部 fork 审批；必须实际保存非空 required reviewers |
 
-无需配置控制分支、控制 SHA 或目标分支列表的 Actions 变量。服务器通过 `control_repo_url` / `control_branch` 从 Gitee 自动快进控制 checkout；Worker 要求任务中的控制 SHA 与服务器版本一致。各 PR 目标分支仍需在服务器配置对应环境 profile。封存结果可继续单独补传。接收派发到 main，github-pages environment 须允许 main 部署。
+无需配置控制分支、控制 SHA 或目标分支列表的 Actions 变量。服务器通过 `control_repo_url` / `control_branch` 从 Gitee 自动快进控制 checkout。新 PR 任务使用 `control_policy=worker`，由服务器当前已安装的可信控制代码执行，不要求与网关记录的 `worker_revision_sha` 一致，该字段也不再参与新 PR 的任务身份；实际控制版本记录在结果 `environment.control_revision`。旧格式任务身份保持兼容，push/manual 仍使用原有精确控制版本更新机制。各 PR 目标分支仍需在服务器配置对应环境 profile。封存结果可继续单独补传。接收派发到 main，github-pages environment 须允许 main 部署。
 
-PR 分支保护如需配置 required checks，应使用：`local-ci/basic`、`local-ci/api`、`local-ci/security`、`local-ci/summary`。前三项是被测分支提交或 PR head 上的 Check Runs，summary 是 commit status，避免同一名称同时对应两种门禁。真实失败使用 `failure`，取消使用 `cancelled`，被上游阻断或未执行使用 `action_required`；三者都不放行，且不将未执行误报成测试失败。不能用 `skipped` 或 `neutral` 表示未完成的必检，因为 GitHub 会将这两种结论视为满足 required check。PR 关闭或转为草稿时，尚在等待审批或执行的状态会结束为取消；网络失败只重试发布封存结果，不重新执行测试。
+PR 分支保护如需配置 required checks，应使用：`local-ci/basic`、`local-ci/api`、`local-ci/security`、`local-ci/summary`。前三项是 Check Runs，summary 是 commit status，统一发布到 `tested_sha`（PR 合并验证提交，push 为提交自身），避免同名双写和 head/merge 来源切换造成前置结果消失。旧 head-only 前置结果仅在任务身份匹配且成功时复制到 tested_sha，再回写最终汇总；缺失或失败的证据不能被补成通过。真实失败使用 `failure`，取消使用 `cancelled`，被上游阻断或未执行使用 `action_required`；三者都不放行，且不将未执行误报成测试失败。不能用 `skipped` 或 `neutral` 表示未完成的必检，因为 GitHub 会将这两种结论视为满足 required check。PR 关闭或转为草稿时，尚在等待审批或执行的状态会结束为取消；网络失败只重试发布封存结果，不重新执行测试。
 
-冻结新任务后立即将 summary 置为 pending。控制分支 `local-ci-unified` 自身 push 且被测 SHA 等于控制 SHA 时，使用已有原生检查，不额外创建 `local-ci/basic`、`local-ci/api`、`local-ci/security`；`local-ci/summary` 仍由服务器结果决定。跨分支、PR 和手动 request 继续排队并回写这三个前置 checks。Basic、API、Security 各阶段结束后，由独立的可信结果作业立即同步该阶段结论到被测分支提交或 PR head 的 Checks，不等待其他检查或人工审批；实际开始时间受 GitHub runner 排队影响。结果作业只检出固定控制代码、校验任务摘要和当前身份，不检出或运行候选代码，也不改变 summary 和 PR 评论。审批卡与 finalizer 仍补齐最终状态，阶段回写失败时可重试。Check Run 按完整 task ID 更新，其他任务的已完成记录保留为历史；同一 head 上被新任务替代的旧等待检查结束为取消，不篡改旧失败结论。已完成任务的前置检查重跑会创建新记录。使用额外前置 checks 的任务在接收、取消和异常收尾回写前核对其最新身份，防止新任务尚未投递到 Gitee 时，旧结果覆盖新门禁。审批拒绝、前置检查或投递失败由 `finalize-preflight` 结束等待状态，不再发送“Local CI 准入结果”评论；已成功投递的任务继续由接收器负责 summary。
+冻结新任务后立即将 summary 置为 pending。控制分支 `local-ci-unified` 自身 push 且被测 SHA 等于控制 SHA 时，使用已有原生检查，不额外创建 `local-ci/basic`、`local-ci/api`、`local-ci/security`；`local-ci/summary` 仍由服务器结果决定。跨分支、PR 和手动 request 继续排队并回写这三个前置 checks。Basic、API、Security 各阶段结束后，由独立的可信结果作业立即同步该阶段结论到 `tested_sha` 的 Checks，不等待其他检查或人工审批；实际开始时间受 GitHub runner 排队影响。结果作业只检出固定控制代码、校验任务摘要和当前身份，不检出或运行候选代码，也不改变 summary 和 PR 评论。审批卡与 finalizer 仍补齐最终状态，阶段回写失败时可重试。Check Run 按完整 task ID 更新，其他任务的已完成记录保留为历史；同一被测提交上被新任务替代的旧等待检查结束为取消，不篡改旧失败结论。已完成任务的前置检查重跑会创建新记录。使用额外前置 checks 的任务在接收、取消和异常收尾回写前核对其最新身份，防止新任务尚未投递到 Gitee 时，旧结果覆盖新门禁。审批拒绝、前置检查或投递失败由 `finalize-preflight` 结束等待状态，不再发送“Local CI 准入结果”评论；已成功投递的任务继续由接收器负责 summary。
 
 GitHub Checks 的名称、结论、标题、状态说明，以及 `local-ci/summary` 的说明保持英文；审批卡、最终 PR 评论和 Agent 的面向维护者解释保持中文。旧任务取消只更新 Checks/status 与 Gitee 停止标记，不追加“Local CI 旧任务已取消”评论；历史评论不自动删除。
 
@@ -39,7 +39,7 @@ GitHub Checks 的名称、结论、标题、状态说明，以及 `local-ci/summ
 
 PR 信息、Basic、API、Security 必须全部通过才显示审批卡；失败、取消、跳过或缺失结果均不显示卡片，也不进入人工审批或投递服务器任务。该条件同时由 workflow 和网关检查。失败详情继续同步英文 Checks/status；PR 信息缺失时保留带感谢、明确补充项和更新描述指引的中文提示，不重复发送准入结果汇总。历史评论不自动删除。
 
-PR 评论是追加式历史，不再使用全局 marker 查找并覆盖旧评论。任务 ID 与完整反馈内容共同确定事件标记；新提交、新运行、审批卡与最终结果各自追加，同一事件的发布重试只查重。旧格式评论原样保留。最终结果以中文展示结论、提交/运行身份、已执行检查与审查、未选/未执行范围、阻塞项和可用证据链接；机器状态枚举、工具 ID 和原始诊断保留原值，Agent 的解释与最终答复要求中文。
+PR 评论是追加式历史，不再使用全局 marker 查找并覆盖旧评论。任务 ID 与完整反馈内容共同确定隐藏事件标记；新提交、新运行各自追加，同一事件的发布重试只查重。旧格式评论原样保留。最终结果以中文展示结论，“PR 提交”与“合并后验证提交”分行显示，不展示 task_id/run_id；检查与审查表不再逐项附日志证据，完整报告链接仍保留。未选/未执行范围与阻塞项继续展示；机器状态枚举、工具 ID 和原始诊断保留原值，Agent 的解释与最终答复要求中文。
 
 部署此状态修复时，`main` 路由文件的 `receive` job 也须包含 `checks: read`，供接收器核对任务身份；其 `publish`/`deploy-dashboard` 拆分也须同步，因为 `mode=receive` 工作流在 main 运行。`local-ci-unified` 中的 prepare/finalize 使用 `checks: write`；finalize 只读 PR，不再需要写评论权限，审批验证使用 `checks: read`。仅更新控制分支不会自动改变 main 上的工作流定义。
 

@@ -30,7 +30,7 @@ python3 bootstrap_control.py \
 
 每任务一个容器，Codex、构建和测试共用 `identities.task` / `identities.gid` 的非 root 身份。candidate、base 和临时实验是任务内的数据目录。可写挂载只有 `work/<head_sha>/<run_id> → /task` 与当前运行目录的 `artifacts → /task/artifacts`；运行目录按 [本地与 Gitee 共用的命名规则](../README.md) 分层。任务结束后删除临时运行目录及空的 SHA 父目录，保留其他运行和持久化证据；旧 task_id 工作目录按原句柄安全清理。直接将 `control_root`（服务器上的 `control_anchor`）中的 `scripts`、`api_contract` 和 `envsetup.sh` 只读挂载到容器 `/opt/local-ci/control/` 下的对应位置，不再导出 `environments/control-revisions/<SHA>` 快照。LLVM、FlagGems、后端等服务器依赖仍只读挂载；`.git`、凭据、状态、私有日志和已封存结果留在宿主，不能放入上述挂载目录。
 
-Worker 接单仍校验控制 SHA，并在整个任务期间持有现有 `control.lock`。自动更新拿不到独占锁，或发现本实例尚有任务容器或清理容器未移除时，会延后切换 checkout。挂载前仅将受版本控制的运行文件和目录设为容器可读，兼容服务的 `UMask=0077`。手动更新 `control_anchor` 时，须先停止 Worker、确认任务容器已退出并清理，再更新和启动 Worker。旧任务的快照仍可用于恢复清理，但新任务不再创建快照。
+新 PR 任务的 `control_policy=worker` 表示使用服务器已安装的可信控制版本，不因网关记录的控制 SHA 不同而等待升级；结果记录实际 `control_revision`。push/manual 和旧格式固定版本任务仍校验控制 SHA。所有任务均检查进程与磁盘版本一致，并在整个任务期间持有现有 `control.lock`。自动更新拿不到独占锁，或发现本实例尚有任务容器或清理容器未移除时，会延后切换 checkout。挂载前仅将受版本控制的运行文件和目录设为容器可读，兼容服务的 `UMask=0077`。手动更新 `control_anchor` 时，须先停止 Worker、确认任务容器已退出并清理，再更新和启动 Worker。旧任务的快照仍可用于恢复清理，但新任务不再创建快照。
 
 `runtime.py` 负责镜像及容器生命周期；`container_fs.py` 在容器内准备工作目录、独立 venv 和私有 Codex 会话，结束后清理凭据。任务命令可写自己的源码和构建输出；取消、超时和重启恢复由 Worker 停止对应任务，清理不删除已经保存的结果。
 

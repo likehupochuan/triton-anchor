@@ -371,7 +371,8 @@ def test_task_mounts_expose_only_work_artifacts_and_readonly_control(tmp_path):
         pr_number=7,
         target_branch="main",
         llvm_hash="b" * 40,
-        worker_revision_sha="c" * 40,
+        worker_revision_sha="f" * 40,
+        control_policy="worker",
     )
     with (
         patch.object(manager, "_control_revision", return_value="c" * 40),
@@ -389,6 +390,7 @@ def test_task_mounts_expose_only_work_artifacts_and_readonly_control(tmp_path):
         handle = manager.acquire_task(task, "run-1")
     ensure.assert_called_once_with("triton_v3.0", "b" * 40)
     assert handle["target_branch"] == "main"
+    assert handle["control_revision"] == "c" * 40
     assert handle["profile_branch"] == "triton_v3.0"
     create = next(c for c in calls if c[0] == "create")
     mounts = [create[i + 1] for i, x in enumerate(create) if x == "--mount"]

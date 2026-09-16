@@ -243,8 +243,14 @@ def test_heartbeat_exposes_head_without_replacing_task_identity(tmp_path):
     assert health["tasks"][0]["task_id"] == task["task_id"]
 
 
-def test_task_waits_for_automatic_control_update(tmp_path):
+@pytest.mark.parametrize("unpinned", [False, True])
+def test_task_waits_for_automatic_control_update(tmp_path, unpinned):
     task = manifest()
+    if unpinned:
+        task["control_policy"] = "worker"
+        task["task_id"] = task_id(task)
+        prefix = f"ci/pr-7/{task['task_id']}"
+        task.update(task_ref=prefix + "/tested", base_task_ref=prefix + "/base", head_task_ref=prefix + "/head")
 
     class Relay:
         def refresh(self):
@@ -274,6 +280,11 @@ def test_task_waits_for_automatic_control_update(tmp_path):
         control_request_selector=lambda config, current, requests, **kwargs: requests[0],
     )
     request = worker.scan()
+    if unpinned:
+        assert request is None
+        assert worker.journal.tasks()[0]["task_id"] == task["task_id"]
+        assert not (tmp_path / "control-update/request.json").exists()
+        return
     assert worker.journal.tasks() == []
     assert request == {
         "revision": task["worker_revision_sha"],

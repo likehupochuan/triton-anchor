@@ -259,6 +259,7 @@ class Worker:
                     "image_id",
                 )
             }
+            environment["control_revision"] = generation.get("control_revision", self.running_control_revision)
             # Both source identities are available offline; Codex chooses whether to build a baseline.
             executor.prepare("base")
             executor.write_context(policy, changes)
@@ -452,7 +453,8 @@ class Worker:
                 valid, _ = self.relay.validity(task)
                 if not valid:
                     continue
-                if current_revision and task.get("worker_revision_sha") != current_revision:
+                if (task.get("control_policy") != "worker" and current_revision
+                        and task.get("worker_revision_sha") != current_revision):
                     waiting.append(
                         {
                             "revision": task["worker_revision_sha"],

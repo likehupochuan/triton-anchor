@@ -93,7 +93,7 @@
     if (feed.schema !== 'triton-anchor-dashboard' || !Array.isArray(feed.tasks)) throw new Error('结果数据格式不兼容');
     const ordered = [...feed.tasks].sort((a,b) => timestamp(b.task?.captured_at) - timestamp(a.task?.captured_at));
     const latest = new Map();
-    for (const item of ordered) if (!latest.has(subject(item.task || {}))) latest.set(subject(item.task || {}), item.task?.task_id);
+    for (const item of ordered) if (!item.historical && !latest.has(subject(item.task || {}))) latest.set(subject(item.task || {}), item.task?.task_id);
     const runs = ordered.map(item => {
       const task = item.task || {}, result = item.result || {};
       const artifacts = array(result.artifacts).map(entry => ({...entry,
@@ -114,7 +114,7 @@
       const blockers = array(result.blocking_reasons);
       return {...task, task_id: task.task_id || result.task?.task_id || '', run_id: result.run_id || 'pending',
         completed_at: result.completed_at || Math.max(0,...checks.map(c => timestamp(c.finished_at))) / 1000 || task.captured_at,
-        is_current: latest.get(subject(task)) === task.task_id, conclusion, local_conclusion: status(result.status || local),
+        is_current: !item.historical && latest.get(subject(task)) === task.task_id, historical:!!item.historical, conclusion, local_conclusion: status(result.status || local),
         artifacts, checks, evidence, performance,
         policy: {...(result.policy || {}), docs_only: result.policy?.impact?.level === 'non_executable',
                  manual_full: task.full, changed_paths: array(result.policy?.changes).map(c => c.path)},
@@ -130,8 +130,8 @@
       runs, warnings:ordered.filter(item => item.receiver_error).map(item => ({path:item.task?.task_id, reason:item.receiver_message || item.receiver_error}))};
   }
   function business(data) {
-    const runs = data.runs;
-    const full = runs.find(run => run.checks.some(check => check.details?.["flaggems-summary"]?.mode === 'full'));
+    const runs = [...data.runs].sort((a,b)=>timestamp(b.completed_at)-timestamp(a.completed_at));
+    const full = runs.find(run => run.checks.some(check => check.details?.["flaggems-summary"]?.mode === 'full' && array(check.details["flaggems-summary"].results).length));
     const fg = full?.checks.find(check => check.details?.["flaggems-summary"]?.mode === 'full')?.details["flaggems-summary"];
     const operators = array(fg?.results).map((row,index) => ({index:row.index || index+1, name:row.op,
       status:({'通过':'passed','成功':'passed','失败':'failed','未通过':'failed','执行错误':'error','infra_error':'error','error':'error','超时':'timeout'}[row.test_status] || (row.exit_code === 0 && row.passed > 0 ? 'passed' : 'failed')),
@@ -140,30 +140,37 @@
     const latestBackends = new Map();
     for (const run of runs) {
       const profile = run.environment.profile || run.environment.generation || '未记录环境';
-      if (run.checks.some(c => c.id.startsWith('backend_') && c.status !== 'not_applicable') && !latestBackends.has(profile)) latestBackends.set(profile,run);
+      if (run.checks.some(c => c.id.startsWith('backend_') && ['passed','failed','error','cancelled'].includes(c.status)) && !latestBackends.has(profile)) latestBackends.set(profile,run);
     }
     const backends = [...latestBackends].map(([profile,run]) => ({id:profile,name:profile,profile,
       state:run.conclusion === 'success' ? 'passed' : status(run.conclusion),sha:run.tested_sha,tested_at:run.completed_at,
       tests:{backend:run.checks.find(c => c.id === 'backend_tests')?.status || 'unknown',
         ...Object.fromEntries(['compile_time','pass_profile','ir_serialization'].map(id => [id,run.checks.find(c => c.id === id)?.status || 'unknown']))},
       result_url:run.result_url}));
-    const measured = runs.find(run => run.checks.some(c => c.details?.candidate));
-    const compile = measured?.checks.find(c => c.id === 'compile_time')?.details || {};
-    const passes = measured?.checks.find(c => c.id === 'pass_profile')?.details || {};
-    const ir = measured?.checks.find(c => c.id === 'ir_serialization')?.details || {};
+    const measurements = Object.fromEntries(['compile_time','pass_profile','ir_serialization'].map(id=>[id,
+      runs.find(run=>run.checks.some(c=>c.id===id && Object.keys(c.details?.candidate?.summary || {}).length))]));
+    const measured = measurements.compile_time || measurements.pass_profile || measurements.ir_serialization;
+    const compile = measurements.compile_time?.checks.find(c => c.id === 'compile_time')?.details || {};
+    const passes = measurements.pass_profile?.checks.find(c => c.id === 'pass_profile')?.details || {};
+    const ir = measurements.ir_serialization?.checks.find(c => c.id === 'ir_serialization')?.details || {};
     const compileRows = Object.entries(compile.candidate?.summary || {}).map(([name,value]) => {
       const compare = array(compile.comparison?.kernels).find(row => row.kernel === name || row.name === name);
       return {name,candidate_ms:value.compile_est?.median_ms,delta_percent:compare?.change_ratio == null ? null : compare.change_ratio * 100,status:compare?.status || 'passed'};
     }).filter(row => Number.isFinite(row.candidate_ms));
     const passRows = Object.entries(passes.candidate?.summary || {}).flatMap(([kernel,value]) =>
-      Object.entries(value.passes || {}).map(([name,timing]) => ({name:kernel + ' · ' + name,median_ms:timing.wall_ms?.median_ms})))
+      Object.keys(value.passes || {}).length
+        ? Object.entries(value.passes).map(([name,timing]) => ({name:kernel + ' · ' + name,median_ms:timing.wall_ms?.median_ms}))
+        : array(value.hotspots).map(row=>({name:kernel+' · '+row.name,median_ms:row.median_ms})))
       .filter(row => Number.isFinite(row.median_ms)).sort((a,b) => b.median_ms-a.median_ms).slice(0,20);
     const irRows = Object.entries(ir.candidate?.summary || {}).flatMap(([kernel,value]) =>
       Object.entries(value.metrics || {}).map(([name,timing]) => ({name:kernel + ' · ' + name,median_ms:timing.median_ms})))
       .filter(row => Number.isFinite(row.median_ms));
     return {manifest:{generated_at:data.generated_at,mode:data.data_mode === 'fixture' ? 'mock' : 'live',downloads:{}},
-      fullTest:{run:{backend:full?.environment.profile || '尚无全量算子结果',sha:full?.tested_sha || ''},operators},
-      backends:{backends},performance:{backend:measured?.environment.profile || '尚无有效测量',compile_time:{kernels:compileRows},pass_profile:{hotspots:passRows},ir_serialization:{metrics:irRows}}};
+      fullTest:{run:{backend:full?.environment.profile || '尚无全量算子结果',sha:full?.tested_sha || '',measured_at:full?.completed_at},operators},
+      backends:{backends},performance:{backend:measured?.environment.profile || '尚无有效测量',
+        compile_time:{kernels:compileRows,backend:measurements.compile_time?.environment.profile,sha:measurements.compile_time?.tested_sha,measured_at:measurements.compile_time?.completed_at},
+        pass_profile:{hotspots:passRows,backend:measurements.pass_profile?.environment.profile,sha:measurements.pass_profile?.tested_sha,measured_at:measurements.pass_profile?.completed_at},
+        ir_serialization:{metrics:irRows,backend:measurements.ir_serialization?.environment.profile,sha:measurements.ir_serialization?.tested_sha,measured_at:measurements.ir_serialization?.completed_at}}};
   }
   global.LocalCIData = {normalize,business,status,safeUrl,blockerGroups};
   if (typeof module !== 'undefined' && module.exports) module.exports = global.LocalCIData;

@@ -75,7 +75,11 @@ def metadata_digest(task: dict) -> str:
 
 
 def task_id(task: dict) -> str:
-    return digest({key: task[key] for key in IDENTITY_FIELDS})
+    identity = {key: task[key] for key in IDENTITY_FIELDS}
+    if task.get("control_policy") == "worker":
+        identity.pop("worker_revision_sha")
+        identity["control_policy"] = "worker"
+    return digest(identity)
 
 
 def current_key(task: dict) -> str:
@@ -146,6 +150,10 @@ def validate_task(
     }
     if required - task.keys():
         raise ContractError("Task is missing required identity fields")
+    if task.get("control_policy") not in {None, "worker"} or (
+        task.get("control_policy") == "worker" and not task["pr_number"]
+    ):
+        raise ContractError("Worker-selected control is only supported for PR tasks")
     if task["repository"] not in repositories:
         raise ContractError("Task repository is not configured for this worker")
     if type(task["pr_number"]) is not int or task["pr_number"] < 0:

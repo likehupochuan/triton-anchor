@@ -36,6 +36,7 @@ from agent_ci.protocol import (
     current_key,
     digest,
     metadata_digest,
+    task_id as compute_task_id,
     llvm_hash_from_files,
     is_legacy_task,
     result_task_prefixes,
@@ -43,6 +44,8 @@ from agent_ci.protocol import (
     validate_result,
     within,
 )
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dashboard_history import history_rows
 
 CONTROL_BRANCH = "local-ci-control"
 RESULTS_BRANCH = "local-ci-results"
@@ -212,8 +215,8 @@ class GitHub:
         return [row for row in tree["tree"] if row.get("mode") == "160000"]
 
     def status(self, task: dict, state: str, description: str, url: str = "") -> None:
-        # The PR-head summary is the last write, after the tested-merge status.
-        for sha in dict.fromkeys((task["tested_sha"], task["head_sha"])):
+        # Every gate belongs to the same tested commit throughout the lifecycle.
+        for sha in (task["tested_sha"],):
             self.request(
                 f"statuses/{sha}",
                 "POST",
@@ -226,8 +229,8 @@ class GitHub:
             )
 
     def status_matches(self, task: dict, state: str, description: str) -> bool:
-        """Read the latest status for both contexts; no relay delivery records."""
-        for sha in dict.fromkeys((task["tested_sha"], task["head_sha"])):
+        """Read the latest summary on the same commit as the preflight checks."""
+        for sha in (task["tested_sha"],):
             latest = None
             for page in range(1, 21):
                 rows = self.request(f"commits/{sha}/statuses?per_page=100&page={page}")
@@ -336,15 +339,15 @@ class GitHub:
             self.request(f"check-runs/{existing['id']}", "PATCH", payload)
         else:
             self.request(
-                "check-runs", "POST", {**payload, "head_sha": task["head_sha"]}
+                "check-runs", "POST", {**payload, "head_sha": task["tested_sha"]}
             )
         return True
 
-    def check_runs(self, task: dict, key: str) -> list[dict]:
+    def check_runs(self, task: dict, key: str, *, sha: str | None = None) -> list[dict]:
         runs = []
         for page in range(1, 21):
             response = self.request(
-                f"commits/{task['head_sha']}/check-runs?check_name="
+                f"commits/{sha or task['tested_sha']}/check-runs?check_name="
                 f"{quote(CHECK_NAMES[key], safe='')}&filter=all&per_page=100&page={page}"
             )
             batch = response.get("check_runs", [])
@@ -358,9 +361,12 @@ class GitHub:
         if has_native_preflight(task):
             return True
         for key, name in CHECK_NAMES.items():
+            runs = self.check_runs(task, key)
+            if not runs and task["head_sha"] != task["tested_sha"]:
+                runs = self.check_runs(task, key, sha=task["head_sha"])
             owned = [
                 row
-                for row in self.check_runs(task, key)
+                for row in runs
                 if row.get("name") == name
                 and (row.get("app") or {}).get("slug") == "github-actions"
                 and str(row.get("external_id", "")).startswith(
@@ -379,7 +385,14 @@ class GitHub:
         pr = self.request(f"pulls/{pr_number}")
         if pr["state"] == "open" and not pr.get("draft"):
             return False
-        sha = pr["head"]["sha"]
+        # Retire both current merge checks and legacy head-only checks.
+        seen = set()
+        for sha in dict.fromkeys((pr.get("merge_commit_sha"), pr["head"]["sha"])):
+            if sha:
+                self._finish_inactive_sha(sha, seen)
+        return True
+
+    def _finish_inactive_sha(self, sha: str, seen: set) -> None:
         for page in range(1, 21):
             statuses = self.request(f"commits/{sha}/statuses?per_page=100&page={page}")
             latest = next(
@@ -409,7 +422,9 @@ class GitHub:
                         ("triton-anchor-local-ci:", "triton-anchor-ci-v4:")
                     )
                     and run.get("status") != "completed"
+                    and run["id"] not in seen
                 ):
+                    seen.add(run["id"])
                     self.request(
                         f"check-runs/{run['id']}",
                         "PATCH",
@@ -424,7 +439,31 @@ class GitHub:
                     )
             if len(runs) < 100:
                 break
-        return True
+
+    def restore_preflight(self, task: dict) -> None:
+        """Upgrade old head-only checks before publishing a merge-commit summary."""
+        if has_native_preflight(task):
+            return
+        for key in CHECK_NAMES:
+            identity = f"triton-anchor-local-ci:{key}:{task['task_id']}"
+            for sha in dict.fromkeys((task["tested_sha"], task["head_sha"])):
+                owned = [row for row in self.check_runs(task, key, sha=sha)
+                         if row.get("external_id") == identity
+                         and row.get("name") == CHECK_NAMES[key]
+                         and (row.get("app") or {}).get("slug") == "github-actions"]
+                latest = max(owned, key=lambda row: int(row["id"]), default=None)
+                if latest:
+                    if latest.get("status") != "completed" or latest.get("conclusion") != "success":
+                        raise ValueError("Preflight is not successful for this task")
+                    if sha != task["tested_sha"]:
+                        output = latest.get("output") or {}
+                        self.check(task, key, "completed", "success",
+                                   output.get("title", CHECK_NAMES[key] + ": success"),
+                                   output.get("summary", "Preflight completed successfully."),
+                                   latest.get("details_url", ""))
+                    break
+            else:
+                raise ValueError("Missing preflight evidence for this task")
 
     def comment(self, task: dict, body: str) -> bool:
         if not task["pr_number"]:
@@ -538,7 +577,9 @@ def prepare_task(
         external_fork=external,
     )
     task["metadata_digest"] = metadata_digest(task)
-    task["task_id"] = digest({key: task[key] for key in IDENTITY_FIELDS})
+    if pr_number:
+        task["control_policy"] = "worker"
+    task["task_id"] = compute_task_id(task)
     # Different tasks never move one another's source refs; the manifest is last.
     prefix = (
         f"ci/pr-{pr_number}/{task['task_id']}"
@@ -927,9 +968,8 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
     }
     lines = [
         "## Local CI 审查反馈", "", f"**结论：{verdict[result['status']]}**", "",
-        f"PR 提交：`{task['head_sha']}`；合并后验证提交：`{task['tested_sha']}`。",
-        f"任务：`{task['task_id']}`；运行：`{result['run_id']}`。",
-        "此评论仅对应上述提交与运行；新结果追加评论，发布重试不覆盖历史。",
+        f"PR 提交：`{task['head_sha']}`", "",
+        f"合并后验证提交：`{task['tested_sha']}`",
         "", "### 变更意图与审查结论", "", feedback_text(result["summary"]),
         "", "### 检查与审查结果", "", "| 检查 | 结果 | 说明 |", "| --- | --- | --- |",
     ]
@@ -942,8 +982,7 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
         if item["status"] in {"not_selected", "not_applicable", "skipped"}:
             limitations.append(f"{label}：{state}。{detail}")
             continue
-        evidence = feedback_evidence(item, task, artifact_urls or {})
-        lines.append(f"| {label} | {state} | {detail} {evidence} |")
+        lines.append(f"| {label} | {state} | {detail} |")
     if len(limitations) == len(result["checks"]) + len(result["reviews"]):
         lines.append("| 检查与审查 | 未完成 | 尚无可核对的记录 |")
     blockers = [feedback_text(reason) for reason in result["blocking_reasons"]]
@@ -992,8 +1031,7 @@ def approval_card(task: dict, stages: dict, eligible: bool, approval_error: str 
     lines.extend(["", "### 本次审批对应的固定版本", "",
                   f"- 目标分支：{feedback_text(task['target_branch'])}"])
     for key, label in (("head_sha", "PR 提交"), ("base_sha", "目标分支基线"),
-                       ("tested_sha", "被测合并提交"), ("worker_revision_sha", "可信控制代码"),
-                       ("task_id", "冻结任务")):
+                       ("tested_sha", "被测合并提交")):
         lines.append(f"- {label}：`{task[key]}`")
     lines.extend(["", "### 任务范围与审批边界", "",
                   "按显式 full 要求覆盖全部可用工具。" if task.get("full") else
@@ -1318,6 +1356,7 @@ def collect_results(
                 )
                 control.refresh()
                 if active and current_task(gh, control, task):
+                    gh.restore_preflight(task)
                     state = GITHUB_STATES[result["status"]]
                     description = publication_description(
                         result["status"], result_digest
@@ -1353,6 +1392,7 @@ def collect_results(
                 publication_error(gh, control, task)
         rows.append(row)
     dashboard.mkdir(parents=True, exist_ok=True)
+    rows.extend(history_rows(results, rows))
     (dashboard / "tasks.json").write_bytes(
         canonical(
             {

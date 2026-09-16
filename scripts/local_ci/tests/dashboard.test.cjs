@@ -37,6 +37,31 @@ test('empty initial feed does not create placeholder success data', () => {
   assert.equal(data.performance.compile_time.kernels.length,0);
 });
 
+test('historical operator and per-metric results survive pending or partially selected tasks', () => {
+  const feed = {schema:'triton-anchor-dashboard',tasks:[
+    {task:task('c','2026-09-12'),status:'pending'},
+    {task:task('b','2026-09-11'),historical:true,result:{completed_at:'2026-09-11',checks:[
+      {tool_id:'compile_time',status:'pass',details:{candidate:{summary:{add:{compile_est:{median_ms:7}}}}}},
+      {tool_id:'flaggems',status:'not_selected'},
+    ]}},
+    {task:task('a','2026-09-10'),historical:true,result:{completed_at:'2026-09-10',environment:{profile:'legacy'},checks:[
+      {tool_id:'backend_tests',status:'pass'},
+      {tool_id:'flaggems',status:'fail',details:{'flaggems-summary':{mode:'full',results:[{op:'add',test_status:'失败'}]}}},
+      {tool_id:'compile_time',status:'pass',details:{candidate:{summary:{add:{compile_est:{median_ms:12}}}}}},
+      {tool_id:'pass_profile',status:'pass',details:{candidate:{summary:{add:{hotspots:[{name:'old-pass',median_ms:3}]}}}}},
+    ]}},
+  ]};
+  const normalized=normalize(feed), data=business(normalized);
+  assert.deepEqual(normalized.runs.map(run=>run.is_current),[true,false,false]);
+  assert.equal(data.fullTest.operators[0].name,'add');
+  assert.equal(data.fullTest.run.sha,'a'.repeat(40));
+  assert.equal(data.backends.backends[0].profile,'legacy');
+  assert.equal(data.performance.compile_time.kernels[0].candidate_ms,7);
+  assert.equal(data.performance.compile_time.sha,'b'.repeat(40));
+  assert.equal(data.performance.pass_profile.hotspots[0].median_ms,3);
+  assert.equal(data.performance.pass_profile.sha,'a'.repeat(40));
+});
+
 
 test('performance views read runner candidate and comparison report keys', () => {
   const data = business(normalize({schema:'triton-anchor-dashboard',tasks:[{
@@ -185,12 +210,13 @@ test('all original reasons survive classification, with exact duplicates collaps
   assert.equal(groups.flatMap(group=>group.reasons).length,3);
 });
 
-test('blocker groups render Chinese headings and preserve original text without HTML injection', () => {
+test('blockers render one concise section without duplicate reviews or expandable logs', () => {
   const vm = require('node:vm');
   const fs = require('node:fs');
   class Element {
     constructor(tag) { this.tag=tag; this.children=[]; this.textContent=''; }
     append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children=[...children]; }
     addEventListener() {}
     set innerHTML(_value) { throw new Error('Remote text must not be rendered as HTML'); }
   }
@@ -211,29 +237,31 @@ test('blocker groups render Chinese headings and preserve original text without 
   const rendered = flatten(root);
   assert.ok(rendered.some(node=>node.tag==='h4'&&node.textContent.startsWith('服务器环境问题')));
   assert.ok(!rendered.some(node=>node.tag==='h4'&&node.textContent.startsWith('必检 / 审查未完成')));
-  assert.ok(rendered.some(node=>node.textContent==='未完成项目（不代表审查未通过）'));
-  assert.ok(rendered.some(node=>node.textContent==='架构契约审查尚未完成'));
-  assert.ok(rendered.some(node=>node.tag==='summary'&&node.textContent==='查看详情'));
-  assert.ok(rendered.some(node=>node.textContent==='原始阻塞原因：'+original));
+  assert.ok(!rendered.some(node=>node.tag==='details'||node.textContent==='查看详情'));
+  assert.ok(rendered.some(node=>node.textContent===original));
   assert.ok(!rendered.some(node=>node.tag==='img'));
   const visible = node => [node,...(node.tag==='details'?[]:node.children.flatMap(visible))];
   const mainText=visible(root).map(node=>node.textContent).join('\n');
-  assert.ok(mainText.includes('执行错误原因'));
+  assert.ok(mainText.includes('阻塞原因'));
   assert.ok(mainText.includes('控制版本不匹配'));
   assert.ok(!mainText.includes('架构契约审查尚未完成'));
   assert.ok(!mainText.includes('必要审查未通过'));
 
-  // A real negative review remains separate even when the run also has an OOM.
+  // A negative review shares the same blocker section, without misclassifying its text.
   const mixedRoot=new Element('main');
   context.root=mixedRoot;
   context.run=errorRun({summary:'Out of memory',reviews:[
     {kind:'architecture',status:'fail',summary:'内存不足时没有清理资源'},
   ]});
   vm.runInNewContext('renderBlockers(root,run);',context);
-  assert.deepEqual(mixedRoot.children.map(box=>box.children[0].textContent),['执行错误原因','审查未通过']);
+  assert.deepEqual(mixedRoot.children.map(box=>box.children[0].textContent),['阻塞原因']);
   assert.ok(visible(mixedRoot.children[0]).some(node=>node.textContent==='内存不足'));
-  assert.ok(!visible(mixedRoot.children[0]).some(node=>node.textContent==='内存不足时没有清理资源'));
-  assert.ok(visible(mixedRoot.children[1]).some(node=>node.textContent==='内存不足时没有清理资源'));
+  assert.ok(visible(mixedRoot.children[0]).some(node=>node.textContent==='内存不足时没有清理资源'));
+  vm.runInNewContext('renderDetail(run);',context);
+  const detail=flatten(document.getElementById('taskDetail'));
+  assert.equal(detail.filter(node=>node.tag==='h3'&&node.textContent==='阻塞原因').length,1);
+  assert.ok(!detail.some(node=>node.tag==='h3'&&node.textContent==='Codex 审查与定向验证'));
+  assert.ok(!detail.some(node=>node.textContent==='查看详情'));
 });
 
 test('profile errors and unknown execution summaries are not lost behind missing reviews', () => {
