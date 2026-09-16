@@ -999,6 +999,8 @@ README only
                 return {}
             if path.startswith(f"commits/{task['head_sha']}/check-runs?"):
                 return {"check_runs": runs}
+            if "/statuses?" in path:
+                return []
             return self.gh.request(path)
 
         with patch.object(gh, "request", side_effect=request), patch.dict(g.os.environ, {
@@ -1022,20 +1024,66 @@ README only
             self.assertEqual(writes, [])
 
     def test_control_push_keeps_summary_without_duplicate_preflight_checks(self):
+        from types import SimpleNamespace
+
         task = {**self.task, "pr_number": 0, "event_kind": "push",
                 "target_branch": "local-ci-unified", "tested_sha": self.head,
                 "worker_revision_sha": self.head}
+        task["task_id"] = g.compute_task_id(task)
+        manual = {**task, "event_kind": "manual"}
+        manual["task_id"] = g.compute_task_id(manual)
         gh = g.GitHub(g.REPOSITORY, token="fixture")
+        statuses, checks = [], []
+
+        def request(path, method="GET", data=None):
+            if method == "POST" and path == f"statuses/{self.head}":
+                statuses.insert(0, data)
+                return {}
+            if method == "GET" and "/statuses?" in path:
+                return statuses
+            if method == "GET" and "/check-runs?" in path:
+                return {"check_runs": checks}
+            if method == "POST" and path == "check-runs":
+                checks.append({**data, "id": len(checks) + 1, "app": {"slug": "github-actions"}})
+                return {}
+            raise AssertionError((path, method))
+
         with patch.object(g, "is_current", return_value=True), \
-                patch.object(gh, "request") as request, patch.object(gh, "status") as status:
+                patch.object(gh, "request", side_effect=request):
+            self.assertFalse(gh.owns_preflight(task))  # No ownership evidence yet.
             g.begin_preflight(gh, task)
             for key in g.CHECK_NAMES:
                 self.assertFalse(g.sync_preflight(gh, task, {key: "success"}))
             g.finalize_preflight(gh, task, {"prepare": "success", "basic": "failure"})
-            request.assert_not_called()  # No check writes or ownership lookups.
-            self.assertEqual([call.args[1] for call in status.call_args_list], ["pending", "failure"])
+            self.assertEqual([row["state"] for row in reversed(statuses)], ["pending", "failure"])
+            self.assertEqual(checks, [])
             g.finalize_preflight(gh, task, {"enqueue": "success"})
-            self.assertEqual(status.call_count, 2)  # Receiver still owns the final result.
+            self.assertEqual(len(statuses), 2)
+
+            # New manual preflight owns the same SHA before its Gitee enqueue.
+            g.begin_preflight(gh, manual)
+            self.assertEqual(len(checks), 3)
+            self.assertTrue(gh.owns_preflight(manual))
+            self.assertFalse(gh.owns_preflight(task))
+            g.finalize_preflight(gh, task, {"basic": "failure"})
+            self.assertEqual(len(statuses), 3)
+            control = SimpleNamespace(get=lambda path: {"task_id": task["task_id"]}
+                                      if path.startswith("current/") else None)
+            self.assertFalse(g.current_task(gh, control, task))
+
+            # A new native task can also supersede manual checks left on this SHA.
+            g.begin_preflight(gh, task)
+            self.assertTrue(gh.owns_preflight(task))
+            self.assertFalse(gh.owns_preflight(manual))
+            g.finalize_preflight(gh, manual, {"basic": "failure"})
+            self.assertEqual(len(statuses), 4)
+            self.assertEqual(statuses[0]["state"], "pending")
+            self.assertEqual(len(checks), 3)
+            for url in ("https://github.com/example/repo/actions/runs/1",
+                        "https://gitee.com/example/results/blob/results/result.json", ""):
+                gh.status(task, "error", "Local CI: retry publication", url)
+                self.assertTrue(gh.owns_preflight(task))
+                self.assertTrue(statuses[0]["target_url"].startswith(url or "https://"))
 
         for change in ({"target_branch": "main"}, {"event_kind": "manual"},
                        {"pr_number": 7, "event_kind": "pull_request"},
@@ -1241,7 +1289,8 @@ README only
                  "app": {"slug": "github-actions"}}
         before = len(self.gh.statuses)
         with (
-            patch.object(gh, "request", return_value={"check_runs": [newer]}),
+            patch.object(gh, "request", side_effect=lambda path:
+                         [] if "/statuses?" in path else {"check_runs": [newer]}),
             patch.object(self.gh, "owns_preflight", side_effect=gh.owns_preflight),
         ):
             self.assertEqual(g.collect_results(self.gh, control, results, self.root / "dashboard"), [])
@@ -1481,7 +1530,7 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertEqual(steps[0]["with"]["persist-credentials"], "false")
         self.assertEqual(steps[-1]["env"]["EXPECTED_TASK_DIGEST"], "${{ inputs.task_digest }}")
         self.assertEqual(steps[-1]["run"], "python3 scripts/ci/gateway.py checks")
-        self.assertNotIn("statuses", sync["permissions"])
+        self.assertEqual(sync["permissions"]["statuses"], "read")
         self.assertEqual(sync["permissions"]["pull-requests"], "read")
         self.assertTrue(jobs["deploy-dashboard"]["name"].isascii())
         self.assertEqual(jobs["review-card"]["permissions"]["pull-requests"], "write")

@@ -131,6 +131,7 @@ ops 或 categories 展开后超过上限会报错，不自动截断。空 impact
 面向维护者的最终答复、`summary`、检查/审查说明、发现和阻塞原因均使用中文，明确区分
 已执行、未执行和不可比的验证。保留 JSON 字段名、状态枚举、工具 ID、命令、路径与原始
 诊断文本的原貌；引用英文诊断时附中文解释，不翻译代码标识符，不把未知原因猜成结论。
+PR 和 push 任务生成的 `ai_custom_tools/validation.md`，标题、正文、审查结论和验证说明均使用中文；代码、命令、路径及原始日志保留原文。
 
 等待所有验证结束，写 `/task/artifacts/agent-result.json`。这是普通结果汇总，
 不需要 finish RPC、逐命令注册或执行回执。`checks` 必须包含 `change_validation`，用摘要

@@ -6,7 +6,7 @@ on:
       worker_revision_sha: {type: string, required: true}
       stage: {type: string, required: true}
       outcome: {type: string, required: true}
-permissions: {contents: read, pull-requests: read, checks: write}
+permissions: {contents: read, pull-requests: read, checks: write, statuses: read}
 jobs:
   sync:
     name: Sync ${{ inputs.stage }} result

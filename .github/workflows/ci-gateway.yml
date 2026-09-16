@@ -163,7 +163,7 @@ jobs:
     name: Publish Basic CI result
     needs: [prepare, basic]
     if: ${{ always() && needs.prepare.outputs.task_id != '' }}
-    permissions: {contents: read, pull-requests: read, checks: write}
+    permissions: {contents: read, pull-requests: read, checks: write, statuses: read}
     uses: ./.github/workflows/local-ci-preflight-result.yml
     with:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
@@ -174,7 +174,7 @@ jobs:
     name: Publish API result
     needs: [prepare, api]
     if: ${{ always() && needs.prepare.outputs.task_id != '' }}
-    permissions: {contents: read, pull-requests: read, checks: write}
+    permissions: {contents: read, pull-requests: read, checks: write, statuses: read}
     uses: ./.github/workflows/local-ci-preflight-result.yml
     with:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
@@ -185,7 +185,7 @@ jobs:
     name: Publish security result
     needs: [prepare, security]
     if: ${{ always() && needs.prepare.outputs.task_id != '' }}
-    permissions: {contents: read, pull-requests: read, checks: write}
+    permissions: {contents: read, pull-requests: read, checks: write, statuses: read}
     uses: ./.github/workflows/local-ci-preflight-result.yml
     with:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
@@ -223,7 +223,7 @@ jobs:
     if: ${{ needs.review-card.outputs.eligible == 'true' && needs.prepare.outputs.external_fork == 'true' }}
     environment: local-ci-fork-approval
     runs-on: ubuntu-latest
-    permissions: {contents: read, pull-requests: read, actions: read, checks: read}
+    permissions: {contents: read, pull-requests: read, actions: read, checks: read, statuses: read}
     steps:
       - uses: actions/checkout@v4
         with:

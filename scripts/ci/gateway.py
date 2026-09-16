@@ -215,6 +215,10 @@ class GitHub:
         return [row for row in tree["tree"] if row.get("mode") == "160000"]
 
     def status(self, task: dict, state: str, description: str, url: str = "") -> None:
+        # Keep task ownership in the existing summary, including native self-push.
+        if task.get("task_id"):
+            url = url or workflow_url() or f"https://github.com/{self.repository}/commit/{task['tested_sha']}"
+            url = url.split("#", 1)[0] + f"#local-ci-task={task['task_id']}"
         # Every gate belongs to the same tested commit throughout the lifecycle.
         for sha in (task["tested_sha"],):
             self.request(
@@ -228,25 +232,25 @@ class GitHub:
                 },
             )
 
+    def latest_summary(self, task: dict) -> dict | None:
+        for page in range(1, 21):
+            rows = self.request(f"commits/{task['tested_sha']}/statuses?per_page=100&page={page}")
+            latest = next(
+                (row for row in rows if row.get("context") == "local-ci/summary"),
+                None,
+            )
+            if latest or len(rows) < 100:
+                return latest
+        return None
+
     def status_matches(self, task: dict, state: str, description: str) -> bool:
         """Read the latest summary on the same commit as the preflight checks."""
-        for sha in (task["tested_sha"],):
-            latest = None
-            for page in range(1, 21):
-                rows = self.request(f"commits/{sha}/statuses?per_page=100&page={page}")
-                latest = next(
-                    (row for row in rows if row.get("context") == "local-ci/summary"),
-                    None,
-                )
-                if latest or len(rows) < 100:
-                    break
-            if (
-                not latest
-                or latest.get("state") != state
-                or latest.get("description") != description[:140]
-            ):
-                return False
-        return True
+        latest = self.latest_summary(task)
+        return bool(
+            latest
+            and latest.get("state") == state
+            and latest.get("description") == description[:140]
+        )
 
     def check(
         self,
@@ -358,8 +362,13 @@ class GitHub:
 
     def owns_preflight(self, task: dict) -> bool:
         """A newly prepared task owns the gate even before its Gitee enqueue."""
+        latest = self.latest_summary(task)
+        owner = urlparse((latest or {}).get("target_url") or "").fragment
+        expected = f"local-ci-task={task['task_id']}"
+        if owner.startswith("local-ci-task=") and owner != expected:
+            return False
         if has_native_preflight(task):
-            return True
+            return owner == expected
         for key, name in CHECK_NAMES.items():
             runs = self.check_runs(task, key)
             if not runs and task["head_sha"] != task["tested_sha"]:
