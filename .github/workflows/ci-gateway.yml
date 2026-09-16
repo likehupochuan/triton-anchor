@@ -79,7 +79,7 @@ jobs:
     needs: validate-worker
     if: needs.validate-worker.outputs.proceed == 'true'
     runs-on: ubuntu-latest
-    permissions: {contents: read, pull-requests: write, statuses: write, checks: write}
+    permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: read}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -100,7 +100,7 @@ jobs:
     needs: cancel-obsolete
     if: ${{ inputs.action != 'closed' && inputs.action != 'converted_to_draft' }}
     runs-on: ubuntu-latest
-    permissions: {contents: read, pull-requests: write, statuses: write, checks: write}
+    permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: read}
     outputs:
       task_id: ${{ steps.task.outputs.task_id }}
       task_digest: ${{ steps.task.outputs.task_digest }}
@@ -163,7 +163,7 @@ jobs:
     name: Publish Basic CI result
     needs: [prepare, basic]
     if: ${{ always() && needs.prepare.outputs.task_id != '' }}
-    permissions: {contents: read, pull-requests: read, checks: write, statuses: read}
+    permissions: {contents: read, pull-requests: read, checks: write, statuses: read, actions: read}
     uses: ./.github/workflows/local-ci-preflight-result.yml
     with:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
@@ -174,7 +174,7 @@ jobs:
     name: Publish API result
     needs: [prepare, api]
     if: ${{ always() && needs.prepare.outputs.task_id != '' }}
-    permissions: {contents: read, pull-requests: read, checks: write, statuses: read}
+    permissions: {contents: read, pull-requests: read, checks: write, statuses: read, actions: read}
     uses: ./.github/workflows/local-ci-preflight-result.yml
     with:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
@@ -185,7 +185,7 @@ jobs:
     name: Publish security result
     needs: [prepare, security]
     if: ${{ always() && needs.prepare.outputs.task_id != '' }}
-    permissions: {contents: read, pull-requests: read, checks: write, statuses: read}
+    permissions: {contents: read, pull-requests: read, checks: write, statuses: read, actions: read}
     uses: ./.github/workflows/local-ci-preflight-result.yml
     with:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
@@ -293,7 +293,7 @@ jobs:
     needs: [prepare, basic, api, security, review-card, approve-external-fork, enqueue]
     if: ${{ always() && needs.prepare.outputs.task_id != '' && needs.enqueue.result != 'success' }}
     runs-on: ubuntu-latest
-    permissions: {contents: read, pull-requests: read, statuses: write, checks: write}
+    permissions: {contents: read, pull-requests: read, statuses: write, checks: write, actions: read}
     steps:
       - uses: actions/checkout@v4
         with:

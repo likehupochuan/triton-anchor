@@ -64,6 +64,7 @@ CHECK_NAMES = {
 REQUIRED_CONTEXTS = (*CHECK_NAMES.values(), "local-ci/approve", "local-ci/dispatch", "local-ci/summary")
 ALL_CHECK_NAMES = {**CHECK_NAMES, "approve": "local-ci/approve", "dispatch": "local-ci/dispatch"}
 LEGACY_CHECK_NAMES = {"preflight": "local-ci/preflight"}
+READ_CHECK_NAMES = {**ALL_CHECK_NAMES, **LEGACY_CHECK_NAMES, "native_prepare": "Prepare exact task"}
 CHECK_CONCLUSIONS = {
     "success",
     "failure",
@@ -73,6 +74,21 @@ CHECK_CONCLUSIONS = {
     "timed_out",
     "action_required",
 }
+
+
+def check_workflow_id(run: dict) -> str:
+    """Custom Check URLs are rewritten by GitHub; keep identity in our output."""
+    if run.get("native"):
+        return run["workflow_run_id"]
+    match = re.search(r"<!-- local-ci-workflow:(\d+) -->\Z",
+                      (run.get("output") or {}).get("summary") or "")
+    return match[1] if match else ""
+
+
+def check_summary(summary: str, run_id: str) -> str:
+    summary = re.sub(r"\n\n<!-- local-ci-workflow:\d+ -->\Z", "", str(summary))
+    marker = f"\n\n<!-- local-ci-workflow:{run_id} -->" if run_id.isdigit() else ""
+    return summary[:65535 - len(marker)] + marker
 
 
 def has_native_preflight(task: dict) -> bool:
@@ -167,6 +183,7 @@ class GitHub:
                     "Production GitHub repository/API is outside the allowlist"
                 )
         self.token = token if token is not None else os.getenv("GH_TOKEN", "")
+        self.run_identities: dict[str, dict] = {}
 
     def request(self, path: str, method: str = "GET", data: dict | None = None):
         req = Request(
@@ -301,6 +318,8 @@ class GitHub:
         url: str = "",
         *,
         restart: bool = False,
+        run_id: str | None = None,
+        started_at: str = "",
     ) -> bool:
         """Update only this task's Check Run; preserve other tasks as history."""
         if key not in ALL_CHECK_NAMES or status not in {
@@ -326,6 +345,9 @@ class GitHub:
             and (run.get("app") or {}).get("slug") == "github-actions"
         ]
         existing = max(owned, key=lambda run: int(run.get("id", 0)), default=None)
+        start = self.task_start(task) if existing and key != "basic" else {}
+        if start and int(existing["id"]) < int(start["id"]):
+            existing = None
         if restart:
             existing = None
         # A rerun must not reopen a completed check with its previous conclusion.
@@ -356,17 +378,19 @@ class GitHub:
                             "status": "completed", "conclusion": "cancelled",
                             "output": {
                                 "title": "Superseded task cancelled",
-                                "summary": "A newer frozen task owns this commit. See the latest checks.",
+                                "summary": check_summary(
+                                    "A newer frozen task owns this commit. See the latest checks.",
+                                    check_workflow_id(run)),
                             },
                         },
                     )
-        output_data = {"title": str(title)[:255], "summary": str(summary)[:65535]}
+        output_data = {"title": str(title)[:255], "summary": check_summary(
+            summary, os.getenv("GITHUB_RUN_ID", "") if run_id is None else run_id)}
         desired_url = url or ""
         if existing and all(
             (
                 existing.get("status") == status,
                 existing.get("conclusion") == conclusion,
-                (existing.get("details_url") or "") == desired_url,
                 existing.get("external_id") == external_id,
                 (existing.get("output") or {}).get("title") == output_data["title"],
                 (existing.get("output") or {}).get("summary") == output_data["summary"],
@@ -386,6 +410,8 @@ class GitHub:
         if existing:
             self.request(f"check-runs/{existing['id']}", "PATCH", payload)
         else:
+            if key == "basic":
+                payload["started_at"] = started_at or now()
             self.request(
                 "check-runs", "POST", {**payload, "head_sha": task["tested_sha"]}
             )
@@ -396,7 +422,7 @@ class GitHub:
         for page in range(1, 21):
             response = self.request(
                 f"commits/{sha or task['tested_sha']}/check-runs?check_name="
-                f"{quote(({**ALL_CHECK_NAMES, **LEGACY_CHECK_NAMES})[key], safe='')}&filter=all&per_page=100&page={page}"
+                f"{quote(READ_CHECK_NAMES[key], safe='')}&filter=all&per_page=100&page={page}"
             )
             batch = response.get("check_runs", [])
             runs.extend(batch)
@@ -404,8 +430,42 @@ class GitHub:
                 return runs
         raise ValueError("Cannot determine Local CI ownership from incomplete checks")
 
+    def task_start(self, task: dict) -> dict:
+        """Reuse the first real check instead of creating a future-stage placeholder."""
+        starts = [row for row in self.check_runs(task, "basic")
+                  if row.get("name") == CHECK_NAMES["basic"]
+                  and (row.get("app") or {}).get("slug") == "github-actions"
+                  and str(row.get("external_id", "")).startswith("triton-anchor-local-ci:basic:")
+                  and check_workflow_id(row)]
+        if task["tested_sha"] == task["worker_revision_sha"]:
+            # A native control push already has this job on the tested commit.
+            for row in sorted(self.check_runs(task, "native_prepare"), key=lambda row: int(row["id"]), reverse=True):
+                if starts and int(row["id"]) <= max(int(start["id"]) for start in starts):
+                    break
+                if row.get("name") != READ_CHECK_NAMES["native_prepare"] or (row.get("app") or {}).get("slug") != "github-actions":
+                    continue
+                match = re.fullmatch(rf"https://github\.com/{re.escape(self.repository)}/actions/runs/(\d+)/job/\d+", row.get("details_url") or "")
+                if not match:
+                    continue
+                if match[1] not in self.run_identities:
+                    self.run_identities[match[1]] = self.request(f"actions/runs/{match[1]}")
+                run = self.run_identities[match[1]]
+                if (run.get("event") == "push" and run.get("head_branch") == "local-ci-unified"
+                        and run.get("head_sha") == task["tested_sha"]
+                        and run.get("path") == ".github/workflows/ci-gateway.yml"):
+                    starts.append({**row, "native": True,
+                                   "workflow_run_id": match[1]})
+                    break
+        return max(starts, key=lambda row: int(row["id"]), default={})
+
     def owns_task(self, task: dict, *, workflow: bool = False) -> bool:
-        """The newest dispatch owns this commit, including before publication."""
+        """The current Basic/native preparation check owns the task from its start."""
+        start = self.task_start(task)
+        if start:
+            ours = has_native_preflight(task) if start.get("native") else (
+                start["external_id"] == f"triton-anchor-local-ci:basic:{task['task_id']}")
+            return ours and (not workflow or not os.getenv("GITHUB_RUN_ID")
+                             or check_workflow_id(start) == os.getenv("GITHUB_RUN_ID"))
         owners = []
         for key in ("dispatch", "preflight"):
             owners = [row for row in self.check_runs(task, key)
@@ -417,8 +477,10 @@ class GitHub:
         if owners:
             latest_owner = max(owners, key=lambda row: int(row["id"]))
             return (latest_owner["external_id"].endswith(":" + task["task_id"])
-                    and (not workflow or not workflow_url()
-                         or latest_owner.get("details_url") == workflow_url()))
+                    and (not workflow or not os.getenv("GITHUB_RUN_ID")
+                         or check_workflow_id(latest_owner) == os.getenv("GITHUB_RUN_ID")))
+        if workflow and os.getenv("GITHUB_RUN_ID"):
+            return False  # Unmarked legacy evidence is only used when receiving results.
         latest = self.latest_summary(task)
         owner = urlparse((latest or {}).get("target_url") or "").fragment
         expected = f"local-ci-task={task['task_id']}"
@@ -448,10 +510,12 @@ class GitHub:
 
     def retire_open_checks(self, task: dict, *, superseded: bool = False) -> None:
         """Close existing unfinished checks without creating unreached stages."""
+        start = self.task_start(task)
         for key, name in {**ALL_CHECK_NAMES, **LEGACY_CHECK_NAMES}.items():
             for row in self.check_runs(task, key):
                 identity = str(row.get("external_id", ""))
-                ours = identity == f"triton-anchor-local-ci:{key}:{task['task_id']}"
+                ours = (identity == f"triton-anchor-local-ci:{key}:{task['task_id']}"
+                        and (not start or int(row["id"]) >= int(start["id"])))
                 if (row.get("name") != name or row.get("status") == "completed"
                         or (row.get("app") or {}).get("slug") != "github-actions"
                         or not identity.startswith(("triton-anchor-local-ci:", "triton-anchor-ci-v4:"))
@@ -460,16 +524,22 @@ class GitHub:
                 self.request(f"check-runs/{row['id']}", "PATCH", {
                     "status": "completed", "conclusion": "cancelled",
                     "output": {"title": "Superseded task cancelled" if superseded else "Stage not completed",
-                               "summary": "A newer task owns this commit." if superseded else
-                               "The workflow ended before this stage completed."},
+                               "summary": check_summary(
+                                   "A newer task owns this commit." if superseded else
+                                   "The workflow ended before this stage completed.", check_workflow_id(row))},
                 })
 
     def latest_dispatch(self, task: dict) -> dict:
+        start = self.task_start(task)
         owned = [row for row in self.check_runs(task, "dispatch")
                  if row.get("external_id") == f"triton-anchor-local-ci:dispatch:{task['task_id']}"
                  and row.get("name") == ALL_CHECK_NAMES["dispatch"]
-                 and (row.get("app") or {}).get("slug") == "github-actions"]
-        return max(owned, key=lambda row: int(row["id"]), default={})
+                 and (row.get("app") or {}).get("slug") == "github-actions"
+                 and (not start or ((int(row["id"]) > int(start["id"])
+                                     or (start.get("started_at") and
+                                         (row.get("completed_at") or "") > start["started_at"]))
+                                    and check_workflow_id(row) == check_workflow_id(start)))]
+        return max(owned, key=lambda row: int(row["id"]), default={"status": "not_started"} if start else {})
 
     def reset_existing_summary(self, task: dict) -> None:
         """Invalidate a prior verdict without creating a status before dispatch."""
@@ -534,7 +604,7 @@ class GitHub:
                             "conclusion": "cancelled",
                             "output": {
                                 "title": "Local CI cancelled",
-                                "summary": "PR closed or became draft.",
+                                "summary": check_summary("PR closed or became draft.", check_workflow_id(run)),
                             },
                         },
                     )
@@ -561,7 +631,8 @@ class GitHub:
                         self.check(task, key, "completed", "success",
                                    output.get("title", CHECK_NAMES[key] + ": success"),
                                    output.get("summary", "Preflight completed successfully."),
-                                   latest.get("details_url", ""))
+                                   latest.get("details_url", ""), run_id=check_workflow_id(latest),
+                                   started_at=latest.get("started_at") or latest.get("created_at") or "")
                     break
             else:
                 raise ValueError("Missing preflight evidence for this task")
@@ -1295,14 +1366,12 @@ def sync_preflight(gh: GitHub, task: dict, stages: dict) -> bool:
 def begin_checks(gh: GitHub, task: dict) -> None:
     if not is_current(gh, task):
         raise ValueError("Task changed before preflight initialization")
-    gh.check(task, "dispatch", "queued", None, "Waiting for checks and approval",
-             "The task has not been published to Gitee.", workflow_url(), restart=True)
+    gh.check(task, "basic", "queued", None, "Checking PR information",
+             "Basic CI will start after the required PR information is checked.", workflow_url(), restart=True)
+    if not gh.owns_task(task, workflow=True):
+        raise ValueError("A newer workflow owns this task")
     gh.retire_open_checks(task, superseded=True)
     gh.reset_existing_summary(task)
-    for key in (*CHECK_NAMES, "approve"):
-        gh.check(task, key, "queued", None, f"{ALL_CHECK_NAMES[key]}: waiting for prerequisites",
-                 "A new task has started; previous check results do not apply.",
-                 workflow_url(), restart=True)
 
 
 def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
@@ -1328,11 +1397,9 @@ def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
         return
     publish_preflight_checks(gh, task, stages, False)
     gh.retire_open_checks(task)
-    if any(stages.get(key) == "failure" for key in ("prepare", *CHECK_NAMES)):
-        description = "Local CI: prerequisite checks failed; see workflow"
-    elif any(stages.get(key) != "success" for key in ("prepare", *CHECK_NAMES)):
-        description = "Local CI: prerequisite checks cancelled or not executed; verification incomplete"
-    elif stages.get("card", "success") != "success":
+    if not preflight_passed(stages):
+        return  # Only the reached prerequisite checks are completed above.
+    if stages.get("card", "success") != "success":
         description = "Local CI: approval card publication failed; worker verification not started"
     elif task.get("external_fork") and stages.get("approval") != "success":
         description = ("Local CI: approval cancelled; worker verification not started"
@@ -1342,6 +1409,8 @@ def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
         description = "Local CI: task dispatch failed; see workflow"
     key = "approve" if (stages.get("card") in {"failure", "cancelled"} or
                         (task.get("external_fork") and stages.get("approval") in {"failure", "cancelled"})) else "dispatch"
+    if key == "dispatch" and stages.get("enqueue") not in {"failure", "cancelled"}:
+        return
     detail = description
     if key == "approve" and workflow_url():
         detail += f"\n\n[Open approval controls and workflow evidence]({workflow_url()})"
