@@ -223,7 +223,7 @@ jobs:
     if: ${{ needs.review-card.outputs.eligible == 'true' && needs.prepare.outputs.external_fork == 'true' }}
     environment: local-ci-fork-approval
     runs-on: ubuntu-latest
-    permissions: {contents: read, pull-requests: read, actions: read, checks: read, statuses: read}
+    permissions: {contents: read, pull-requests: read, actions: read, checks: write, statuses: read}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -289,7 +289,7 @@ jobs:
               inputs: {mode: 'receive', task_id: process.env.TASK_ID, receiver_round: '1', run_title: runTitle}
             });
   finalize-preflight:
-    name: Finalize preflight
+    name: Finish interrupted checks
     needs: [prepare, basic, api, security, review-card, approve-external-fork, enqueue]
     if: ${{ always() && needs.prepare.outputs.task_id != '' && needs.enqueue.result != 'success' }}
     runs-on: ubuntu-latest
