@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { normalize, business, blockerGroups } = require('../../../dashboard/data.js');
-const task = (id, date) => ({task_id:id, repository:'example/repo',pr_number:7,target_branch:'main',tested_sha:id.repeat(40),captured_at:date});
+const task = (id, date) => ({task_id:id, repository:'example/repo',pr_number:7,target_branch:'main',head_sha:('f'+id).repeat(20),tested_sha:id.repeat(40),captured_at:date});
 
 test('old pass cannot override a newer pending or cancelled task', () => {
   const data = normalize({schema:'triton-anchor-dashboard',tasks:[
@@ -126,6 +126,7 @@ test('execution errors and failed checks stay separate through task filters and 
     window:{location:{search:''}},fetch:()=>new Promise(()=>{}),setInterval(){},runs});
   vm.runInContext(fs.readFileSync(require.resolve('../../../dashboard/local-ci.js'),'utf8'),context);
   vm.runInContext('model.data={runs};',context);
+  assert.equal(vm.runInContext('displaySha(runs[0])',context),runs[0].head_sha);
   nodes.get('historyFilter').value='current';
   for(const filter of ['failure','error']){
     nodes.get('resultFilter').value=filter;

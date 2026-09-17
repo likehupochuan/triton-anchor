@@ -14,6 +14,7 @@ function empty(container, message) { container.append(el('div','ci-empty',messag
 function section(parent,title) { const s=el('section'); s.append(el('h3','',title)); parent.append(s); return s; }
 function key(run) { return run.task_id+'/'+run.run_id; }
 function title(run) { return run.pr_number?'PR #'+run.pr_number+' · '+run.target_branch:run.target_branch+' · '+(run.event_kind==='push'?'分支提交':'手动任务'); }
+function displaySha(run) { return run.pr_number&&run.head_sha?run.head_sha:run.tested_sha; }
 function reason(value) { return friendlyReasons[value]||txt(value)||'没有记录原因'; }
 function publicText(value) { let text=txt(value);for(const [id,label] of Object.entries(names))text=text.replaceAll(id+':',label+'：');for(const [message,label] of Object.entries(friendlyReasons))text=text.replaceAll(message,label);return text.replaceAll('Codex cancelled','AI 验证已取消').replaceAll('base..merge','基准提交与合并验证提交之间').replace(/\bhead\(([^)]+)\)/g,'PR 提交 $1').replace(/\bmerge\(([^)]+)\)/g,'合并验证提交 $1').replaceAll('changed_paths','影响文件列表').replaceAll('Frontend','前端').replaceAll('Backend','后端').replaceAll(' smoke','基本功能验证').replaceAll(' wheel',' wheel 包'); }
 
@@ -22,7 +23,7 @@ function facts(parent,rows) {const list=el('dl','ci-facts');for(const [name,valu
 function filteredRuns() {
   const query=$('taskSearch').value.trim().toLowerCase(); const filter=$('resultFilter').value;
   const prQuery=query.match(/^#?([1-9][0-9]*)$/); const includeHistory=$('historyFilter').value==='all';
-  return arr(model.data.runs).filter(run=>(includeHistory||run.is_current)&&(filter==='all'||run.conclusion===filter)&&(prQuery?String(run.pr_number)===prQuery[1]:[run.pr_number,run.target_branch,run.tested_sha].join(' ').toLowerCase().includes(query)));
+  return arr(model.data.runs).filter(run=>(includeHistory||run.is_current)&&(filter==='all'||run.conclusion===filter)&&(prQuery?String(run.pr_number)===prQuery[1]:[run.pr_number,run.target_branch,displaySha(run)].join(' ').toLowerCase().includes(query)));
 }
 
 function renderList() {
@@ -32,7 +33,7 @@ function renderList() {
   if(!runs.length)empty(root,arr(model.data.runs).length?'没有符合筛选条件的任务。':'尚未发布 Local CI 结果。');
   for(const run of runs) {
     const button=el('button','ci-task'); button.type='button'; button.setAttribute('aria-pressed',String(model.selected===key(run)));
-    button.append(el('strong','',title(run)),badge(run.conclusion),el('small','',run.tested_sha.slice(0,12)+(run.is_current?' · 当前结果':' · 历史记录')),el('small','',date(run.completed_at)));
+    button.append(el('strong','',title(run)),badge(run.conclusion),el('small','',displaySha(run).slice(0,12)+(run.is_current?' · 当前结果':' · 历史记录')),el('small','',date(run.completed_at)));
     button.addEventListener('click',()=>{model.selected=key(run);renderList();}); root.append(button);
   }
   renderDetail(runs.find(run=>key(run)===model.selected));
@@ -99,7 +100,7 @@ function renderDetail(run) {
   const root=$('taskDetail'); root.replaceChildren();
   if(!run) { empty(root,'选择一个任务以查看检查范围、审查结论和执行证据。尚无数据时不会显示通过状态。'); return; }
   const head=el('div','ci-detail-head'); const heading=el('div'); heading.append(el('p','eyebrow','验证与审查'),el('h2','',title(run))); head.append(heading,badge(run.conclusion));root.append(head);
-  const identity=el('div','ci-identity'); identity.append(el('code','',run.tested_sha),el('span','',date(run.completed_at))); root.append(identity);
+  const identity=el('div','ci-identity'); identity.append(el('code','',displaySha(run)),el('span','',date(run.completed_at))); root.append(identity);
   facts(root,[['本地验证',labels[run.local_conclusion]||run.local_conclusion],['环境',run.environment.profile||'未记录']]);
   if(run.receiver_message)root.append(el('p','ci-notice',run.receiver_message));
   const links=el('div','ci-links'); for(const [label,url] of [['查看完整结果',run.result_url],['查看执行产物',run.artifacts_url]]) { const a=link(label,url); if(a)links.append(a); }root.append(links);

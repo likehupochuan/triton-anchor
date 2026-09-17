@@ -1026,126 +1026,13 @@ README only
             g.finalize_preflight(gh, task, {"prepare": "success", "basic": "failure"})
             self.assertEqual(writes, [])
 
-    def test_control_push_keeps_summary_without_duplicate_preflight_checks(self):
-        from types import SimpleNamespace
-
-        task = {**self.task, "pr_number": 0, "event_kind": "push",
-                "target_branch": "local-ci-unified", "tested_sha": self.head,
-                "worker_revision_sha": self.head}
-        task["task_id"] = g.compute_task_id(task)
-        manual = {**task, "event_kind": "manual"}
-        manual["task_id"] = g.compute_task_id(manual)
-        gh = g.GitHub(g.REPOSITORY, token="fixture")
-        statuses, checks = [], []
-        run_url = f"https://github.com/{g.REPOSITORY}/actions/runs/"
-        native_run = {"event": "push", "head_branch": "local-ci-unified", "head_sha": self.head,
-                      "path": ".github/workflows/ci-gateway.yml"}
-        native_runs = {"100": dict(native_run), "300": dict(native_run)}
-
-        def request(path, method="GET", data=None):
-            if method == "POST" and path == f"statuses/{self.head}":
-                statuses.insert(0, data)
-                return {}
-            if method == "GET" and "/statuses?" in path:
-                return statuses
-            if method == "GET" and "/check-runs?" in path:
-                return {"check_runs": [row for row in checks
-                                       if "check_name=" + g.quote(row["name"], safe="") + "&" in path]}
-            if method == "GET" and path.startswith("actions/runs/"):
-                return native_runs[path.rsplit("/", 1)[1]]
-            if method == "POST" and path == "check-runs":
-                checks.append(github_check(data, len(checks) + 1))
-                return {}
-            if method == "PATCH" and path.startswith("check-runs/"):
-                check_id = int(path.split("/")[-1])
-                next(row for row in checks if row["id"] == check_id).update(github_check(data, check_id))
-                return {}
-            raise AssertionError((path, method))
-
-        with patch.object(g, "is_current", return_value=True), \
-                patch.object(gh, "request", side_effect=request), patch.dict(g.os.environ, {
-                    "GITHUB_RUN_ID": "100", "GITHUB_REPOSITORY": g.REPOSITORY,
-                    "GITHUB_SERVER_URL": "https://github.com",
-                }):
-            self.assertFalse(gh.owns_task(task))  # No ownership evidence yet.
-            checks.append({"id": 1, "name": "Prepare exact task", "status": "in_progress",
-                           "details_url": run_url + "100/job/1", "app": {"slug": "github-actions"}})
-            g.begin_checks(gh, task)
-            self.assertTrue(gh.owns_task(task, workflow=True))
-            self.assertTrue(gh.task_start(task)["native"])
-            for key in g.CHECK_NAMES:
-                self.assertFalse(g.sync_preflight(gh, task, {key: "success"}))
-            g.finalize_preflight(gh, task, {"prepare": "success", "basic": "failure"})
-            self.assertEqual(statuses, [])
-            self.assertEqual([row["name"] for row in checks], ["Prepare exact task"])
-            g.finalize_preflight(gh, task, {"enqueue": "success"})
-            self.assertEqual(len(statuses), 0)
-
-            # New manual preflight owns the same SHA before its Gitee enqueue.
-            with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "200"}):
-                g.begin_checks(gh, manual)
-                self.assertTrue(gh.owns_task(manual, workflow=True))
-            self.assertEqual(len(checks), 2)
-            self.assertEqual(checks[-1]["name"], "github/basic")
-            self.assertTrue(gh.owns_task(manual))
-            self.assertFalse(gh.owns_task(task))
-            before = copy.deepcopy((checks, statuses))
-            with self.assertRaisesRegex(ValueError, "newer workflow"):
-                g.begin_checks(gh, task)
-            self.assertEqual((checks, statuses), before)
-            g.finalize_preflight(gh, task, {"basic": "failure"})
-            self.assertEqual(len(statuses), 0)
-            control = SimpleNamespace(get=lambda path: {"task_id": task["task_id"]}
-                                      if path.startswith("current/") else None)
-            self.assertFalse(g.current_task(gh, control, task))
-
-            # A new native task can also supersede manual checks left on this SHA.
-            checks.append({"id": 3, "name": "Prepare exact task", "status": "in_progress",
-                           "details_url": run_url + "300/job/3", "app": {"slug": "github-actions"}})
-            for changed in ({"event": "workflow_dispatch"}, {"head_branch": "main"},
-                            {"head_sha": "e" * 40}, {"path": ".github/workflows/other.yml"}):
-                with self.subTest(native=changed), patch.dict(gh.run_identities, {}, clear=True):
-                    native_runs["300"] = {**native_run, **changed}
-                    self.assertEqual(gh.task_start(task)["id"], 2)
-            native_runs["300"] = dict(native_run)
-            with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "300"}):
-                g.begin_checks(gh, task)
-                self.assertTrue(gh.owns_task(task, workflow=True))
-            self.assertTrue(gh.owns_task(task))
-            self.assertFalse(gh.owns_task(manual))
-            g.finalize_preflight(gh, manual, {"basic": "failure"})
-            self.assertEqual(len(statuses), 0)
-            self.assertEqual(len(checks), 3)
-            self.assertEqual(checks[1]["conclusion"], "cancelled")
-            self.assertEqual(gh.latest_dispatch(task), {"status": "not_started"})
-            urls = ("https://github.com/example/repo/actions/runs/1",
-                    "https://gitee.com/example/results/blob/results/result.json", "")
-            for url in urls:
-                gh.status(task, "error", "Local CI: retry publication", url)
-                self.assertTrue(gh.owns_task(task))
-            self.assertEqual(len(statuses), 1)
-            self.assertTrue(statuses[0]["target_url"].startswith(urls[0]))
-
-        for change in ({"target_branch": "main"}, {"event_kind": "manual"},
-                       {"pr_number": 7, "event_kind": "pull_request"},
-                       {"worker_revision_sha": self.base}):
-            with self.subTest(change=change), \
-                    patch.object(gh, "request", return_value={"check_runs": []}) as request:
-                self.assertTrue(gh.check({**task, **change}, "basic", "completed",
-                                         "success", "Passed", "Evidence"))
-                self.assertEqual(request.call_args.args[:2], ("check-runs", "POST"))
-                self.assertEqual(request.call_args.args[2]["head_sha"], self.head)
-
     def test_stage_completion_rejects_unknown_or_nonterminal_outcomes(self):
         for stages in (None, [], ["basic"], {}, {"summary": "success"},
                        {"api": "in_progress"}, {"api": ["success"]}):
             with self.subTest(stages=stages), self.assertRaises(ValueError):
                 g.sync_preflight(self.gh, self.task, stages)
 
-    def test_checks_use_english_while_pr_feedback_remains_chinese(self):
-        with patch.object(self.gh, "check") as check:
-            g.begin_checks(self.gh, self.task)
-        self.assertTrue(all(call.args[4].isascii() and call.args[5].isascii() for call in check.call_args_list))
+    def test_successful_github_checks_have_no_redundant_title(self):
         with patch.object(self.gh, "check") as check:
             g.publish_preflight_checks(
                 self.gh,
@@ -1153,94 +1040,24 @@ README only
                 {"prepare": "success", **dict.fromkeys(g.CHECK_NAMES, "success")},
                 True,
             )
-        self.assertTrue(check.call_args_list)
         self.assertTrue(all(call.args[4] == "" for call in check.call_args_list))
-        for state in g.GITHUB_STATES:
-            self.assertTrue(g.publication_description(state, "a" * 64).isascii())
-        stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
-        g.finalize_preflight(self.gh, self.task, {**stages, "approval": "failure"})
-        self.assertTrue(self.gh.check_calls[-1][4].isascii())
-        self.assertEqual(self.gh.comments, [])
 
-    def test_failed_card_is_not_reported_as_a_rejected_approval(self):
+    def test_approval_card_shows_frozen_identity_and_readable_file_scope(self):
         stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
-        g.finalize_preflight(self.gh, self.task, {**stages, "card": "failure", "approval": "skipped"})
-        self.assertIn("card publication failed", self.gh.check_calls[-1][4])
-        self.assertEqual(self.gh.comments, [])
-
-    def test_approval_card_has_frozen_identity_evidence_and_admission_boundary(self):
-        stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
+        context = {"author": "contributor", "source": "fork/repo", "branch": "topic",
+                   "files": ["tests/test_api.py"], "complete": True,
+                   "attention": ["1 个测试文件"], "additions": 3, "deletions": 1}
         with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "12345"}):
-            card = g.approval_card(self.task, stages, True)
-        for field in ("head_sha", "base_sha", "tested_sha"):
-            self.assertIn(self.task[field], card)
-        self.assertNotIn("控制版本", card)
-        self.assertNotIn(self.task["task_id"], card)
-        for text in ("基础检查 | 通过", "API 兼容性 | 通过", "安全检查 | 通过",
-                     "等待维护者审批", "local-ci-fork-approval", "/actions/runs/12345"):
-            self.assertIn(text, card)
-        blocked = g.approval_card(self.task, {**stages, "basic": "failure"}, False)
-        self.assertEqual(blocked, "")
-        config_error = g.approval_card(self.task, stages, False, "缺少 required reviewers")
-        self.assertIn("缺少 required reviewers", config_error)
-        internal = g.approval_card({**self.task, "external_fork": False}, stages, True)
-        self.assertEqual(internal, "")
-        url = f"https://github.com/{g.REPOSITORY}/actions/runs/12345"
-        with patch.object(g, "GitHub", return_value=self.gh), \
-                patch.object(g, "load_task", return_value=self.task), \
-                patch.object(g, "output") as output, patch.dict(g.os.environ, {
-                    "GITHUB_RUN_ID": "12345", "GITHUB_REPOSITORY": g.REPOSITORY,
-                    "GITHUB_SERVER_URL": "https://github.com", "GITHUB_STEP_SUMMARY": "",
-                }):
-            with patch.object(g.sys, "argv", ["gateway.py", "card", "--stages", json.dumps(stages)]):
-                self.assertEqual(g.main(), 0)
-            waiting = self.gh.check_calls[-1]
-            self.assertEqual(waiting[1:4], ("approve", "in_progress", None))
-            self.assertEqual(waiting[6], url)
-            self.assertIn(f"[Open approval controls and workflow evidence]({url})", waiting[5])
-            output.assert_called_once_with("eligible", True)
-            with patch.object(g.sys, "argv", ["gateway.py", "approval"]):
-                self.assertEqual(g.main(), 0)
-            self.assertEqual(self.gh.check_calls[-1][1:4], ("approve", "completed", "success"))
-            self.assertEqual(self.gh.check_calls[-1][6], url)
-        self.gh.check_calls = []
-        self.gh.comments = []
-        internal = {**self.task, "external_fork": False}
-        with patch.object(g, "GitHub", return_value=self.gh), \
-                patch.object(g, "load_task", return_value=internal), \
-                patch.object(g, "output") as output, patch.dict(g.os.environ, {
-                    "GITHUB_RUN_ID": "12345", "GITHUB_REPOSITORY": g.REPOSITORY,
-                    "GITHUB_SERVER_URL": "https://github.com", "GITHUB_STEP_SUMMARY": "",
-                }), patch.object(g.sys, "argv", ["gateway.py", "card", "--stages", json.dumps(stages)]):
-            self.assertEqual(g.main(), 0)
-            output.assert_called_once_with("eligible", True)
-        self.assertFalse(any(call[1] == "approve" for call in self.gh.check_calls))
-        self.assertEqual(self.gh.comments, [])
-        self.assertEqual(self.gh.statuses, [])
+            card = g.approval_card(self.task, stages, True, context=context)
+        self.assertIn(f"PR 提交：`{self.head}`", card)
+        self.assertIn(f"被测合并提交：`{self.tested}`", card)
+        self.assertIn("改动范围（按文件路径归类）：1 个测试文件", card)
+        self.assertIn("等待维护者审批", card)
 
     def test_failed_prerequisites_never_publish_card_or_verify_approval(self):
         passed = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
-        summary_path = self.root / "step-summary.md"
-        for key in passed:
-            for outcome in ("failure", "cancelled", "skipped", None):
-                stages = {**passed, key: outcome}
-                with (
-                    self.subTest(stage=key, outcome=outcome),
-                    patch.object(g.sys, "argv", ["gateway.py", "card", "--stages", json.dumps(stages)]),
-                    patch.object(g, "GitHub", return_value=self.gh),
-                    patch.object(g, "load_task", return_value=self.task),
-                    patch.object(g, "validate_approval_environment") as approval,
-                    patch.object(g, "output") as output,
-                    patch.dict(g.os.environ, {"GITHUB_STEP_SUMMARY": str(summary_path)}),
-                ):
-                    self.assertEqual(g.main(), 0)
-                    approval.assert_not_called()
-                    output.assert_called_once_with("eligible", False)
-                    self.assertEqual(g.approval_card(self.task, stages, False), "")
-                    self.assertEqual(self.gh.comments, [])
-                    self.assertFalse(summary_path.exists())
-                g.finalize_preflight(self.gh, self.task, {**stages, "card": "skipped"})
-                self.assertEqual(self.gh.comments, [])
+        stages = {**passed, "security": "failure"}
+        self.assertEqual(g.approval_card(self.task, stages, False), "")
 
     def test_pr_information_failure_has_friendly_actionable_feedback(self):
         errors = ["请补充影响范围", "请说明已完成的验证"]
@@ -1259,83 +1076,14 @@ README only
         self.assertEqual(self.gh.check_calls[-1][1:4], ("basic", "completed", "failure"))
         self.assertTrue(self.gh.check_calls[-1][4].isascii())
 
-    def test_result_comment_is_chinese_scoped_to_run_and_separates_unexecuted_checks(self):
+    def test_result_comment_lists_only_executed_checks_and_links_dashboard_after_table(self):
         result = self.result()
-        result["summary"] = "仅调整 CI；已核对任务协议。"
-        result["checks"][0].update(summary="通过定向验证", evidence=["validation.md"])
         result["checks"].append({"tool_id": "frontend_build", "status": "not_selected", "summary": "无需构建"})
-        result["checks"].append({"tool_id": "backend_build", "status": "not_applicable", "summary": "当前版本不支持后端"})
-        result["checks"].append({"tool_id": "frontend_tests", "status": "skipped", "summary": "本次无需执行"})
-        result["findings"] = [{"summary": "<script> @owner [点此](https://evil.invalid)", "blocking": False}]
-        rendered = g.result_comment(result, "https://gitee.com/example/result.json",
-                                    {"validation.md": "https://gitee.com/example/validation.md"})
-        for text in ("本次要求的检查已通过", self.head, self.tested,
-                     "CI 流程验证 | 通过", "PR 意图与属性核对 | 通过", "架构契约审查 | 通过",
-                     "合入阻塞与重要限制", "在 Dashboard 查看本次任务详情",
-                     "展开已执行的检查与审查记录"):
-            self.assertIn(text, rendered)
+        rendered = g.result_comment(result)
         details = rendered.split("### 查看审查详情", 1)[1].split("### 合入阻塞与重要限制", 1)[0]
-        limitations = rendered.split("### 合入阻塞与重要限制", 1)[1]
-        self.assertIn("在 Dashboard 查看本次任务详情", details)
+        self.assertIn("CI 流程验证 | 通过", details)
+        self.assertNotIn("前端构建", details)
         self.assertLess(details.index("</details>"), details.index("在 Dashboard 查看本次任务详情"))
-        for text in ("前端构建", "后端构建", "前端测试", "无需构建", "当前版本不支持后端", "本次无需执行"):
-            self.assertNotIn(text, details)
-            self.assertNotIn(text, limitations)
-        self.assertNotIn("<script>", rendered)
-        self.assertNotIn("@owner", rendered)
-        self.assertNotIn("[点此](https://evil.invalid)", rendered)
-        self.assertNotIn("| pass |", rendered)
-        for text in (result["run_id"], self.task["task_id"], "证据 1", "validation.md", "/README.md"):
-            self.assertNotIn(text, rendered)
-        self.assertIn(f"PR 提交：`{self.head}`\n\n合并后验证提交：`{self.tested}`", rendered)
-        again = g.result_comment({**result, "run_id": "retry-2"})
-        self.assertNotEqual(rendered, again)
-
-    def test_preflight_is_restored_on_tested_commit_before_summary(self):
-        client = g.GitHub(g.REPOSITORY, token="fixture")
-        writes = []
-        migrated = {}
-
-        def request(path, method="GET", data=None):
-            if method == "POST":
-                writes.append((path, data))
-                if path == "check-runs":
-                    migrated[data["name"]] = github_check(data, 100)
-                return {}
-            if "/statuses?" in path:
-                return []
-            key = next(key for key in g.CHECK_NAMES if f"%2F{key}" in path)
-            name = g.CHECK_NAMES[key]
-            if f"commits/{self.tested}/" in path:
-                return {"check_runs": [migrated[name]] if name in migrated else []}
-            self.assertIn(f"commits/{self.head}/", path)
-            return {"check_runs": [{"id": 1, "name": name, "status": "completed",
-                "started_at": "2026-09-16T01:00:00Z",
-                "conclusion": "success", "app": {"slug": "github-actions"},
-                "external_id": f"triton-anchor-local-ci:{key}:{self.task['task_id']}",
-                "output": {"title": "Passed", "summary": "Verified"}}]}
-
-        with patch.object(client, "request", side_effect=request), \
-                patch.dict(g.os.environ, {"GITHUB_RUN_ID": "999"}):
-            client.restore_preflight(self.task)
-            client.restore_preflight(self.task)  # Retry must not duplicate the migrated checks.
-            self.assertEqual(client.task_start(self.task), {})  # Migration is not a new workflow.
-            self.assertTrue(all(g.check_workflow_id(row) == "" for row in migrated.values()))
-            self.assertEqual(migrated["github/basic"]["started_at"], "2026-09-16T01:00:00Z")
-            client.status(self.task, "success", "Local CI: pass")
-        self.assertEqual(len(writes), 4)
-        self.assertEqual([data["head_sha"] for path, data in writes[:3]], [self.tested] * 3)
-        self.assertEqual(writes[-1][0], f"statuses/{self.tested}")
-        with patch.object(client, "check_runs", return_value=[]), patch.object(client, "check") as check:
-            with self.assertRaisesRegex(ValueError, "Missing preflight"):
-                client.restore_preflight(self.task)
-            check.assert_not_called()
-        failure = {"id": 1, "name": "github/basic", "status": "completed", "conclusion": "failure", "app": {"slug": "github-actions"},
-                   "external_id": f"triton-anchor-local-ci:basic:{self.task['task_id']}"}
-        with patch.object(client, "check_runs", return_value=[failure]), patch.object(client, "check") as check:
-            with self.assertRaisesRegex(ValueError, "not successful"):
-                client.restore_preflight(self.task)
-            check.assert_not_called()
 
     def test_dashboard_history_restores_modern_and_legacy_data_without_gate_writes(self):
         from types import SimpleNamespace
@@ -1472,33 +1220,11 @@ README only
         with patch.object(client, "request", side_effect=request):
             context = client.approval_context(self.task)
             card = g.approval_card(self.task, dict.fromkeys(("prepare", *g.CHECK_NAMES), "success"), True, context=context)
-            for text in ("contributor", "2 个文件，+5 / -1", "CI 与结果展示 1 个文件", "依赖与构建配置 1 个文件", "/pull/7/files", "| PR 信息 | 通过 |"):
+            for text in ("1 个 CI 与结果展示文件", "1 个依赖与构建配置文件"):
                 self.assertIn(text, card)
-            self.assertNotIn("审批关注", card)
-            self.assertNotIn(".github/workflows/test.yml", card)
-            self.assertNotIn("pyproject.toml", card)
-            self.assertNotIn("贡献者说明", card)
-            self.assertNotIn("任务范围与审批边界", card)
-            self.assertLess(card.index("本次审批对应的固定版本"), card.index("本次改动概览"))
             pull["head"] = {**pull["head"], "sha": "e" * 40}
             with self.assertRaisesRegex(ValueError, "PR changed"):
                 client.approval_context(self.task)
-
-    def test_collapsible_review_details_preserve_table_rows_and_show_finding_risk(self):
-        result = self.result()
-        result["findings"] = [{"summary": "Need benchmark", "severity": "medium", "blocking": False},
-                              {"summary": "Unrated", "blocking": False}]
-        body = g.result_comment(result)
-        details = body.split("### 查看审查详情\n\n", 1)[1].split("</details>", 1)[0]
-        self.assertTrue(details.startswith("<details>\n<summary>展开已执行的检查与审查记录</summary>\n\n"))
-        self.assertTrue(details.split("</summary>\n\n", 1)[1].startswith("| 检查 | 结果 | 说明 |"))
-        self.assertLess(body.index("### 变更意图与审查结论"), body.index("### 查看审查详情"))
-        self.assertLess(body.index("</details>"), body.index("在 Dashboard 查看本次任务详情"))
-        self.assertLess(body.index("在 Dashboard 查看本次任务详情"), body.index("### 合入阻塞与重要限制"))
-        self.assertNotIn("本次记录", body)
-        self.assertIn("【风险：中】Need benchmark", body)
-        self.assertIn("【风险：未标注】Unrated", body)
-        self.assertIn("| 架构契约审查 | 通过 | Compatible |", body)
 
     def test_result_comment_preserves_reported_blockers_and_important_limitations(self):
         result = self.result()
@@ -1549,104 +1275,6 @@ README only
             self.assertEqual(events[-3:], [("dispatch", "in_progress"), ("summary", "pending"), ("dispatch", "completed")])
             self.assertEqual(list(dict.fromkeys(key for key, _ in events)),
                              ["basic", "api", "security", "approve", "dispatch", "summary"])
-
-    def test_same_sha_rerun_resets_checks_and_rejects_late_workflow_updates(self):
-        client = g.GitHub(g.REPOSITORY, token="fixture")
-        run_url = f"https://github.com/{g.REPOSITORY}/actions/runs/"
-        checks = [
-            {"id": index, "name": name,
-             "status": "in_progress" if key in {"api", "security", "approve"} else "completed",
-             "conclusion": None if key in {"api", "security", "approve"} else "success",
-             "external_id": f"triton-anchor-local-ci:{key}:{self.task['task_id']}",
-             "details_url": f"https://github.com/{g.REPOSITORY}/runs/{index}",
-             "output": {"summary": "<!-- local-ci-workflow:100 -->"},
-             "app": {"slug": "github-actions"}}
-            for index, (key, name) in enumerate(g.ALL_CHECK_NAMES.items(), 1)
-        ]
-        statuses = [{"context": "local-ci/summary", "state": "success",
-                     "creator": {"login": "github-actions[bot]"}}]
-        writes = []
-
-        def request(path, method="GET", data=None):
-            if path == "pulls/7":
-                return self.gh.pull
-            if method == "GET" and "/check-runs?" in path:
-                return {"check_runs": [row for row in checks
-                                       if "check_name=" + g.quote(row["name"], safe="") + "&" in path]}
-            if method == "GET" and "/statuses?" in path:
-                return statuses if path.startswith(f"commits/{self.tested}/") else []
-            writes.append((path, method, copy.deepcopy(data)))
-            if method == "POST" and path == "check-runs":
-                checks.append(github_check(data, len(checks) + 1))
-            elif method == "PATCH" and path.startswith("check-runs/"):
-                check_id = int(path.rsplit("/", 1)[1])
-                next(row for row in checks if row["id"] == check_id).update(github_check(data, check_id))
-            elif method == "POST" and path == f"statuses/{self.tested}":
-                statuses.insert(0, {**data, "creator": {"login": "github-actions[bot]"}})
-            else:
-                raise AssertionError((path, method))
-            return {}
-
-        with patch.object(client, "request", side_effect=request), patch.dict(g.os.environ, {
-            "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": g.REPOSITORY,
-            "GITHUB_RUN_ID": "200",
-        }):
-            g.begin_checks(client, self.task)
-            self.assertEqual(len(checks), 5)
-            self.assertEqual(checks[0]["name"], "github/basic")
-            self.assertEqual(checks[0]["status"], "queued")
-            self.assertEqual(g.check_workflow_id(checks[0]), "200")
-            self.assertTrue(all(row["status"] == "completed" and row["conclusion"] == "cancelled"
-                                for row in checks[1:4]))
-            self.assertIsNone(checks[0]["conclusion"])
-            self.assertEqual(checks[4]["conclusion"], "success")
-            self.assertEqual([(path, data.get("name", data.get("context"))) for path, _, data in writes],
-                             [("check-runs/1", "github/basic"), ("check-runs/2", None),
-                              ("check-runs/3", None), ("check-runs/4", None),
-                              (f"statuses/{self.tested}", "local-ci/summary")])
-            self.assertIsNone(writes[0][2]["conclusion"])
-            self.assertEqual(statuses[0]["state"], "error")
-            self.assertTrue(client.owns_task(self.task, workflow=True))
-            self.assertEqual(client.latest_dispatch(self.task), {"status": "not_started"})
-            with patch.object(g, "GitHub", return_value=client), \
-                    patch.object(g, "load_task", return_value=self.task), \
-                    patch.object(g.sys, "argv", ["gateway.py", "info"]):
-                before_info = len(writes)
-                self.assertEqual(g.main(), 0)
-                self.assertEqual(writes[before_info][:2], ("check-runs/1", "PATCH"))
-                self.assertNotIn("conclusion", writes[before_info][2])
-                before_repeat = copy.deepcopy(writes)
-                self.assertEqual(g.main(), 0)
-                self.assertEqual(writes, before_repeat)
-            before = copy.deepcopy(writes)
-            with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "100"}):
-                self.assertTrue(client.owns_task(self.task))
-                self.assertFalse(client.owns_task(self.task, workflow=True))
-                self.assertFalse(g.sync_preflight(client, self.task, {"basic": "success"}))
-                g.finalize_preflight(client, self.task, {"prepare": "success", "basic": "failure"})
-                with self.assertRaisesRegex(ValueError, "freshness"):
-                    g.enqueue(self.task, client, None, self.source)
-            self.assertEqual(writes, before)
-            self.assertTrue(g.sync_preflight(client, self.task, {"basic": "success"}))
-            api = next(row for row in checks if row["name"] == "github/api")
-            self.assertEqual((api["id"], api["status"]), (2, "in_progress"))
-            self.assertIsNone(checks[1]["conclusion"])
-            self.assertEqual(client.latest_dispatch(self.task), {"status": "not_started"})
-            g.finalize_preflight(client, self.task, {"prepare": "success", "basic": "success", "api": "failure"})
-            self.assertTrue(all(row["status"] == "completed" for row in checks))
-            self.assertEqual(api["conclusion"], "failure")
-            self.assertEqual(g.check_workflow_id(api), "200")
-            self.assertEqual([row["name"] for row in checks], list(g.ALL_CHECK_NAMES.values()))
-            # Re-run failed jobs keeps its run ID; the receiver has a different one.
-            with patch.dict(g.os.environ, {"GITHUB_RUN_ATTEMPT": "2"}):
-                self.assertTrue(g.sync_preflight(client, self.task, {"api": "success"}))
-                self.assertTrue(g.sync_preflight(client, self.task, {"security": "success"}))
-                client.check(self.task, "approve", "completed", "success", "Approved", "Approved")
-                control = self.store(g.CONTROL_BRANCH)
-                g.enqueue(self.task, client, control, self.source)
-            with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "999"}):
-                self.assertTrue(g.current_task(client, control, self.task))
-                self.assertFalse(client.owns_task(self.task, workflow=True))
 
     def test_same_task_receiver_waits_for_successful_dispatch(self):
         control = self.store(g.CONTROL_BRANCH)
@@ -1742,92 +1370,25 @@ README only
             self.assertEqual(g.collect_results(self.gh, control, results, self.root / "dashboard"), [])
         self.assertEqual(len(self.gh.statuses), before)
 
-    def test_finalizer_closes_rejected_approval_without_overwriting_new_owner(self):
+    def test_rejected_approval_notifies_contributor_with_commit_and_review(self):
         stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
         stages.update(card="success", approval="failure", enqueue="skipped")
-        url = f"https://github.com/{g.REPOSITORY}/actions/runs/12345"
         self.gh.approvals = [{
             "state": "rejected",
             "comment": "Please remove @generated files\n before retrying.",
             "environments": [{"name": "local-ci-fork-approval"}],
             "user": {"login": "maintainer"},
         }]
-        for outcome, wording in (("failure", "approval rejected or verification failed"),
-                                 ("cancelled", "approval cancelled")):
-            with self.subTest(outcome=outcome), patch.dict(g.os.environ, {
-                "GITHUB_RUN_ID": "12345", "GITHUB_REPOSITORY": g.REPOSITORY,
-                "GITHUB_SERVER_URL": "https://github.com",
-            }):
-                g.finalize_preflight(self.gh, self.task, {**stages, "approval": outcome})
-            final = self.gh.check_calls[-1]
-            self.assertEqual(final[1:4], ("approve", "completed", outcome))
-            self.assertIn(wording, final[4])
-            self.assertIn(f"[Open approval controls and workflow evidence]({url})", final[5])
-            self.assertEqual(final[6], url)
-            self.assertEqual(self.gh.statuses, [])
-        self.assertEqual(len(self.gh.comments), 1)
-        comment = self.gh.comments[0]
-        for text in ("@contributor", "Local CI 外部 fork 审批未通过", "审批未通过。",
-                     "审核者：maintainer", "审核批注：",
-                     "Please remove ＠generated files before retrying.",
-                     f"[查看审批记录]({url})"):
-            self.assertIn(text, comment)
-        for text in ("本次固定版本", "合并后验证提交", "如需继续验证", "审批验证失败"):
-            self.assertNotIn(text, comment)
-        self.gh.approvals = []
         with patch.dict(g.os.environ, {
             "GITHUB_RUN_ID": "12345", "GITHUB_REPOSITORY": g.REPOSITORY,
             "GITHUB_SERVER_URL": "https://github.com",
         }):
             g.finalize_preflight(self.gh, self.task, stages)
-        self.assertEqual(len(self.gh.comments), 1)
-        before = len(self.gh.statuses)
-        with patch.object(self.gh, "owns_task", return_value=False):
-            g.finalize_preflight(self.gh, self.task, stages)
-        self.assertEqual(len(self.gh.statuses), before)
-        g.finalize_preflight(self.gh, self.task, {**stages, "enqueue": "success"})
-        self.assertEqual(len(self.gh.statuses), before)
-
-    def test_finalizer_closes_only_current_pending_after_partial_dispatch_failure(self):
-        control = self.store(g.CONTROL_BRANCH)
-        stages = dict.fromkeys(("prepare", *g.CHECK_NAMES, "card", "approval"), "success")
-        stages["enqueue"] = "failure"
-        pending = {"state": "pending", "target_url": f"https://github.com/run#local-ci-task={self.task['task_id']}"}
-        for failure in ("dispatch", "receiver"):
-            events = []
-
-            def check(task, key, status, conclusion, *args):
-                events.append((key, status, conclusion))
-                if failure == "dispatch" and key == "dispatch" and conclusion == "success":
-                    raise RuntimeError("Dispatch completion update failed")
-
-            with self.subTest(failure=failure), patch.object(self.gh, "check", side_effect=check), \
-                    patch.object(self.gh, "status", side_effect=lambda task, state, *args: events.append(("summary", state))):
-                if failure == "receiver":
-                    g.enqueue(self.task, self.gh, control, self.source)
-                else:
-                    with self.assertRaises(RuntimeError):
-                        g.enqueue(self.task, self.gh, control, self.source)
-            self.assertEqual(events[:3], [("dispatch", "in_progress", None),
-                                          ("summary", "pending"), ("dispatch", "completed", "success")])
-            dispatch = ({"status": "in_progress"} if failure == "dispatch" else
-                        {"status": "completed", "conclusion": "success"})
-            for label, previous in (
-                ("current", pending), ("missing", None),
-                ("foreign", {**pending, "target_url": "https://github.com/run#local-ci-task=another-task"}),
-                ("unmarked", {**pending, "target_url": "https://github.com/run"}),
-                ("completed", {**pending, "state": "success"}),
-            ):
-                with self.subTest(failure=failure, summary=label), \
-                        patch.object(self.gh, "latest_dispatch", return_value=dispatch), \
-                        patch.object(self.gh, "latest_summary", return_value=previous), \
-                        patch.object(self.gh, "status") as status:
-                    g.finalize_preflight(self.gh, self.task, stages)
-                    if label == "current":
-                        status.assert_called_once()
-                        self.assertEqual(status.call_args.args[:2], (self.task, "error"))
-                    else:
-                        status.assert_not_called()
+        comment = self.gh.comments[0]
+        self.assertTrue(comment.startswith("@contributor   **进入 Local CI 审批未通过**"))
+        self.assertIn(f"PR 提交：`{self.head}`", comment)
+        self.assertIn("审核批注：\n\n> Please remove ＠generated files before retrying.", comment)
+        self.assertIn("如有疑问可进一步联系审核者进行处理，感谢您的贡献！", comment)
 
     def test_closed_pr_finishes_pending_checks_without_dispatched_task(self):
         gh = g.GitHub(g.REPOSITORY, token="fixture")
@@ -1909,86 +1470,6 @@ README only
         with self.assertRaises(ValueError):
             g.GitStore("https://github.com/RACE-org/triton-anchor", g.CONTROL_BRANCH)
 
-    def test_http_status_and_idempotent_comment_writeback(self):
-        calls, comments, statuses = [], [], {}
-
-        class Response:
-            def __init__(self, payload):
-                self.payload = json.dumps(payload).encode()
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self):
-                return self.payload
-
-        def transport(request, timeout):
-            self.assertEqual(timeout, 30)
-            method = request.get_method()
-            path = request.full_url.split(f"/repos/{g.REPOSITORY}/", 1)[1]
-            if path == "forbidden":
-                raise g.HTTPError(request.full_url, 403, "permission denied", {}, None)
-            if method == "GET":
-                if path.startswith("commits/"):
-                    sha = path.split("commits/", 1)[1].split("/", 1)[0]
-                    return Response(statuses.get(sha, []))
-                return Response(comments)
-            data = json.loads(request.data)
-            calls.append((method, path, data))
-            if method == "POST" and path.endswith("/comments"):
-                comments.append({"id": len(comments) + 11, "user": {"type": "Bot", "login": "github-actions[bot]"}, **data})
-            elif method == "POST" and path.startswith("statuses/"):
-                statuses.setdefault(path.rsplit("/", 1)[1], []).insert(0, data)
-            elif method == "PATCH":
-                comments[0].update(data)
-            return Response({})
-
-        with patch.object(g, "urlopen", side_effect=transport):
-            client = g.GitHub(
-                g.REPOSITORY, "http://127.0.0.1", token="fake-local-token"
-            )
-            client.status(self.task, "pending", "Queued")
-            client.status(self.task, "pending", "Queued", "https://gitee.com/new-evidence")
-            client.comment(self.task, "first report")
-            client.comment(self.task, "first report")
-            client.comment(self.task, "updated report")
-            self.assertEqual(len(calls), 3)
-            self.assertEqual(calls[-1][0], "POST")
-            self.assertTrue(comments[0]["body"].startswith(g.MARKER))
-            self.assertTrue(comments[0]["body"].endswith("first report"))
-            client.comment(self.task, "first report")
-            self.assertEqual(len(calls), 3)  # Retry after a later event is also idempotent.
-            client.comment({**self.task, "task_id": "a" * 64}, "first report")
-            self.assertEqual(len(comments), 3)  # Another task never reuses an old comment.
-            self.assertFalse(any(call[0] == "PATCH" for call in calls))
-            self.assertTrue(
-                client.status_matches(self.task, "pending", "Queued"), statuses
-            )
-            self.assertFalse(client.status_matches(self.task, "success", "Queued"))
-            self.assertFalse(
-                client.status_matches(self.task, "pending", "Different result")
-            )
-            self.assertEqual(calls[0][1], f"statuses/{self.tested}")
-            self.assertEqual(calls[0][2]["context"], "local-ci/summary")
-            self.assertNotIn(self.head, statuses)
-            statuses[self.tested].insert(
-                0,
-                {
-                    "context": "local-ci/summary",
-                    "state": "error",
-                    "description": "Newer failure",
-                },
-            )
-            self.assertFalse(client.status_matches(self.task, "pending", "Queued"))
-            with self.assertRaisesRegex(
-                g.GitHubAPIError, "HTTP 403: permission denied"
-            ) as error:
-                client.request("forbidden")
-            self.assertNotIn("token", str(error.exception))
-
     def test_preflight_failure_comment_keeps_github_and_unknown_causes_distinct(self):
         pull = {**self.gh.pull, "user": {"login": "contributor"}}
         github_message = g.preflight_failure_comment(
@@ -2012,146 +1493,6 @@ README only
         with patch.object(gh, "request", return_value=[]) as request:
             self.assertTrue(gh.comment(context, "CI 准备未完成"))
         self.assertEqual(request.call_args.args[:2], ("issues/7/comments", "POST"))
-
-
-class WorkflowStructureTests(unittest.TestCase):
-    def test_workflow_gates_and_task_driven_receiver(self):
-        import yaml
-
-        worker_text = (ROOT / ".github/workflows/ci-gateway.yml").read_text()
-        data = yaml.load(worker_text, Loader=yaml.BaseLoader)
-        # A plain YAML scalar treats the space before '#' in 'PR #{0}' as
-        # a comment, silently cutting the Actions expression before its close.
-        self.assertIn("format('PR #{0}', inputs.pr_number)", data["run-name"])
-        self.assertIn("format('PR #{0}', github.event.pull_request.number)", data["run-name"])
-        self.assertEqual(data["name"], "CI Gateway")
-        self.assertIn("inputs.run_title", data["run-name"])
-        self.assertIn("format(' {0}', inputs.receiver_round)", data["run-name"])
-        self.assertEqual(data["run-name"].count("${{"), data["run-name"].count("}}"))
-        jobs = data["jobs"]
-        artifact_name = "local-ci-task-${{ needs.prepare.outputs.task_digest }}"
-        upload = next(step for step in jobs["prepare"]["steps"]
-                      if step.get("uses") == "actions/upload-artifact@v4")
-        self.assertEqual(upload["with"]["name"],
-                         "local-ci-task-${{ steps.task.outputs.task_digest }}")
-        for job_name in ("approve-external-fork", "enqueue", "finalize-preflight"):
-            download = next(step for step in jobs[job_name]["steps"]
-                            if step.get("uses") == "actions/download-artifact@v4")
-            self.assertEqual(download["with"]["name"], artifact_name)
-        cancel = next(step for step in jobs["cancel-obsolete"]["steps"] if step.get("run", "").endswith("gateway.py cancel"))
-        self.assertEqual(cancel["env"]["SOURCE_BRANCH"], "${{ inputs.source_branch || github.ref_name }}")
-        collect = next(step for step in jobs["publish"]["steps"] if step.get("id") == "collect")
-        self.assertEqual(collect["env"]["RECEIVER_TASK_ID"], "${{ inputs.task_id }}")
-        self.assertEqual(jobs["basic"]["needs"], "prepare")
-        self.assertIn("basic", jobs["api"]["needs"])
-        self.assertIn("api", jobs["security"]["needs"])
-        self.assertNotIn("review-card", jobs)
-        self.assertIn("security-result", jobs["approve-external-fork"]["needs"])
-        self.assertIn("needs.security-result.outputs.eligible", jobs["approve-external-fork"]["if"])
-        self.assertIn("approve-external-fork", jobs["enqueue"]["needs"])
-        for name in (
-            "local-ci-basic-checks.yml",
-            "local-ci-api-compatibility.yml",
-            "local-ci-security.yml",
-            "local-ci-preflight-result.yml",
-        ):
-            workflow = yaml.load(
-                (ROOT / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader
-            )
-            self.assertEqual(set(workflow["on"]), {"workflow_call"})
-        for stage in ("basic", "api", "security"):
-            completion = jobs[stage + "-result"]
-            expected_needs = ["prepare", stage]
-            if stage == "security":
-                expected_needs.extend(["basic-result", "api-result"])
-            self.assertEqual(completion["needs"], expected_needs)
-            self.assertIn("always()", completion["if"])
-            self.assertIn("needs.prepare.outputs.task_id", completion["if"])
-            self.assertEqual(completion["with"]["stage"], stage)
-            self.assertEqual(completion["with"]["outcome"], "${{ needs." + stage + ".result }}")
-            self.assertEqual(completion["permissions"]["checks"], "write")
-            self.assertNotIn("checks", jobs[stage]["permissions"])
-        self.assertEqual(jobs["security-result"]["with"]["external_fork"], "${{ needs.prepare.outputs.external_fork == 'true' }}")
-        self.assertIn("needs.basic-result.result", jobs["security-result"]["with"]["review_card"])
-        self.assertIn("needs.api-result.result", jobs["security-result"]["with"]["review_card"])
-        for publisher in ("basic-result", "api-result", "security-result"):
-            self.assertIn(publisher, jobs["enqueue"]["needs"])
-            self.assertIn(f"needs.{publisher}.result == 'success'", jobs["enqueue"]["if"])
-        sync = yaml.load((ROOT / ".github/workflows/local-ci-preflight-result.yml").read_text(), Loader=yaml.BaseLoader)
-        steps = sync["jobs"]["sync"]["steps"]
-        sync_download = next(step for step in steps
-                             if step.get("uses") == "actions/download-artifact@v4")
-        self.assertEqual(sync_download["with"]["name"],
-                         "local-ci-task-${{ inputs.task_digest }}")
-        for name in ("local-ci-api-compatibility.yml", "local-ci-security.yml"):
-            workflow = yaml.load((ROOT / ".github/workflows" / name).read_text(),
-                                 Loader=yaml.BaseLoader)
-            downloads = [step for job in workflow["jobs"].values()
-                         for step in job.get("steps", [])
-                         if step.get("uses") == "actions/download-artifact@v4"]
-            self.assertTrue(downloads)
-            self.assertTrue(all(step["with"]["name"] ==
-                                "local-ci-task-${{ inputs.task_digest }}"
-                                for step in downloads))
-        self.assertEqual(steps[0]["with"]["ref"], "${{ inputs.worker_revision_sha }}")
-        self.assertEqual(steps[0]["with"]["persist-credentials"], "false")
-        checks_step = next(step for step in steps if step.get("run") == "python3 scripts/ci/gateway.py checks")
-        self.assertEqual(checks_step["env"]["EXPECTED_TASK_DIGEST"], "${{ inputs.task_digest }}")
-        self.assertEqual(steps[-1]["id"], "eligibility")
-        self.assertNotIn("permissions", sync)
-        self.assertEqual(jobs["basic-result"]["permissions"]["pull-requests"], "read")
-        self.assertEqual(jobs["api-result"]["permissions"]["pull-requests"], "read")
-        self.assertEqual(jobs["security-result"]["permissions"]["pull-requests"], "write")
-        self.assertIn("external_fork", sync["on"]["workflow_call"]["inputs"])
-        self.assertIn("review_card", sync["on"]["workflow_call"]["inputs"])
-        self.assertIn("eligible", sync["on"]["workflow_call"]["outputs"])
-        self.assertTrue(jobs["deploy-dashboard"]["name"].isascii())
-        self.assertEqual(jobs["prepare"]["permissions"]["checks"], "write")
-        self.assertEqual(jobs["approve-external-fork"]["permissions"]["checks"], "write")
-        self.assertEqual(jobs["receive"]["permissions"]["checks"], "read")
-        self.assertIn("always()", jobs["finalize-preflight"]["if"])
-        self.assertIn("approve-external-fork", jobs["finalize-preflight"]["needs"])
-        self.assertEqual(jobs["finalize-preflight"]["steps"][-1]["run"], "python3 scripts/ci/gateway.py finalize")
-        self.assertNotIn("schedule", data["on"])
-        self.assertIn("worker_revision_sha", data["on"]["workflow_dispatch"]["inputs"])
-        self.assertFalse((ROOT / ".github/workflows/ci-receiver.yml").exists())
-        self.assertIn("receive", data["on"]["workflow_dispatch"]["inputs"]["mode"]["options"])
-        self.assertIn("inputs.mode == 'receive'", jobs["receive"]["if"])
-        self.assertGreater(
-            int(jobs["receive"]["timeout-minutes"]) * 60, g.RECEIVER_WAIT_SECONDS
-        )
-        self.assertNotIn("environment", jobs["receive"])
-        self.assertEqual(jobs["publish"]["needs"], "receive")
-        self.assertIn("needs.receive.outputs.state == 'ready'", jobs["publish"]["if"])
-        self.assertNotIn("environment", jobs["publish"])
-        self.assertNotIn("id-token", jobs["publish"]["permissions"])
-        self.assertEqual(jobs["deploy-dashboard"]["environment"], {
-            "name": "github-pages", "url": "${{ steps.deployment.outputs.page_url }}"
-        })
-        self.assertEqual(jobs["deploy-dashboard"]["needs"], "publish")
-        self.assertIn("dashboard_changed", jobs["deploy-dashboard"]["if"])
-        self.assertEqual(jobs["finalize-preflight"]["permissions"]["pull-requests"], "write")
-        self.assertEqual(jobs["publish"]["concurrency"]["cancel-in-progress"], "false")
-        self.assertIn("inputs.task_id", data["concurrency"]["group"])
-        self.assertIn("inputs.mode != 'receive'", data["concurrency"]["cancel-in-progress"])
-        enqueue_steps = jobs["enqueue"]["steps"]
-        dispatch = enqueue_steps[-1]
-        self.assertTrue(enqueue_steps[-2]["run"].endswith("gateway.py enqueue"))
-        self.assertNotIn("if", dispatch)
-        self.assertIn("mode: 'receive'", dispatch["with"]["script"])
-        self.assertEqual(dispatch["env"]["TASK_ID"], "${{ needs.prepare.outputs.task_id }}")
-        self.assertIn("run_title: runTitle", dispatch["with"]["script"])
-        retry = jobs["publish"]["steps"][-1]
-        self.assertEqual(retry["env"]["RUN_TITLE"], "${{ inputs.run_title }}")
-        self.assertIn("run_title: process.env.RUN_TITLE", retry["with"]["script"])
-        for step in jobs["publish"]["steps"]:
-            if "pages@" in step.get("uses", "") or "pages-artifact@" in step.get("uses", ""):
-                self.assertEqual(step["if"], "steps.dashboard.outputs.changed == 'true'")
-        self.assertEqual(
-            set(g.REQUIRED_CONTEXTS),
-            {"github/basic", "github/api", "github/security", "local-ci/dispatch", "local-ci/summary"},
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

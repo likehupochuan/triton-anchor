@@ -816,9 +816,12 @@ class GitHub:
             elif path.startswith(("python/", "lib/", "src/", "adapters/", "backends/")):
                 scope = "编译器与运行逻辑"
             else:
-                scope = "其他文件"
+                scope = "其他"
             scopes[scope] = scopes.get(scope, 0) + 1
-        attention = [f"{scope} {count} 个文件" for scope, count in sorted(scopes.items())]
+        attention = [
+            f"{count} 个{' ' if scope[0].isascii() else ''}{scope}文件"
+            for scope, count in sorted(scopes.items())
+        ]
         return {"author": (pull.get("user") or {}).get("login", "未记录"),
                 "source": pull["head"]["repo"]["full_name"], "branch": pull["head"]["ref"],
                 "files": paths, "complete": complete, "attention": attention,
@@ -1497,10 +1500,11 @@ def approval_rejection_comment(gh: GitHub, task: dict, review: dict, url: str = 
         # lookup is the transiently failing GitHub request; omit only the
         # contributor mention if the login cannot be read.
         pull = None
+    mention = contributor_mention(pull).strip()
     lines = [
-        contributor_mention(pull) + "## Local CI 外部 fork 审批未通过",
+        (mention + "   " if mention else "") + "**进入 Local CI 审批未通过**",
         "",
-        "审批未通过。",
+        f"PR 提交：`{task['head_sha']}`",
     ]
     reviewer = feedback_text(((review.get("user") or {}).get("login") or ""), 80)
     comment = feedback_text(review.get("comment") or "", 1200)
@@ -1508,6 +1512,7 @@ def approval_rejection_comment(gh: GitHub, task: dict, review: dict, url: str = 
         lines.extend(["", f"审核者：{reviewer}"])
     if comment:
         lines.extend(["", "审核批注：", "", f"> {comment}"])
+    lines.extend(["", "如有疑问可进一步联系审核者进行处理，感谢您的贡献！"])
     if url:
         lines.extend(["", f"[查看审批记录]({url})"])
     return "\n".join(lines)
