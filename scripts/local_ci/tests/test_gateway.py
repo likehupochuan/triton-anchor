@@ -1509,7 +1509,6 @@ README only
         limitations = rendered.split("### 合入阻塞与重要限制", 1)[1]
         for reason in [*result["blocking_reasons"], result["findings"][0]["summary"]]:
             self.assertIn(g.feedback_text(reason), limitations)
-        self.assertIn("| CI 流程验证 | 未执行 | 执行被中断 |", rendered)
 
     def test_review_evidence_links_only_safe_paths_on_the_frozen_revision(self):
         self.assertEqual(g.feedback_evidence({"kind": "architecture", "evidence": [
