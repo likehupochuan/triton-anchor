@@ -53,6 +53,7 @@ class FakeGitHub:
         self.pull = {
             "state": "open",
             "draft": False,
+            "user": {"login": "contributor"},
             "title": "Document the public behavior",
             "body": body(),
             "labels": [{"name": "docs"}],
@@ -79,12 +80,15 @@ class FakeGitHub:
                 }
             ]
         }
+        self.approvals = []
 
     def request(self, path, method="GET", data=None):
         if path == "contents/triton/cmake?ref=" + self.tested:
             return [{"type": "file", "path": name} for name in self.cmake_files]
         if path == "environments/local-ci-fork-approval":
             return self.environment
+        if path == "actions/runs/12345/approvals":
+            return copy.deepcopy(self.approvals)
         if path == "pulls/7":
             return copy.deepcopy(self.pull)
         if path == "git/commits/" + self.tested:
@@ -136,9 +140,6 @@ class FakeGitHub:
         return None
 
     def restore_preflight(self, task):
-        pass
-
-    def reconcile_legacy_statuses(self, *args):
         pass
 
     def approval_context(self, task):
@@ -1117,11 +1118,13 @@ README only
             self.assertEqual(len(checks), 3)
             self.assertEqual(checks[1]["conclusion"], "cancelled")
             self.assertEqual(gh.latest_dispatch(task), {"status": "not_started"})
-            for url in ("https://github.com/example/repo/actions/runs/1",
-                        "https://gitee.com/example/results/blob/results/result.json", ""):
+            urls = ("https://github.com/example/repo/actions/runs/1",
+                    "https://gitee.com/example/results/blob/results/result.json", "")
+            for url in urls:
                 gh.status(task, "error", "Local CI: retry publication", url)
                 self.assertTrue(gh.owns_task(task))
-                self.assertTrue(statuses[0]["target_url"].startswith(url or "https://"))
+            self.assertEqual(len(statuses), 1)
+            self.assertTrue(statuses[0]["target_url"].startswith(urls[0]))
 
         for change in ({"target_branch": "main"}, {"event_kind": "manual"},
                        {"pr_number": 7, "event_kind": "pull_request"},
@@ -1143,6 +1146,15 @@ README only
         with patch.object(self.gh, "check") as check:
             g.begin_checks(self.gh, self.task)
         self.assertTrue(all(call.args[4].isascii() and call.args[5].isascii() for call in check.call_args_list))
+        with patch.object(self.gh, "check") as check:
+            g.publish_preflight_checks(
+                self.gh,
+                self.task,
+                {"prepare": "success", **dict.fromkeys(g.CHECK_NAMES, "success")},
+                True,
+            )
+        self.assertTrue(check.call_args_list)
+        self.assertTrue(all(call.args[4] == "" for call in check.call_args_list))
         for state in g.GITHUB_STATES:
             self.assertTrue(g.publication_description(state, "a" * 64).isascii())
         stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
@@ -1264,6 +1276,8 @@ README only
             self.assertIn(text, rendered)
         details = rendered.split("### 查看审查详情", 1)[1].split("### 合入阻塞与重要限制", 1)[0]
         limitations = rendered.split("### 合入阻塞与重要限制", 1)[1]
+        self.assertIn("在 Dashboard 查看本次任务详情", details)
+        self.assertLess(details.index("</details>"), details.index("在 Dashboard 查看本次任务详情"))
         for text in ("前端构建", "后端构建", "前端测试", "无需构建", "当前版本不支持后端", "本次无需执行"):
             self.assertNotIn(text, details)
             self.assertNotIn(text, limitations)
@@ -1397,40 +1411,29 @@ README only
         feed = json.loads((self.root / "dashboard/tasks.json").read_bytes())
         self.assertEqual(len(feed["tasks"]), 2)
 
-    def test_legacy_head_statuses_follow_current_verdict_without_new_contexts(self):
+    def test_summary_is_written_only_to_tested_sha(self):
         client = g.GitHub(g.REPOSITORY, token="fixture")
         snapshots = {self.head: [
             {"context": "local-ci/summary", "state": "pending", "creator": {"login": "github-actions[bot]"}},
             {"context": "local-ci/sophgo-cmodel", "state": "error", "creator": {"login": "github-actions[bot]"}},
             {"context": "external/build", "state": "failure", "creator": {"login": "another-bot"}},
-        ], self.tested: [{"context": "local-ci/summary", "state": "success"}]}
+        ], self.tested: []}
         writes = []
         def request(path, method="GET", data=None):
-            if path == "pulls/7":
-                return self.gh.pull
             if method == "GET":
                 return snapshots[path.split("/")[1]]
             writes.append((path, data))
             snapshots[path.split("/")[1]].insert(0, {**data, "creator": {"login": "github-actions[bot]"}})
             return {}
         with patch.object(client, "request", side_effect=request):
-            client.reconcile_legacy_statuses(self.task, "success", "Local CI: pass", "https://gitee.com/report")
+            client.status(self.task, "success", "Local CI: pass", "https://gitee.com/report")
             self.assertEqual(len(writes), 1)
-            self.assertTrue(all(path == f"statuses/{self.head}" and data["state"] == "success" for path, data in writes))
+            self.assertEqual(writes[0][0], f"statuses/{self.tested}")
+            self.assertEqual(writes[0][1]["state"], "success")
+            self.assertNotIn(self.head, json.dumps(writes))
             self.assertNotIn("sophgo", json.dumps(writes))
-            client.reconcile_legacy_statuses(self.task, "success", "Local CI: pass", "https://gitee.com/report")
+            client.status(self.task, "success", "Local CI: pass", "https://gitee.com/other-report")
             self.assertEqual(len(writes), 1)
-            snapshots[self.tested][0]["state"] = "failure"
-            client.reconcile_legacy_statuses(self.task, "failure", "Local CI: preflight failed", "https://gitee.com/report")
-            self.assertTrue(all(data["state"] == "failure" for path, data in writes[1:]))
-            before = len(writes)
-            snapshots[self.tested][0]["target_url"] = "https://gitee.com/report#local-ci-task=" + "f" * 64
-            client.reconcile_legacy_statuses(self.task, "failure", "foreign ownership", "https://gitee.com/report")
-            self.assertEqual(len(writes), before)
-            self.gh.pull["head"]["sha"] = "f" * 40
-            before = len(writes)
-            client.reconcile_legacy_statuses(self.task, "success", "stale pass", "https://gitee.com/report")
-            self.assertEqual(len(writes), before)
 
     def test_reopen_closes_pending_retired_status_contexts(self):
         client = g.GitHub(g.REPOSITORY, token="fixture")
@@ -1490,7 +1493,8 @@ README only
         self.assertTrue(details.startswith("<details>\n<summary>展开已执行的检查与审查记录</summary>\n\n"))
         self.assertTrue(details.split("</summary>\n\n", 1)[1].startswith("| 检查 | 结果 | 说明 |"))
         self.assertLess(body.index("### 变更意图与审查结论"), body.index("### 查看审查详情"))
-        self.assertLess(body.index("</details>"), body.index("### 合入阻塞与重要限制"))
+        self.assertLess(body.index("</details>"), body.index("在 Dashboard 查看本次任务详情"))
+        self.assertLess(body.index("在 Dashboard 查看本次任务详情"), body.index("### 合入阻塞与重要限制"))
         self.assertNotIn("本次记录", body)
         self.assertIn("【风险：中】Need benchmark", body)
         self.assertIn("【风险：未标注】Unrated", body)
@@ -1742,6 +1746,12 @@ README only
         stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
         stages.update(card="success", approval="failure", enqueue="skipped")
         url = f"https://github.com/{g.REPOSITORY}/actions/runs/12345"
+        self.gh.approvals = [{
+            "state": "rejected",
+            "comment": "Please remove @generated files\n before retrying.",
+            "environments": [{"name": "local-ci-fork-approval"}],
+            "user": {"login": "maintainer"},
+        }]
         for outcome, wording in (("failure", "approval rejected or verification failed"),
                                  ("cancelled", "approval cancelled")):
             with self.subTest(outcome=outcome), patch.dict(g.os.environ, {
@@ -1755,8 +1765,22 @@ README only
             self.assertIn(f"[Open approval controls and workflow evidence]({url})", final[5])
             self.assertEqual(final[6], url)
             self.assertEqual(self.gh.statuses, [])
-        self.assertEqual(len(self.gh.comments), 2)
-        self.assertTrue(all("外部 fork" in comment and "Local CI" in comment for comment in self.gh.comments))
+        self.assertEqual(len(self.gh.comments), 1)
+        comment = self.gh.comments[0]
+        for text in ("@contributor", "Local CI 外部 fork 审批未通过", "审批未通过。",
+                     "审核者：maintainer", "审核批注：",
+                     "Please remove ＠generated files before retrying.",
+                     f"[查看审批记录]({url})"):
+            self.assertIn(text, comment)
+        for text in ("本次固定版本", "合并后验证提交", "如需继续验证", "审批验证失败"):
+            self.assertNotIn(text, comment)
+        self.gh.approvals = []
+        with patch.dict(g.os.environ, {
+            "GITHUB_RUN_ID": "12345", "GITHUB_REPOSITORY": g.REPOSITORY,
+            "GITHUB_SERVER_URL": "https://github.com",
+        }):
+            g.finalize_preflight(self.gh, self.task, stages)
+        self.assertEqual(len(self.gh.comments), 1)
         before = len(self.gh.statuses)
         with patch.object(self.gh, "owns_task", return_value=False):
             g.finalize_preflight(self.gh, self.task, stages)
@@ -1769,7 +1793,7 @@ README only
         stages = dict.fromkeys(("prepare", *g.CHECK_NAMES, "card", "approval"), "success")
         stages["enqueue"] = "failure"
         pending = {"state": "pending", "target_url": f"https://github.com/run#local-ci-task={self.task['task_id']}"}
-        for failure in ("dispatch", "legacy", "receiver"):
+        for failure in ("dispatch", "receiver"):
             events = []
 
             def check(task, key, status, conclusion, *args):
@@ -1777,13 +1801,7 @@ README only
                 if failure == "dispatch" and key == "dispatch" and conclusion == "success":
                     raise RuntimeError("Dispatch completion update failed")
 
-            def reconcile(task, state, *args):
-                events.append(("legacy", state))
-                if failure == "legacy":
-                    raise RuntimeError("Legacy synchronization failed")
-
             with self.subTest(failure=failure), patch.object(self.gh, "check", side_effect=check), \
-                    patch.object(self.gh, "reconcile_legacy_statuses", side_effect=reconcile), \
                     patch.object(self.gh, "status", side_effect=lambda task, state, *args: events.append(("summary", state))):
                 if failure == "receiver":
                     g.enqueue(self.task, self.gh, control, self.source)
@@ -1792,8 +1810,6 @@ README only
                         g.enqueue(self.task, self.gh, control, self.source)
             self.assertEqual(events[:3], [("dispatch", "in_progress", None),
                                           ("summary", "pending"), ("dispatch", "completed", "success")])
-            if failure != "dispatch":
-                self.assertEqual(events[3:], [("legacy", "pending")])
             dispatch = ({"status": "in_progress"} if failure == "dispatch" else
                         {"status": "completed", "conclusion": "success"})
             for label, previous in (
@@ -1805,16 +1821,13 @@ README only
                 with self.subTest(failure=failure, summary=label), \
                         patch.object(self.gh, "latest_dispatch", return_value=dispatch), \
                         patch.object(self.gh, "latest_summary", return_value=previous), \
-                        patch.object(self.gh, "status") as status, \
-                        patch.object(self.gh, "reconcile_legacy_statuses") as legacy:
+                        patch.object(self.gh, "status") as status:
                     g.finalize_preflight(self.gh, self.task, stages)
                     if label == "current":
                         status.assert_called_once()
                         self.assertEqual(status.call_args.args[:2], (self.task, "error"))
-                        legacy.assert_called_once_with(*status.call_args.args)
                     else:
                         status.assert_not_called()
-                        legacy.assert_not_called()
 
     def test_closed_pr_finishes_pending_checks_without_dispatched_task(self):
         gh = g.GitHub(g.REPOSITORY, token="fixture")
@@ -1938,6 +1951,7 @@ README only
                 g.REPOSITORY, "http://127.0.0.1", token="fake-local-token"
             )
             client.status(self.task, "pending", "Queued")
+            client.status(self.task, "pending", "Queued", "https://gitee.com/new-evidence")
             client.comment(self.task, "first report")
             client.comment(self.task, "first report")
             client.comment(self.task, "updated report")
