@@ -1,6 +1,6 @@
 # Local CI Gateway 与接收器
 
-`ci-gateway.yml` 是需要与 `main` 路由保持兼容的稳定入口，展示名为 `CI Gateway`。它冻结 PR 的 base/head 和精确 merge SHA，执行前置检查，按需等待外部 fork 的 environment 审批，再复查 PR。源码和需要随任务检出的子模块固定 refs 全部推送到 Gitee 后，才用同一个控制提交发布不可变 `tasks/`、当前 `current/` 和取消 `cancel/`。源码 refs 含完整 task ID，重试不能移动另一任务的源码。GitHub 侧三项前置 Check Run 上报为 `github/basic`、`github/api`、`github/security`；`local-ci/*` 仅用于投递、审批和最终 Local CI 结果。上游巡检使用 `Maintenance / Upstream Triton Watch`。
+默认分支 `main` 上的 `ci-request.yml` 是唯一 PR 请求入口，展示名为 `CI Request`，只包含 `Route CI request` 一个 job；`main` 的 `ci-gateway.yml` 只负责 receive、publish 和 Dashboard，`local-ci-unified` 的同名文件只负责 prepare、Checks、审批和 enqueue。执行侧网关冻结 PR 的 base/head 和精确 merge SHA，执行前置检查，按需等待外部 fork 的 environment 审批，再复查 PR。源码和需要随任务检出的子模块固定 refs 全部推送到 Gitee 后，才用同一个控制提交发布不可变 `tasks/`、当前 `current/` 和取消 `cancel/`。源码 refs 含完整 task ID，重试不能移动另一任务的源码。GitHub 侧三项前置 Check Run 上报为 `github/basic`、`github/api`、`github/security`；`local-ci/*` 仅用于投递、审批和最终 Local CI 结果。上游巡检使用 `Maintenance / Upstream Triton Watch`。
 
 根目录 `FlagGems` 使用服务器 profile 中预置的依赖，不要求网关提供镜像，也不随任务推送或检出；PR 修改 `FlagGems` 指针不会切换服务器固定依赖。其他子模块仍固定到被测 Git 对象。
 
@@ -8,9 +8,9 @@
 
 旧版 schema 的任务记录保留在 Gitee，网关的取消扫描与接收器识别后跳过，不让旧记录阻断新任务，也不据此回写通过；旧记录不列入新版看板当前任务列表。新版任务仍要求完整 task ID 对应的固定 refs，损坏记录不会被当成旧格式忽略。
 
-`main` 的 `ci-gateway.yml` 保留路由和接收入口，完整执行流程位于 `local-ci-unified`。控制分支的 push 直接执行检查，使用本次提交 SHA，不再向自身派发；其他已有此入口的分支允许 push，并路由到控制分支的当前 SHA。已有非草稿 PR 对应同一提交时，由 PR 流程负责，避免重复投递。删除分支不投递任务。没有 workflow 入口的分支通过 PR 或手动 request 指定源码分支运行；所有 PR 目标分支均可派发。
+`main` 的 `ci-request.yml` 监听 `pull_request_target`，不向其他 PR 目标分支同步。它不包含接收、发布和 Dashboard 部署作业，因此不会为这些不适用阶段生成 skipped Check Runs。当前合入前阶段把 `mode=run` 调度到 `local-ci-unified`；`main` 的 `ci-gateway.yml` 继续负责 receive、publish 和 Dashboard，完整执行流程暂时位于 `local-ci-unified`。未来完整 Gateway 合入 `main` 时，只需将请求入口中的 `controlRef` 从 `local-ci-unified` 改为 `main`，无需增加仓库变量。控制分支的 push 直接执行检查，使用本次提交 SHA，不再向自身派发；已有非草稿 PR 对应同一提交时，由 PR 流程负责，避免重复投递。删除分支不投递任务。
 
-两个分支的入口展示名统一为 `CI Gateway`，作业按职责命名。自动派发的运行标题例如 `PR #55 | h:079850a | dispatch`、`PR #55 | h:079850a m:adc03ab | receive 1`；接续保留同一任务身份并递增轮次。可选内部参数 `run_title` 只用于展示，不参与任务校验，不需配置仓库变量。
+请求入口展示名为 `CI Request`，控制执行与接收入口展示名为 `CI Gateway`，作业按职责命名。自动派发的运行标题例如 `PR #55 | h:079850a | dispatch`、`PR #55 | h:079850a m:adc03ab | receive 1`；接续保留同一任务身份并递增轮次。可选内部参数 `run_title` 只用于展示，不参与任务校验，不需配置仓库变量。
 
 任务成功投递到 Gitee 后，网关才在 `main` 启动 `mode=receive`，没有定时触发。接收器按 `task_id` 等待，每分钟检查一次，每轮最多 5 小时 40 分钟，最多 3 轮；收到有效结果或任务失效立即结束，等不到结果才接续下一轮。轮数固定在代码中，不增加仓库变量。不同任务可以同时等待，接收不依赖新的服务器服务。
 
@@ -29,7 +29,7 @@
 
 无需配置控制分支、控制 SHA 或目标分支列表的 Actions 变量。服务器通过 `control_repo_url` / `control_branch` 从 Gitee 自动快进控制 checkout。新 PR 任务使用 `control_policy=worker`，由服务器当前已安装的可信控制代码执行，不要求与网关记录的 `worker_revision_sha` 一致，该字段也不再参与新 PR 的任务身份；实际控制版本记录在结果 `environment.control_revision`。旧格式任务身份保持兼容，push/manual 仍使用原有精确控制版本更新机制。各 PR 目标分支仍需在服务器配置对应环境 profile。封存结果可继续单独补传。接收派发到 main，github-pages environment 须允许 main 部署。
 
-PR 分支保护应要求 `github/basic`、`github/api`、`github/security`、`local-ci/dispatch`、`local-ci/summary`。这些是当前任务的必检上下文，前三项和 dispatch 是 Check Runs，summary 是 commit status，统一发布到 `tested_sha`。`local-ci/approve` 只在外部 fork 需要审批时临时回写，不作为所有 PR 的 required context；dispatch 由审批结果门控，因此仍能表达外部审批是否完成。部署时从必检项中移除 `local-ci/preflight`。dispatch 在投递完成前保持未完成，防止同一提交的旧通过结果绕过本次流程。旧 head-only 前置结果仅在任务身份匹配且成功时复制到 tested_sha；缺失或失败的证据不能被补成通过。summary 不再镜像到 PR head SHA，避免同一 PR 页面聚合出两个相同 context。取消和失败不标为 skipped/neutral。PR 关闭或转为草稿时结束现有等待检查。
+PR 分支保护应要求 `github/basic`、`github/api`、`github/security`、`local-ci/dispatch`、`local-ci/summary`。这些是当前任务的必检上下文，前三项和 dispatch 是 Check Runs，summary 是 commit status；PR 任务统一发布到贡献者 `head_sha`，push/manual 任务发布到 `tested_sha`。`local-ci/approve` 只在外部 fork 需要审批时临时回写，不作为所有 PR 的 required context；dispatch 由审批结果门控，因此仍能表达外部审批是否完成。部署时从必检项中移除 `local-ci/preflight`。dispatch 在投递完成前保持未完成，防止同一提交的旧通过结果绕过本次流程。旧 merge-only 前置结果仅在任务身份匹配且成功时复制到 PR head；缺失或失败的证据不能被补成通过。实际执行仍冻结并验证 merge/tested SHA，证据链接也继续指向该被测提交。取消和失败不标为 skipped/neutral。PR 关闭或转为草稿时结束现有等待检查。
 
 冻结新任务后只创建 Basic，先检查 PR 信息，再运行 Basic CI；Basic 通过后才创建 API，API 通过后才创建 Security。全部前置通过后，同仓库任务直接进入 dispatch；外部 fork 才发布审批卡并等待 approve，审批通过后才进入 dispatch。源码和不可变任务成功发布到 Gitee 后才首次创建 summary pending，等待服务器结果。审批拒绝或校验失败显示 approve failure，取消显示 cancelled；不创建 Dispatch 或 Summary。前置失败只结束已经到达的检查，不补建后续阶段。投递成功但接收器启动失败时更新已有 summary，允许单独重试接收。Basic → API → Security 的执行只依赖上游检查成功；basic-result、api-result 与下一检查并行回写，回写失败或排队不阻塞下一检查。审批卡（仅外部 fork）等待全部检查及回写作业成功；页面状态可能因回写延迟短暂落后于实际执行。
 
@@ -47,9 +47,9 @@ PR 结果评论以 `result + task_id + run_id + result_digest` 确定稳定事�
 
 当前任务由 Basic 或原生任务准备检查的 ID 和工作流运行 ID 确认。自定义 Check 的运行 ID 保存于说明中的隐藏标记，不使用 GitHub 会改写的 `details_url` 判断归属；PR reopen、同 SHA 重试会刷新当前上下文的最新 Check Run，避免重复创建同名历史行，同时仍以工作流运行 ID 拦截迟到的旧发布。旧 preflight/dispatch 仅用于已有任务的读取兼容；旧控制分支自身 push 的 Dispatch 若缺少运行标记，需重新 request，不能通过详情链接猜测归属。旧流程不能回写新一轮检查，接收器还要求 Dispatch 属于本轮且已成功，防止同任务重跑时旧结果在审批前回写。summary 仅在派发成功后首次创建。GitHub 对 pending commit status 可显示 `Waiting for status to be reported`；必检项自身的 Expected 占位无法由发布代码隐藏。
 
-部署此状态修复时，`main` 路由文件的 `receive` job 也须包含 `checks: read`，供接收器核对任务身份；其 `publish`/`deploy-dashboard` 拆分也须同步，因为 `mode=receive` 工作流在 main 运行。`local-ci-unified` 中查询原生任务起点的检查回写作业还需 `actions: read`，prepare/finalize 使用 `checks: write`；finalize 还需 `actions: read` 和 `pull-requests: write`，分别用于读取本次运行的审批历史、在明确拒绝时通知贡献者；审批验证使用 `checks: write` 回写 approve。仅更新控制分支不会自动改变 main 上的工作流定义。
+部署此状态修复时，只需在默认分支 `main` 部署 `ci-request.yml`，并让 `main` 的 `ci-gateway.yml` 不再监听 `pull_request_target`；不要求向其他目标分支同步请求入口。`main` 的 `ci-gateway.yml` 中 `receive` job 还须包含 `checks: read`，供接收器核对任务身份；其 `publish`/`deploy-dashboard` 拆分也须保留，因为 `mode=receive` 工作流在 main 运行。`local-ci-unified` 中查询原生任务起点的检查回写作业还需 `actions: read`，prepare/finalize 使用 `checks: write`；finalize 还需 `actions: read` 和 `pull-requests: write`，分别用于读取本次运行的审批历史、在明确拒绝时通知贡献者；审批验证使用 `checks: write` 回写 approve。
 
-Actions 的 `route`、`enqueue`、`receive`、`publish` 成功只表示相应调度或传输完成，不能替代 `local-ci/summary` 的测试结论。前置 checks 成功与服务器 `infra_error` 可以同时出现。旧版 `local-ci/basic`、`local-ci/api`、`local-ci/security` 以及 sophgo-cmodel 变体不再创建、认领或回写；仍处于等待中的精确旧 Check Run 会在当前任务启动/PR 关闭时标记取消，已完成的 GitHub 历史行不能通过 API 删除。`local-ci/summary` 是 Commit Status，API 对每次 POST 追加历史记录；当前实现只写 `tested_sha`，同一 task/state/description 即使证据 URL 改变也不重复追加，以减少页面上的同名状态。状态真正转换时仍会保留历史，最新状态才是有效结论。PR 门禁应使用上面的五个当前 context；控制分支自身 push 的规则不能要求已省略的三个汇总。多模式 `CI Gateway` 在 request/run/receive 运行中会产生不适用的 skipped 编排作业，它们不代表业务检查失败，也不写入结果评论；GitHub 工作流历史仍可能展示这些作业。
+Actions 的 `route`、`enqueue`、`receive`、`publish` 成功只表示相应调度或传输完成，不能替代 `local-ci/summary` 的测试结论。前置 checks 成功与服务器 `infra_error` 可以同时出现。旧版 `local-ci/basic`、`local-ci/api`、`local-ci/security` 以及 sophgo-cmodel 变体不再创建、认领或回写；仍处于等待中的精确旧 Check Run 会在当前任务启动/PR 关闭时标记取消，已完成的 GitHub 历史行不能通过 API 删除。`local-ci/summary` 是 Commit Status，API 对每次 POST 追加历史记录；PR 当前实现只写 `head_sha`，push/manual 只写 `tested_sha`，同一 task/state/description 即使证据 URL 改变也不重复追加。状态真正转换时仍会保留历史，最新状态才是有效结论。PR 门禁应使用上面的五个当前 context；控制分支自身 push 的规则不能要求已省略的三个汇总。拆分请求入口后，新 PR 事件不会再生成不适用的 skipped 编排作业；已经生成的 GitHub 历史行仍无法删除。
 
 Dashboard 的 PR 任务列表、搜索和任务详情以贡献者的 `head_sha` 作为主要提交标识；merge/tested SHA 仍保留在“被测提交与影响文件”中说明实际验证对象。非 PR 任务继续显示 `tested_sha`。
 

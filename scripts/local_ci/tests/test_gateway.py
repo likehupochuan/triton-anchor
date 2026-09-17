@@ -1159,7 +1159,7 @@ README only
         feed = json.loads((self.root / "dashboard/tasks.json").read_bytes())
         self.assertEqual(len(feed["tasks"]), 2)
 
-    def test_summary_is_written_only_to_tested_sha(self):
+    def test_pr_checks_and_summary_are_published_on_head_sha(self):
         client = g.GitHub(g.REPOSITORY, token="fixture")
         snapshots = {self.head: [
             {"context": "local-ci/summary", "state": "pending", "creator": {"login": "github-actions[bot]"}},
@@ -1169,19 +1169,24 @@ README only
         writes = []
         def request(path, method="GET", data=None):
             if method == "GET":
+                if "/check-runs?" in path:
+                    return {"check_runs": []}
                 return snapshots[path.split("/")[1]]
             writes.append((path, data))
-            snapshots[path.split("/")[1]].insert(0, {**data, "creator": {"login": "github-actions[bot]"}})
+            if path.startswith("statuses/"):
+                snapshots[path.split("/")[1]].insert(0, {**data, "creator": {"login": "github-actions[bot]"}})
             return {}
         with patch.object(client, "request", side_effect=request):
             client.status(self.task, "success", "Local CI: pass", "https://gitee.com/report")
-            self.assertEqual(len(writes), 1)
-            self.assertEqual(writes[0][0], f"statuses/{self.tested}")
+            client.check(self.task, "basic", "in_progress", None, "", "Running", run_id="123")
+            self.assertEqual(writes[0][0], f"statuses/{self.head}")
             self.assertEqual(writes[0][1]["state"], "success")
-            self.assertNotIn(self.head, json.dumps(writes))
+            self.assertEqual(writes[1][0], "check-runs")
+            self.assertEqual(writes[1][1]["head_sha"], self.head)
+            self.assertNotIn(self.tested, json.dumps(writes))
             self.assertNotIn("sophgo", json.dumps(writes))
             client.status(self.task, "success", "Local CI: pass", "https://gitee.com/other-report")
-            self.assertEqual(len(writes), 1)
+            self.assertEqual(len(writes), 2)
 
     def test_reopen_closes_pending_retired_status_contexts(self):
         client = g.GitHub(g.REPOSITORY, token="fixture")

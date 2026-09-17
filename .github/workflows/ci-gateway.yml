@@ -1,19 +1,15 @@
 name: CI Gateway
 run-name: >-
-  ${{ inputs.run_title || (inputs.pr_number != '' && inputs.pr_number != '0' && format('PR #{0}', inputs.pr_number)) || (github.event.pull_request.number && format('PR #{0}', github.event.pull_request.number)) || (inputs.task_id && format('Task {0}', inputs.task_id)) || format('Branch {0}', inputs.source_branch || github.ref_name) }} | ${{ (inputs.mode == 'run' || (github.event_name == 'push' && github.ref_name == 'local-ci-unified')) && 'dispatch' || inputs.mode || 'request' }}${{ inputs.mode == 'receive' && format(' {0}', inputs.receiver_round) || '' }}
+  ${{ inputs.run_title || (inputs.pr_number != '' && inputs.pr_number != '0' && format('PR #{0}', inputs.pr_number)) || format('Branch {0}', inputs.source_branch || github.ref_name) }} | dispatch
 on:
-  pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review, edited, closed, converted_to_draft, labeled, unlabeled]
   push:
     branches: ['**']
   workflow_dispatch:
     inputs:
       mode:
         type: choice
-        options: [request, run, receive]
-        default: request
-      task_id: {type: string, default: ''}
-      receiver_round: {type: choice, options: ['1', '2', '3'], default: '1'}
+        options: [run]
+        default: run
       pr_number: {type: string, default: '0'}
       source_branch: {type: string, default: ''}
       requested_sha: {type: string, default: ''}
@@ -23,57 +19,9 @@ on:
       run_title: {type: string, default: '', description: 'Display identity passed between stages; normally leave empty'}
 permissions: {}
 concurrency:
-  group: ${{ inputs.mode == 'receive' && format('local-ci-receive-{0}', inputs.task_id) || format('local-ci-{0}-{1}', inputs.mode || (github.event_name == 'push' && github.ref_name == 'local-ci-unified' && 'run') || github.event_name, inputs.pr_number != '0' && inputs.pr_number || github.event.pull_request.number || inputs.source_branch || github.ref_name) }}
-  cancel-in-progress: ${{ inputs.mode != 'receive' }}
+  group: ${{ format('local-ci-run-{0}', inputs.pr_number != '0' && inputs.pr_number || inputs.source_branch || github.ref_name) }}
+  cancel-in-progress: true
 jobs:
-  route:
-    name: Route CI request
-    if: >-
-      (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
-      (github.event_name != 'workflow_dispatch' || inputs.mode == 'request') &&
-      !(github.event_name == 'push' && (github.event.deleted || github.ref_name == 'local-ci-unified'))
-    runs-on: ubuntu-latest
-    permissions: {contents: read, pull-requests: read, actions: write}
-    steps:
-      - name: Route to local-ci-unified
-        uses: actions/github-script@v7
-        env:
-          INPUT_PR: ${{ inputs.pr_number }}
-          INPUT_BRANCH: ${{ inputs.source_branch }}
-          INPUT_SHA: ${{ inputs.requested_sha }}
-          INPUT_FULL: ${{ inputs.full }}
-        with:
-          script: |
-            const {owner, repo} = context.repo;
-            let pull = context.payload.pull_request;
-            if (!pull && Number(process.env.INPUT_PR) > 0) {
-              ({data: pull} = await github.rest.pulls.get({owner, repo, pull_number: Number(process.env.INPUT_PR)}));
-            }
-            const branch = process.env.INPUT_BRANCH || (pull?.base.ref || context.ref.replace('refs/heads/', ''));
-            if (context.eventName === 'push') {
-              const {data: pulls} = await github.rest.pulls.list({owner, repo, state:'open', head:owner+':'+branch, per_page:100});
-              if (pulls.some(pr => !pr.draft && pr.head.sha === context.sha)) {
-                core.info('The ready PR event owns this revision; avoid a duplicate branch task.');
-                return;
-              }
-            }
-            const controlRef = 'local-ci-unified';
-            const {data: release} = await github.rest.repos.getBranch({owner, repo, branch: controlRef});
-            const revision = release.commit.sha;
-            const requestedSha = pull?.head.sha || process.env.INPUT_SHA || (context.eventName === 'push' ? context.sha : '');
-            const subject = pull ? `PR #${pull.number}` : `Branch ${branch}`;
-            const runTitle = requestedSha ? `${subject} | h:${requestedSha.slice(0, 7)}` : subject;
-            await github.rest.actions.createWorkflowDispatch({
-              owner, repo, workflow_id: 'ci-gateway.yml', ref: controlRef,
-              inputs: {
-                mode: 'run',
-                pr_number: String(pull?.number || process.env.INPUT_PR || '0'),
-                source_branch: branch,
-                requested_sha: requestedSha, run_title: runTitle,
-                worker_revision_sha: revision, action: context.eventName === 'workflow_dispatch' ? 'manual' : context.payload.action || '',
-                full: process.env.INPUT_FULL || 'false'
-              }
-            });
   cancel-obsolete:
     name: Cancel obsolete tasks
     needs: validate-worker
@@ -323,144 +271,3 @@ jobs:
             const duplicate = pulls.some(pr => !pr.draft && pr.head.sha === context.sha);
             if (duplicate) core.info('The ready PR event owns this revision; avoid a duplicate branch task.');
             core.setOutput('proceed', !duplicate);
-
-  receive:
-    name: Receive local CI result
-    if: >-
-      (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
-      github.event_name == 'workflow_dispatch' && inputs.mode == 'receive'
-    runs-on: ubuntu-latest
-    timeout-minutes: 350
-    permissions: {contents: read, pull-requests: read, statuses: write, actions: write, checks: read}
-    outputs:
-      state: ${{ steps.wait.outputs.receiver_state }}
-      control_sha: ${{ steps.control.outputs.sha }}
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
-      RECEIVER_TASK_ID: ${{ inputs.task_id }}
-      RECEIVER_ROUND: ${{ inputs.receiver_round }}
-    steps:
-      - name: Resolve local-ci-unified control revision
-        id: control
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const {data: branch} = await github.rest.repos.getBranch({...context.repo, branch: 'local-ci-unified'});
-            core.setOutput('sha', branch.commit.sha);
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.control.outputs.sha }}
-          persist-credentials: false
-          submodules: false
-      - name: Wait for this task or continue within the round limit
-        id: wait
-        run: python3 scripts/ci/gateway.py receive
-  publish:
-    name: Publish CI results
-    needs: receive
-    if: needs.receive.outputs.state == 'ready'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    concurrency:
-      group: local-ci-publish
-      cancel-in-progress: false
-    outputs:
-      dashboard_changed: ${{ steps.dashboard.outputs.changed }}
-    permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: write, pages: read}
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.receive.outputs.control_sha }}
-          persist-credentials: false
-          submodules: false
-      - name: Prepare business dashboard
-        run: |
-          mkdir -p _site
-          cp -R dashboard/. _site/
-      - name: Receive results and update PRs
-        id: collect
-        env:
-          RECEIVER_TASK_ID: ${{ inputs.task_id }}
-          DASHBOARD_URL: ${{ vars.DASHBOARD_URL || '' }}
-        run: python3 scripts/ci/gateway.py collect
-      - name: Check whether dashboard content changed
-        id: dashboard
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const next = JSON.parse(fs.readFileSync('_site/data/tasks.json', 'utf8'));
-            const files = (directory = '') => fs.readdirSync('_site/' + directory, {withFileTypes: true}).flatMap(entry => {
-              const path = directory + entry.name;
-              return entry.isDirectory() ? files(path + '/') : path === 'data/tasks.json' ? [] : [path];
-            });
-            const digest = require('crypto').createHash('sha256');
-            for (const path of files().sort()) {
-              const bytes = fs.readFileSync('_site/' + path);
-              digest.update(JSON.stringify([path, bytes.length]) + '\n').update(bytes);
-            }
-            next.site_digest = digest.digest('hex');
-            fs.writeFileSync('_site/data/tasks.json', JSON.stringify(next, null, 2) + '\n');
-            let previous;
-            try {
-              const {data: page} = await github.rest.repos.getPages(context.repo);
-              const url = new URL('data/tasks.json', page.html_url);
-              url.searchParams.set('run', context.runId);
-              const response = await fetch(url, {headers: {'Cache-Control': 'no-cache'}});
-              if (response.status !== 404) {
-                if (!response.ok) throw new Error('Cannot read the published dashboard: HTTP ' + response.status);
-                previous = await response.json();
-              }
-            } catch (error) {
-              if (error.status !== 404) throw error;
-            }
-            const content = data => JSON.stringify({schema: data?.schema, tasks: data?.tasks, site_digest: data?.site_digest});
-            core.setOutput('changed', content(previous) !== content(next));
-      - uses: actions/upload-pages-artifact@v3
-        if: steps.dashboard.outputs.changed == 'true'
-        with: {path: _site}
-      - name: Surface incomplete receiver operations
-        if: steps.collect.outputs.receiver_errors != '0'
-        run: exit 1
-      - name: Retry incomplete publication within the receiver round limit
-        if: failure() && inputs.receiver_round != '3'
-        uses: actions/github-script@v7
-        env:
-          TASK_ID: ${{ inputs.task_id }}
-          RECEIVER_ROUND: ${{ inputs.receiver_round }}
-          RUN_TITLE: ${{ inputs.run_title }}
-        with:
-          retries: 3
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              ...context.repo, workflow_id: 'ci-gateway.yml', ref: 'main',
-              inputs: {
-                mode: 'receive', task_id: process.env.TASK_ID,
-                receiver_round: String(Number(process.env.RECEIVER_ROUND) + 1),
-                run_title: process.env.RUN_TITLE
-              }
-            });
-  deploy-dashboard:
-    name: Deploy dashboard (independent of test results)
-    needs: publish
-    if: needs.publish.outputs.dashboard_changed == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    concurrency:
-      group: local-ci-dashboard
-      cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    permissions: {pages: write, id-token: write}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4

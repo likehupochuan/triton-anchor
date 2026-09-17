@@ -121,6 +121,11 @@ def has_native_preflight(task: dict) -> bool:
     )
 
 
+def github_sha(task: dict) -> str:
+    """Commit where GitHub presents this task's checks."""
+    return task["head_sha"] if task.get("pr_number") else task["tested_sha"]
+
+
 class GitHubAPIError(RuntimeError):
     """A diagnostic GitHub failure that never exposes response bodies or credentials."""
 
@@ -256,7 +261,7 @@ class GitHub:
     def status(self, task: dict, state: str, description: str, url: str = "") -> None:
         # Keep task ownership in the existing summary, including native self-push.
         if task.get("task_id"):
-            url = url or workflow_url() or f"https://github.com/{self.repository}/commit/{task['tested_sha']}"
+            url = url or workflow_url() or f"https://github.com/{self.repository}/commit/{github_sha(task)}"
             url = url.split("#", 1)[0] + f"#local-ci-task={task['task_id']}"
             # Commit Status entries are append-only.  Avoid adding an
             # identical final/pending status when a receiver or finalizer is
@@ -270,22 +275,20 @@ class GitHub:
                 and owner == f"local-ci-task={task['task_id']}"
             ):
                 return
-        # Every gate belongs to the same tested commit throughout the lifecycle.
-        for sha in (task["tested_sha"],):
-            self.request(
-                f"statuses/{sha}",
-                "POST",
-                {
-                    "state": state,
-                    "context": "local-ci/summary",
-                    "description": description[:140],
-                    "target_url": url,
-                },
-            )
+        self.request(
+            f"statuses/{github_sha(task)}",
+            "POST",
+            {
+                "state": state,
+                "context": "local-ci/summary",
+                "description": description[:140],
+                "target_url": url,
+            },
+        )
 
     def latest_summary(self, task: dict) -> dict | None:
         for page in range(1, 21):
-            rows = self.request(f"commits/{task['tested_sha']}/statuses?per_page=100&page={page}")
+            rows = self.request(f"commits/{github_sha(task)}/statuses?per_page=100&page={page}")
             latest = next(
                 (row for row in rows if row.get("context") == "local-ci/summary"),
                 None,
@@ -473,7 +476,7 @@ class GitHub:
             if key == "basic":
                 payload["started_at"] = started_at or now()
             self.request(
-                "check-runs", "POST", {**payload, "head_sha": task["tested_sha"]}
+                "check-runs", "POST", {**payload, "head_sha": github_sha(task)}
             )
         return True
 
@@ -481,7 +484,7 @@ class GitHub:
         runs = []
         for page in range(1, 21):
             response = self.request(
-                f"commits/{sha or task['tested_sha']}/check-runs?check_name="
+                f"commits/{sha or github_sha(task)}/check-runs?check_name="
                 f"{quote(name, safe='')}&filter=all&per_page=100&page={page}"
             )
             batch = response.get("check_runs", [])
@@ -553,8 +556,8 @@ class GitHub:
             return owner == expected
         for key, name in CHECK_NAMES.items():
             runs = self.check_runs(task, key)
-            if not runs and task["head_sha"] != task["tested_sha"]:
-                runs = self.check_runs(task, key, sha=task["head_sha"])
+            if not runs and github_sha(task) != task["tested_sha"]:
+                runs = self.check_runs(task, key, sha=task["tested_sha"])
             owned = [
                 row
                 for row in runs
@@ -760,12 +763,13 @@ class GitHub:
                 break
 
     def restore_preflight(self, task: dict) -> None:
-        """Upgrade old head-only checks before publishing a merge-commit summary."""
+        """Restore legacy checks onto the commit used by GitHub's PR UI."""
         if has_native_preflight(task):
             return
+        publication_sha = github_sha(task)
         for key in CHECK_NAMES:
             identity = f"triton-anchor-local-ci:{key}:{task['task_id']}"
-            for sha in dict.fromkeys((task["tested_sha"], task["head_sha"])):
+            for sha in dict.fromkeys((publication_sha, task["tested_sha"], task["head_sha"])):
                 owned = [row for row in self.check_runs(task, key, sha=sha)
                          if row.get("external_id") == identity
                          and row.get("name") == CHECK_NAMES[key]
@@ -774,7 +778,7 @@ class GitHub:
                 if latest:
                     if latest.get("status") != "completed" or latest.get("conclusion") != "success":
                         raise ValueError("Preflight is not successful for this task")
-                    if sha != task["tested_sha"]:
+                    if sha != publication_sha:
                         output = latest.get("output") or {}
                         self.check(task, key, "completed", "success",
                                    output.get("title", CHECK_NAMES[key] + ": success"),
