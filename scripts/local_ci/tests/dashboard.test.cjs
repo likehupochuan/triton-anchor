@@ -169,8 +169,11 @@ test('a negative review about networking is a review blocker, not an outage', ()
     reviews:[{kind:'architecture',status:'fail',summary}],
     blocking_reasons:['必要审查未通过：architecture — '+summary]}));
   assert.deepEqual(groups.map(group=>group.id),['review']);
+  assert.deepEqual(groups[0].reasons.map(item=>item.reason),['架构契约：'+summary]);
   const finding = {summary:'DNS failure handling leaks credentials',severity:'high'};
-  assert.equal(blockerGroups(errorRun({findings:[finding],blocking_reasons:[finding.summary]}))[0].id,'review');
+  const findingGroups=blockerGroups(errorRun({findings:[finding],blocking_reasons:[finding.summary]}));
+  assert.equal(findingGroups[0].id,'review');
+  assert.deepEqual(findingGroups[0].reasons.map(item=>item.reason),[finding.summary]);
 });
 
 test('test failure, incomplete coverage, and absent evidence stay distinct', () => {
@@ -252,11 +255,16 @@ test('blockers render one concise section without duplicate reviews or expandabl
   context.root=mixedRoot;
   context.run=errorRun({summary:'Out of memory',reviews:[
     {kind:'architecture',status:'fail',summary:'内存不足时没有清理资源'},
-  ]});
+  ],checks:[{tool_id:'frontend_tests',status:'fail',summary:'三个测试失败'}],
+  blocking_reasons:['最低必检未通过：frontend_tests','额外审查细节不应重复展示']});
   vm.runInNewContext('renderBlockers(root,run);',context);
   assert.deepEqual(mixedRoot.children.map(box=>box.children[0].textContent),['阻塞原因']);
-  assert.ok(visible(mixedRoot.children[0]).some(node=>node.textContent==='内存不足'));
-  assert.ok(visible(mixedRoot.children[0]).some(node=>node.textContent==='内存不足时没有清理资源'));
+  const mixedText=visible(mixedRoot.children[0]).map(node=>node.textContent);
+  assert.ok(mixedText.includes('审查阻塞'));
+  assert.ok(mixedText.includes('架构契约：内存不足时没有清理资源'));
+  assert.ok(!mixedText.includes('服务器环境问题'));
+  assert.ok(!mixedText.includes('三个测试失败'));
+  assert.ok(!mixedText.includes('额外审查细节不应重复展示'));
   vm.runInNewContext('renderDetail(run);',context);
   const detail=flatten(document.getElementById('taskDetail'));
   assert.equal(detail.filter(node=>node.tag==='h3'&&node.textContent==='阻塞原因').length,1);

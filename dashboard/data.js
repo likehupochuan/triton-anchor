@@ -23,6 +23,20 @@
     const findings = array(review.findings).filter(item => item.blocking === true || ['high','critical'].includes(item.severity));
     const negative = value => ['fail','failure','failed'].includes(value);
     const unfinished = value => ['infra_error','error','skipped','not_selected','unknown'].includes(value);
+    const failedReviews = reviews.filter(item => negative(item.status));
+    if (failedReviews.length || findings.length) {
+      // A failed review is already the root cause.  Keep the task view focused
+      // on one concise review conclusion; checks, findings and evidence remain
+      // available in the result report instead of being repeated as blockers.
+      const reviewNames = {pr_info:'PR 信息',architecture:'架构契约',intent:'专项审查'};
+      const sources = failedReviews.length ? failedReviews.map(item =>
+        (reviewNames[item.kind] || item.kind) + '：' + (item.summary || '未通过')) :
+        findings.map(item => item.summary || '高风险审查发现');
+      const concise = [...new Set(sources.map(value => String(value).replace(/\s+/g,' ').trim()).filter(Boolean))].join('；');
+      const reason = concise.length > 320 ? concise.slice(0,320) + '…' : concise;
+      return [{id:'review',...blockerCategories.review,
+        reasons:[{category:'review',reason,source:'审查结论'}],impacts:[]}];
+    }
     const originals = array(run.blocking_reasons).filter(value => typeof value === 'string' && value.trim());
     const entries = [], seen = new Set();
     function classify(text, context = {}) {

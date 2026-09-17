@@ -7,8 +7,10 @@ Poller 负责准备对应环境、停止失效任务和交付结果。源码和�
 
 ```mermaid
 flowchart TD
-  A[GitHub：PR 校验 → Basic Checks → API Compatibility → Security] --> B[approval review card → 按需人工审批]
-  B --> C[GitHub → Gitee：冻结被测提交、base/head 与 PR 信息，投递任务]
+  A[GitHub：PR 校验 → Basic Checks → API Compatibility → Security] --> B{外部 fork？}
+  B -- 否 --> C[GitHub → Gitee：冻结被测提交、base/head 与 PR 信息，投递任务]
+  B -- 是 --> R[approval review card → 按需人工审批]
+  R --> C
   C --> D[Local Poller：校验任务，准备 Triton / LLVM / 后端环境]
   D --> E[Codex：PR 信息校验，解析意图与影响范围]
   E --> F[按需构建与测试，调用基础 tools]
@@ -28,7 +30,7 @@ Codex 可在任务内修复环境或降低编译并行度重试。
 PR 信息与架构审查必须完成，严重高风险发现阻塞；其余风险与有效性能回退报告给维护者。
 专项审查按 PR 描述和实际 diff 选择方向，标签仅供参考，无标签也会进行相关审查。
 PR 模板是最低信息要求，支持中英文和自定义字段。状态回写与下一检查并行，Basic → API → Security
-仍保持成功依赖；全部前置检查及回写完成后生成审批卡。
+仍保持成功依赖；外部 fork 在全部前置检查及回写完成后生成审批卡，同仓库任务直接投递。
 
 ## 文件结构
 

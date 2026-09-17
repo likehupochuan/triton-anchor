@@ -183,44 +183,23 @@ jobs:
       outcome: ${{ needs.api.result }}
   security-result:
     name: Publish security result
-    needs: [prepare, security]
+    # Keep security execution independent, but publish its result/card only
+    # after the earlier result publishers have settled.
+    needs: [prepare, security, basic-result, api-result]
     if: ${{ always() && needs.prepare.outputs.task_id != '' }}
-    permissions: {contents: read, pull-requests: read, checks: write, statuses: read, actions: read}
+    permissions: {contents: read, pull-requests: write, checks: write, statuses: read, actions: read}
     uses: ./.github/workflows/local-ci-preflight-result.yml
     with:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
       worker_revision_sha: ${{ github.event_name == 'push' && github.sha || inputs.worker_revision_sha }}
       stage: security
       outcome: ${{ needs.security.result }}
-  review-card:
-    name: Approval review card
-    needs: [prepare, basic, api, security, basic-result, api-result, security-result]
-    if: >-
-      always() && needs.prepare.outputs.tested_sha != '' &&
-      needs.prepare.result == 'success' && needs.basic.result == 'success' &&
-      needs.api.result == 'success' && needs.security.result == 'success'
-    runs-on: ubuntu-latest
-    permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: read}
-    outputs:
-      eligible: ${{ steps.card.outputs.eligible }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'push' && github.sha || inputs.worker_revision_sha }}
-          persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with: {name: local-ci-task}
-      - name: Publish preflight evidence and approval review card
-        id: card
-        env:
-          EXPECTED_TASK_DIGEST: ${{ needs.prepare.outputs.task_digest }}
-          GH_TOKEN: ${{ github.token }}
-          STAGES: '{"prepare":"${{ needs.prepare.result }}","basic":"${{ needs.basic.result }}","api":"${{ needs.api.result }}","security":"${{ needs.security.result }}"}'
-        run: python3 scripts/ci/gateway.py card
+      external_fork: ${{ needs.prepare.outputs.external_fork == 'true' }}
+      review_card: ${{ needs.prepare.outputs.external_fork == 'true' && needs.basic-result.result == 'success' && needs.api-result.result == 'success' }}
   approve-external-fork:
     name: Approve external fork
-    needs: [prepare, review-card]
-    if: ${{ needs.review-card.outputs.eligible == 'true' && needs.prepare.outputs.external_fork == 'true' }}
+    needs: [prepare, security-result]
+    if: ${{ needs.prepare.outputs.external_fork == 'true' && needs.security-result.outputs.eligible == 'true' }}
     environment: local-ci-fork-approval
     runs-on: ubuntu-latest
     permissions: {contents: read, pull-requests: read, actions: read, checks: write, statuses: read}
@@ -241,10 +220,16 @@ jobs:
         run: python3 scripts/ci/gateway.py approval
   enqueue:
     name: Dispatch local CI task
-    needs: [prepare, review-card, approve-external-fork]
+    needs: [prepare, basic, api, security, basic-result, api-result, security-result, approve-external-fork]
     if: >-
-      always() && needs.review-card.outputs.eligible == 'true' &&
-      (needs.prepare.outputs.external_fork != 'true' || needs.approve-external-fork.result == 'success')
+      always() && needs.prepare.result == 'success' &&
+      needs.prepare.outputs.task_id != '' &&
+      needs.basic.result == 'success' && needs.api.result == 'success' &&
+      needs.security.result == 'success' &&
+      needs.basic-result.result == 'success' && needs.api-result.result == 'success' &&
+      needs.security-result.result == 'success' &&
+      (needs.prepare.outputs.external_fork != 'true' ||
+       (needs.security-result.outputs.eligible == 'true' && needs.approve-external-fork.result == 'success'))
     runs-on: ubuntu-latest
     permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: write}
     steps:
@@ -290,7 +275,7 @@ jobs:
             });
   finalize-preflight:
     name: Finish interrupted checks
-    needs: [prepare, basic, api, security, review-card, approve-external-fork, enqueue]
+    needs: [prepare, basic, api, security, basic-result, api-result, security-result, approve-external-fork, enqueue]
     if: ${{ always() && needs.prepare.outputs.task_id != '' && needs.enqueue.result != 'success' }}
     runs-on: ubuntu-latest
     permissions: {contents: read, pull-requests: read, statuses: write, checks: write, actions: read}
@@ -306,7 +291,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_TASK_DIGEST: ${{ needs.prepare.outputs.task_digest }}
-          STAGES: '{"prepare":"${{ needs.prepare.result }}","basic":"${{ needs.basic.result }}","api":"${{ needs.api.result }}","security":"${{ needs.security.result }}","card":"${{ needs.review-card.result }}","approval":"${{ needs.approve-external-fork.result }}","enqueue":"${{ needs.enqueue.result }}"}'
+          STAGES: '{"prepare":"${{ needs.prepare.result }}","basic":"${{ needs.basic.result }}","api":"${{ needs.api.result }}","security":"${{ needs.security.result }}","card":"${{ needs.security-result.outputs.card_result }}","approval":"${{ needs.approve-external-fork.result }}","enqueue":"${{ needs.enqueue.result }}"}'
         run: python3 scripts/ci/gateway.py finalize
   validate-worker:
     name: Validate control revision

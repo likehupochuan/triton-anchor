@@ -1257,7 +1257,7 @@ README only
         config_error = g.approval_card(self.task, stages, False, "缺少 required reviewers")
         self.assertIn("缺少 required reviewers", config_error)
         internal = g.approval_card({**self.task, "external_fork": False}, stages, True)
-        self.assertIn("无需外部 fork 审批", internal)
+        self.assertEqual(internal, "")
         url = f"https://github.com/{g.REPOSITORY}/actions/runs/12345"
         with patch.object(g, "GitHub", return_value=self.gh), \
                 patch.object(g, "load_task", return_value=self.task), \
@@ -1276,6 +1276,19 @@ README only
                 self.assertEqual(g.main(), 0)
             self.assertEqual(self.gh.check_calls[-1][1:4], ("approve", "completed", "success"))
             self.assertEqual(self.gh.check_calls[-1][6], url)
+        self.gh.check_calls = []
+        self.gh.comments = []
+        internal = {**self.task, "external_fork": False}
+        with patch.object(g, "GitHub", return_value=self.gh), \
+                patch.object(g, "load_task", return_value=internal), \
+                patch.object(g, "output") as output, patch.dict(g.os.environ, {
+                    "GITHUB_RUN_ID": "12345", "GITHUB_REPOSITORY": g.REPOSITORY,
+                    "GITHUB_SERVER_URL": "https://github.com", "GITHUB_STEP_SUMMARY": "",
+                }), patch.object(g.sys, "argv", ["gateway.py", "card", "--stages", json.dumps(stages)]):
+            self.assertEqual(g.main(), 0)
+            output.assert_called_once_with("eligible", True)
+        self.assertFalse(any(call[1] == "approve" for call in self.gh.check_calls))
+        self.assertEqual(self.gh.comments, [])
         self.assertEqual(self.gh.statuses, [])
 
     def test_failed_prerequisites_never_publish_card_or_verify_approval(self):
@@ -1529,12 +1542,10 @@ README only
         body = g.result_comment(result)
         details = body.split("### 查看审查详情\n\n", 1)[1].split("</details>", 1)[0]
         self.assertTrue(details.startswith("<details>\n<summary>展开检查与审查记录</summary>\n\n"))
-        self.assertIn("本次记录 3 项检查与审查：3 项通过，0 项未通过，0 项未执行、不适用或未完成。", details)
-        self.assertLess(details.index("本次记录"), details.index("| 检查 | 结果 | 说明 |"))
+        self.assertTrue(details.split("</summary>\n\n", 1)[1].startswith("| 检查 | 结果 | 说明 |"))
         self.assertLess(body.index("### 变更意图与审查结论"), body.index("### 查看审查详情"))
         self.assertLess(body.index("</details>"), body.index("### 合入阻塞与重要限制"))
-        self.assertNotIn("审查项详情", body)
-        self.assertNotIn("检查与审查结果", body)
+        self.assertNotIn("本次记录", body)
         self.assertIn("【风险：中】Need benchmark", body)
         self.assertIn("【风险：未标注】Unrated", body)
         self.assertIn("| 架构契约审查 | 通过 | Compatible |", body)
@@ -1632,16 +1643,16 @@ README only
             "GITHUB_RUN_ID": "200",
         }):
             g.begin_checks(client, self.task)
-            self.assertEqual(len(checks), 6)
-            self.assertEqual([row["name"] for row in checks[5:]], ["local-ci/basic"])
-            self.assertTrue(all(row["status"] == "queued" and row.get("conclusion") is None
-                                and row["details_url"] != run_url + "200"
-                                and g.check_workflow_id(row) == "200" for row in checks[5:]))
+            self.assertEqual(len(checks), 5)
+            self.assertEqual(checks[0]["name"], "local-ci/basic")
+            self.assertEqual(checks[0]["status"], "queued")
+            self.assertEqual(g.check_workflow_id(checks[0]), "200")
             self.assertTrue(all(row["status"] == "completed" and row["conclusion"] == "cancelled"
                                 for row in checks[1:4]))
-            self.assertTrue(all(checks[index]["conclusion"] == "success" for index in (0, 4)))
+            self.assertIsNone(checks[0]["conclusion"])
+            self.assertEqual(checks[4]["conclusion"], "success")
             self.assertEqual([(path, data.get("name", data.get("context"))) for path, _, data in writes],
-                             [("check-runs", "local-ci/basic"), ("check-runs/2", None),
+                             [("check-runs/1", "local-ci/basic"), ("check-runs/2", None),
                               ("check-runs/3", None), ("check-runs/4", None),
                               (f"statuses/{self.tested}", "local-ci/summary")])
             self.assertEqual(statuses[0]["state"], "error")
@@ -1664,15 +1675,15 @@ README only
                     g.enqueue(self.task, client, None, self.source)
             self.assertEqual(writes, before)
             self.assertTrue(g.sync_preflight(client, self.task, {"basic": "success"}))
-            self.assertEqual((checks[-1]["id"], checks[-1]["name"], checks[-1]["status"]),
-                             (7, "local-ci/api", "in_progress"))
-            self.assertEqual(checks[1]["conclusion"], "cancelled")
+            api = next(row for row in checks if row["name"] == "local-ci/api")
+            self.assertEqual((api["id"], api["status"]), (2, "in_progress"))
+            self.assertIsNone(checks[1]["conclusion"])
             self.assertEqual(client.latest_dispatch(self.task), {"status": "not_started"})
             g.finalize_preflight(client, self.task, {"prepare": "success", "basic": "success", "api": "failure"})
             self.assertTrue(all(row["status"] == "completed" for row in checks))
-            self.assertEqual(checks[-1]["conclusion"], "failure")
-            self.assertEqual(g.check_workflow_id(checks[-1]), "200")
-            self.assertEqual([row["name"] for row in checks[5:]], ["local-ci/basic", "local-ci/api"])
+            self.assertEqual(api["conclusion"], "failure")
+            self.assertEqual(g.check_workflow_id(api), "200")
+            self.assertEqual([row["name"] for row in checks], list(g.ALL_CHECK_NAMES.values()))
             # Re-run failed jobs keeps its run ID; the receiver has a different one.
             with patch.dict(g.os.environ, {"GITHUB_RUN_ATTEMPT": "2"}):
                 self.assertTrue(g.sync_preflight(client, self.task, {"api": "success"}))
@@ -1825,6 +1836,15 @@ README only
         self.assertEqual(len(self.gh.statuses), before)
         g.finalize_preflight(self.gh, self.task, {**stages, "enqueue": "success"})
         self.assertEqual(len(self.gh.statuses), before)
+
+    def test_internal_finalizer_never_reports_an_approval_failure(self):
+        task = {**self.task, "external_fork": False}
+        stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
+        stages.update(card="failure", approval="skipped", enqueue="skipped")
+        g.finalize_preflight(self.gh, task, stages)
+        final = self.gh.check_calls[-1]
+        self.assertEqual(final[1:4], ("dispatch", "completed", "failure"))
+        self.assertEqual(final[4], "Local CI: task dispatch failed; see workflow")
 
     def test_finalizer_closes_only_current_pending_after_partial_dispatch_failure(self):
         control = self.store(g.CONTROL_BRANCH)
@@ -2067,10 +2087,9 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertEqual(jobs["basic"]["needs"], "prepare")
         self.assertIn("basic", jobs["api"]["needs"])
         self.assertIn("api", jobs["security"]["needs"])
-        self.assertIn("security", jobs["review-card"]["needs"])
-        for stage in ("prepare", "basic", "api", "security"):
-            self.assertIn(f"needs.{stage}.result == 'success'", jobs["review-card"]["if"])
-        self.assertIn("review-card", jobs["approve-external-fork"]["needs"])
+        self.assertNotIn("review-card", jobs)
+        self.assertIn("security-result", jobs["approve-external-fork"]["needs"])
+        self.assertIn("needs.security-result.outputs.eligible", jobs["approve-external-fork"]["if"])
         self.assertIn("approve-external-fork", jobs["enqueue"]["needs"])
         for name in (
             "local-ci-basic-checks.yml",
@@ -2084,25 +2103,35 @@ class WorkflowStructureTests(unittest.TestCase):
             self.assertEqual(set(workflow["on"]), {"workflow_call"})
         for stage in ("basic", "api", "security"):
             completion = jobs[stage + "-result"]
-            self.assertEqual(completion["needs"], ["prepare", stage])
+            expected_needs = ["prepare", stage]
+            if stage == "security":
+                expected_needs.extend(["basic-result", "api-result"])
+            self.assertEqual(completion["needs"], expected_needs)
             self.assertIn("always()", completion["if"])
             self.assertIn("needs.prepare.outputs.task_id", completion["if"])
             self.assertEqual(completion["with"]["stage"], stage)
             self.assertEqual(completion["with"]["outcome"], "${{ needs." + stage + ".result }}")
             self.assertEqual(completion["permissions"]["checks"], "write")
             self.assertNotIn("checks", jobs[stage]["permissions"])
-            self.assertIn(stage + "-result", jobs["review-card"]["needs"])
+        self.assertEqual(jobs["security-result"]["with"]["external_fork"], "${{ needs.prepare.outputs.external_fork == 'true' }}")
+        self.assertIn("needs.basic-result.result", jobs["security-result"]["with"]["review_card"])
+        self.assertIn("needs.api-result.result", jobs["security-result"]["with"]["review_card"])
+        for publisher in ("basic-result", "api-result", "security-result"):
+            self.assertIn(publisher, jobs["enqueue"]["needs"])
+            self.assertIn(f"needs.{publisher}.result == 'success'", jobs["enqueue"]["if"])
         sync = yaml.load((ROOT / ".github/workflows/local-ci-preflight-result.yml").read_text(), Loader=yaml.BaseLoader)
         steps = sync["jobs"]["sync"]["steps"]
         self.assertEqual(steps[0]["with"]["ref"], "${{ inputs.worker_revision_sha }}")
         self.assertEqual(steps[0]["with"]["persist-credentials"], "false")
-        self.assertEqual(steps[-1]["env"]["EXPECTED_TASK_DIGEST"], "${{ inputs.task_digest }}")
-        self.assertEqual(steps[-1]["run"], "python3 scripts/ci/gateway.py checks")
+        checks_step = next(step for step in steps if step.get("run") == "python3 scripts/ci/gateway.py checks")
+        self.assertEqual(checks_step["env"]["EXPECTED_TASK_DIGEST"], "${{ inputs.task_digest }}")
+        self.assertEqual(steps[-1]["id"], "eligibility")
         self.assertEqual(sync["permissions"]["statuses"], "read")
-        self.assertEqual(sync["permissions"]["pull-requests"], "read")
+        self.assertEqual(sync["permissions"]["pull-requests"], "write")
+        self.assertIn("external_fork", sync["on"]["workflow_call"]["inputs"])
+        self.assertIn("review_card", sync["on"]["workflow_call"]["inputs"])
+        self.assertIn("eligible", sync["on"]["workflow_call"]["outputs"])
         self.assertTrue(jobs["deploy-dashboard"]["name"].isascii())
-        self.assertEqual(jobs["review-card"]["permissions"]["pull-requests"], "write")
-        self.assertEqual(jobs["review-card"]["permissions"]["statuses"], "write")
         self.assertEqual(jobs["prepare"]["permissions"]["checks"], "write")
         self.assertEqual(jobs["approve-external-fork"]["permissions"]["checks"], "write")
         self.assertEqual(jobs["receive"]["permissions"]["checks"], "read")
@@ -2146,7 +2175,7 @@ class WorkflowStructureTests(unittest.TestCase):
                 self.assertEqual(step["if"], "steps.dashboard.outputs.changed == 'true'")
         self.assertEqual(
             set(g.REQUIRED_CONTEXTS),
-            {"local-ci/basic", "local-ci/api", "local-ci/security", "local-ci/approve", "local-ci/dispatch", "local-ci/summary"},
+            {"local-ci/basic", "local-ci/api", "local-ci/security", "local-ci/dispatch", "local-ci/summary"},
         )
 
 

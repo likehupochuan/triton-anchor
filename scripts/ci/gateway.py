@@ -61,7 +61,10 @@ CHECK_NAMES = {
     "api": "local-ci/api",
     "security": "local-ci/security",
 }
-REQUIRED_CONTEXTS = (*CHECK_NAMES.values(), "local-ci/approve", "local-ci/dispatch", "local-ci/summary")
+# Approval is conditional: only external-fork PRs enter the protected
+# environment.  Keeping it as a repository-wide required context would leave
+# trusted/internal PRs waiting forever when no approval is applicable.
+REQUIRED_CONTEXTS = (*CHECK_NAMES.values(), "local-ci/dispatch", "local-ci/summary")
 ALL_CHECK_NAMES = {**CHECK_NAMES, "approve": "local-ci/approve", "dispatch": "local-ci/dispatch"}
 LEGACY_CHECK_NAMES = {"preflight": "local-ci/preflight"}
 READ_CHECK_NAMES = {**ALL_CHECK_NAMES, **LEGACY_CHECK_NAMES, "native_prepare": "Prepare exact task"}
@@ -321,7 +324,7 @@ class GitHub:
         run_id: str | None = None,
         started_at: str = "",
     ) -> bool:
-        """Update only this task's Check Run; preserve other tasks as history."""
+        """Publish this context while fencing late workflows and stale tasks."""
         if key not in ALL_CHECK_NAMES or status not in {
             "queued",
             "in_progress",
@@ -337,37 +340,83 @@ class GitHub:
         name = ALL_CHECK_NAMES[key]
         external_id = f"triton-anchor-local-ci:{key}:{task['task_id']}"
         runs = self.check_runs(task, key)
-        owned = [
+        trusted = [
             run
             for run in runs
             if run.get("name") == name
-            and run.get("external_id") == external_id
             and (run.get("app") or {}).get("slug") == "github-actions"
+            and str(run.get("external_id", "")).startswith(
+                (f"triton-anchor-local-ci:{key}:", f"triton-anchor-ci-v4:{key}:")
+            )
         ]
+        owned = [run for run in trusted if run.get("external_id") == external_id]
         existing = max(owned, key=lambda run: int(run.get("id", 0)), default=None)
+        current_run_id = os.getenv("GITHUB_RUN_ID", "") if run_id is None else run_id
+        latest_trusted = max(trusted, key=lambda run: int(run.get("id", 0)), default=None)
+
+        if (current_run_id and current_run_id.isdigit() and latest_trusted
+                and check_workflow_id(latest_trusted).isdigit()
+                and int(check_workflow_id(latest_trusted)) > int(current_run_id)):
+            # A late publisher from an older workflow must be a no-op.  In
+            # particular it must not cancel or retag the newer row below.
+            return False
+
+        # GitHub retains completed check-run history.  When a PR is reopened or
+        # the same revision is retried, reusing the newest trusted row keeps the
+        # Checks page focused on the current workflow instead of adding another
+        # stale-looking row for the same context.
+        if restart and latest_trusted:
+            latest_workflow = check_workflow_id(latest_trusted)
+            # A delayed older workflow must not take ownership back from a newer
+            # run which has already refreshed this context.
+            if (not current_run_id or not latest_workflow
+                    or (current_run_id.isdigit()
+                        and int(latest_workflow) <= int(current_run_id))):
+                existing = latest_trusted
+        elif not existing and status in {"queued", "in_progress"} and latest_trusted:
+            start = self.task_start(task)
+            start_workflow = check_workflow_id(start) if start else ""
+            latest_workflow = check_workflow_id(latest_trusted)
+            # Later stages may reuse a row from the previous task only after
+            # this workflow owns the current Basic check.  That fencing prevents
+            # an old publisher from reopening a newer task's result.
+            if (current_run_id and start_workflow == current_run_id
+                    and latest_workflow != current_run_id):
+                existing = latest_trusted
+            elif not current_run_id and latest_trusted.get("external_id") == external_id:
+                existing = latest_trusted
+
         start = self.task_start(task) if existing and key != "basic" else {}
         if start and int(existing["id"]) < int(start["id"]):
-            existing = None
-        if restart:
-            existing = None
-        # A rerun must not reopen a completed check with its previous conclusion.
-        if existing and status != "completed" and existing.get("status") == "completed":
-            if status == "in_progress":
-                return False  # A delayed stage publisher must not reopen its successor.
-            existing = None
-        if status in {"queued", "in_progress"}:
-            trusted = [
-                run for run in runs
-                if run.get("name") == name
-                and (run.get("app") or {}).get("slug") == "github-actions"
-                and str(run.get("external_id", "")).startswith(
-                    (f"triton-anchor-local-ci:{key}:", f"triton-anchor-ci-v4:{key}:")
-                )
-            ]
-            # Returning to a previously used task identity still needs the newest
-            # Check Run ID; otherwise owns_task would select its successor.
-            if existing and any(int(run["id"]) > int(existing["id"]) for run in trusted):
+            # A row from an older workflow is intentionally reused above; an
+            # unmarked/current row below the current Basic start is stale.
+            if check_workflow_id(existing) == check_workflow_id(start):
                 existing = None
+        # A duplicate publisher from the same workflow must not reopen a
+        # completed successor.  A different, newer workflow is allowed to
+        # reopen the reused row selected above.
+        if existing and status != "completed" and existing.get("status") == "completed":
+            existing_workflow = check_workflow_id(existing)
+            if status == "in_progress" and (
+                not current_run_id or existing_workflow == current_run_id
+            ):
+                return False
+            if not restart and (not current_run_id or existing_workflow == current_run_id):
+                existing = None
+        if status in {"queued", "in_progress"}:
+            # Returning to a previously used task identity still needs the
+            # newest Check Run ID; otherwise owns_task would select its
+            # successor.  Prefer the row already retagged by this workflow.
+            if existing and any(int(run["id"]) > int(existing["id"]) for run in trusted):
+                newer = max(
+                    (run for run in trusted if int(run["id"]) > int(existing["id"])),
+                    key=lambda run: int(run["id"]),
+                    default=None,
+                )
+                if current_run_id and newer and check_workflow_id(newer) == current_run_id:
+                    existing = newer
+                elif not current_run_id:
+                    existing = None
             for run in trusted:
                 if run.get("status") != "completed" and (
                     not existing or run["id"] != existing["id"]
@@ -385,7 +434,7 @@ class GitHub:
                         },
                     )
         output_data = {"title": str(title)[:255], "summary": check_summary(
-            summary, os.getenv("GITHUB_RUN_ID", "") if run_id is None else run_id)}
+            summary, current_run_id)}
         desired_url = url or ""
         if existing and all(
             (
@@ -407,6 +456,13 @@ class GitHub:
             payload["details_url"] = desired_url
         if conclusion:
             payload["conclusion"] = conclusion
+        elif existing:
+            # Reopening a completed row must clear its old conclusion; without
+            # this explicit null GitHub (and lightweight API fakes) can retain
+            # the previous success/failure and defeat idempotency.
+            payload["conclusion"] = None
+        if existing and key == "basic" and restart:
+            payload["started_at"] = started_at or now()
         if existing:
             self.request(f"check-runs/{existing['id']}", "PATCH", payload)
         else:
@@ -511,11 +567,13 @@ class GitHub:
     def retire_open_checks(self, task: dict, *, superseded: bool = False) -> None:
         """Close existing unfinished checks without creating unreached stages."""
         start = self.task_start(task)
+        start_workflow = check_workflow_id(start) if start else ""
         for key, name in {**ALL_CHECK_NAMES, **LEGACY_CHECK_NAMES}.items():
             for row in self.check_runs(task, key):
                 identity = str(row.get("external_id", ""))
                 ours = (identity == f"triton-anchor-local-ci:{key}:{task['task_id']}"
-                        and (not start or int(row["id"]) >= int(start["id"])))
+                        and (not start or int(row["id"]) >= int(start["id"]))
+                        and (not start_workflow or check_workflow_id(row) == start_workflow))
                 if (row.get("name") != name or row.get("status") == "completed"
                         or (row.get("app") or {}).get("slug") != "github-actions"
                         or not identity.startswith(("triton-anchor-local-ci:", "triton-anchor-ci-v4:"))
@@ -531,14 +589,34 @@ class GitHub:
 
     def latest_dispatch(self, task: dict) -> dict:
         start = self.task_start(task)
+        start_workflow = check_workflow_id(start) if start else ""
+
+        def in_current_cycle(row: dict) -> bool:
+            if not start:
+                return True
+            row_workflow = check_workflow_id(row)
+            if start_workflow:
+                return (
+                    row_workflow == start_workflow
+                    and (
+                        not start.get("started_at")
+                        or (row.get("completed_at") or "") > start["started_at"]
+                        or int(row["id"]) > int(start["id"])
+                    )
+                )
+            return bool(
+                int(row["id"]) > int(start["id"])
+                or (
+                    start.get("started_at")
+                    and (row.get("completed_at") or "") > start["started_at"]
+                )
+            )
+
         owned = [row for row in self.check_runs(task, "dispatch")
                  if row.get("external_id") == f"triton-anchor-local-ci:dispatch:{task['task_id']}"
                  and row.get("name") == ALL_CHECK_NAMES["dispatch"]
                  and (row.get("app") or {}).get("slug") == "github-actions"
-                 and (not start or ((int(row["id"]) > int(start["id"])
-                                     or (start.get("started_at") and
-                                         (row.get("completed_at") or "") > start["started_at"]))
-                                    and check_workflow_id(row) == check_workflow_id(start)))]
+                 and in_current_cycle(row)]
         return max(owned, key=lambda row: int(row["id"]), default={"status": "not_started"} if start else {})
 
     def reset_existing_summary(self, task: dict) -> None:
@@ -1195,8 +1273,6 @@ def feedback_evidence(item: dict, task: dict, artifact_urls: dict) -> str:
 def result_comment(result: dict, result_url: str = "", artifact_urls: dict | None = None) -> str:
     task = result["task"]
     records = [*result["checks"], *result["reviews"]]
-    passed = sum(item["status"] == "pass" for item in records)
-    failed = sum(item["status"] == "fail" for item in records)
     verdict = {
         "pass": "本次要求的检查已通过。",
         "fail": "发现合入阻塞，需要处理后重新验证。",
@@ -1209,8 +1285,6 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
         f"合并后验证提交：`{task['tested_sha']}`",
         "", "### 变更意图与审查结论", "", feedback_text(result["summary"]),
         "", "### 查看审查详情", "", "<details>", "<summary>展开检查与审查记录</summary>", "",
-        f"本次记录 {len(records)} 项检查与审查：{passed} 项通过，{failed} 项未通过，"
-        f"{len(records) - passed - failed} 项未执行、不适用或未完成。具体范围与原因见下表。", "",
         "| 检查 | 结果 | 说明 |", "| --- | --- | --- |",
     ]
     for item in records:
@@ -1260,7 +1334,7 @@ def pr_info_comment(errors: list[str]) -> str:
 
 def approval_card(task: dict, stages: dict, eligible: bool, approval_error: str = "",
                   context: dict | None = None) -> str:
-    if not preflight_passed(stages):
+    if not task.get("external_fork") or not preflight_passed(stages):
         return ""
     lines = ["## Local CI 前置检查与审批", "",
              f"PR #{task['pr_number']}：{feedback_text(task['title'])}", "",
@@ -1408,7 +1482,7 @@ def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
     gh.retire_open_checks(task)
     if not preflight_passed(stages):
         return  # Only the reached prerequisite checks are completed above.
-    if stages.get("card", "success") != "success":
+    if task.get("external_fork") and stages.get("card", "success") != "success":
         description = "Local CI: approval card publication failed; worker verification not started"
     elif task.get("external_fork") and stages.get("approval") != "success":
         description = ("Local CI: approval cancelled; worker verification not started"
@@ -1416,9 +1490,14 @@ def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
                        "Local CI: approval rejected or verification failed; worker verification not started")
     else:
         description = "Local CI: task dispatch failed; see workflow"
-    key = "approve" if (stages.get("card") in {"failure", "cancelled"} or
-                        (task.get("external_fork") and stages.get("approval") in {"failure", "cancelled"})) else "dispatch"
-    if key == "dispatch" and stages.get("enqueue") not in {"failure", "cancelled"}:
+    key = "approve" if (
+        task.get("external_fork")
+        and (
+            stages.get("card") in {"failure", "cancelled"}
+            or stages.get("approval") in {"failure", "cancelled", "skipped"}
+        )
+    ) else "dispatch"
+    if key == "dispatch" and stages.get("enqueue") not in {"failure", "cancelled", "skipped"}:
         return
     detail = description
     if key == "approve" and workflow_url():
@@ -1900,6 +1979,13 @@ def main() -> int:
             publish_preflight_checks(gh, task, stages, False)
             gh.retire_open_checks(task)
             output("eligible", False)
+            return 0
+        if not task.get("external_fork"):
+            # Trusted/internal tasks do not need an approval boundary.  Keep
+            # the command idempotent for older/manual callers, but never emit
+            # an approval comment, step summary, or approval Check Run.
+            publish_preflight_checks(gh, task, stages, True)
+            output("eligible", True)
             return 0
         approval_error = ""
         if eligible and task.get("external_fork"):
