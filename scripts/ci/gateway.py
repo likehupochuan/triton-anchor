@@ -1456,9 +1456,12 @@ def sync_preflight(gh: GitHub, task: dict, stages: dict) -> bool:
 def begin_checks(gh: GitHub, task: dict) -> None:
     if not is_current(gh, task):
         raise ValueError("Task changed before preflight initialization")
-    gh.check(task, "basic", "queued", None, "Checking PR information",
-             "Basic CI will start after the required PR information is checked.", workflow_url(), restart=True)
-    if not gh.owns_task(task, workflow=True):
+    claimed = gh.check(task, "basic", "queued", None, "Checking PR information",
+                       "Basic CI will start after the required PR information is checked.",
+                       workflow_url(), restart=True)
+    # A successful Check API write is the ownership claim.  GitHub's list API
+    # can briefly return the previous output immediately after that write.
+    if not claimed and not gh.owns_task(task, workflow=True):
         raise ValueError("A newer workflow owns this task")
     gh.retire_open_checks(task, superseded=True)
     gh.reset_existing_summary(task)

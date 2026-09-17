@@ -128,7 +128,7 @@ jobs:
         run: python3 scripts/ci/gateway.py prepare
       - uses: actions/upload-artifact@v4
         if: ${{ always() && steps.task.outputs.task_id != '' }}
-        with: {name: local-ci-task, path: task.json}
+        with: {name: 'local-ci-task-${{ steps.task.outputs.task_digest }}', path: task.json}
       - name: Validate required PR information
         env:
           GH_TOKEN: ${{ github.token }}
@@ -210,7 +210,7 @@ jobs:
           persist-credentials: false
           submodules: false
       - uses: actions/download-artifact@v4
-        with: {name: local-ci-task}
+        with: {name: 'local-ci-task-${{ needs.prepare.outputs.task_digest }}'}
       - name: Verify required reviewers and the approved PR revision
         env:
           GH_TOKEN: ${{ github.token }}
@@ -247,7 +247,7 @@ jobs:
           persist-credentials: false
           submodules: false
       - uses: actions/download-artifact@v4
-        with: {name: local-ci-task}
+        with: {name: 'local-ci-task-${{ needs.prepare.outputs.task_digest }}'}
       - name: Revalidate approval and publish code then immutable task
         env:
           PR_NUMBER: ${{ inputs.pr_number }}
@@ -286,7 +286,7 @@ jobs:
           persist-credentials: false
           submodules: false
       - uses: actions/download-artifact@v4
-        with: {name: local-ci-task}
+        with: {name: 'local-ci-task-${{ needs.prepare.outputs.task_digest }}'}
       - name: Finish checks after failed or cancelled preflight and dispatch
         env:
           GH_TOKEN: ${{ github.token }}

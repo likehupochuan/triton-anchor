@@ -1244,6 +1244,18 @@ README only
         self.assertTrue(self.gh.check_calls[-1][4].isascii())
         self.assertEqual(self.gh.comments, [])
 
+    def test_begin_checks_accepts_a_successful_claim_during_list_api_lag(self):
+        with patch.object(g, "is_current", return_value=True), \
+                patch.object(self.gh, "check", return_value=True) as check, \
+                patch.object(self.gh, "owns_task", return_value=False) as owns, \
+                patch.object(self.gh, "retire_open_checks") as retire, \
+                patch.object(self.gh, "reset_existing_summary") as reset:
+            g.begin_checks(self.gh, self.task)
+        check.assert_called_once()
+        owns.assert_not_called()
+        retire.assert_called_once_with(self.task, superseded=True)
+        reset.assert_called_once_with(self.task)
+
     def test_failed_card_is_not_reported_as_a_rejected_approval(self):
         stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
         g.finalize_preflight(self.gh, self.task, {**stages, "card": "failure", "approval": "skipped"})
@@ -2089,6 +2101,15 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertIn("format(' {0}', inputs.receiver_round)", data["run-name"])
         self.assertEqual(data["run-name"].count("${{"), data["run-name"].count("}}"))
         jobs = data["jobs"]
+        artifact_name = "local-ci-task-${{ needs.prepare.outputs.task_digest }}"
+        upload = next(step for step in jobs["prepare"]["steps"]
+                      if step.get("uses") == "actions/upload-artifact@v4")
+        self.assertEqual(upload["with"]["name"],
+                         "local-ci-task-${{ steps.task.outputs.task_digest }}")
+        for job_name in ("approve-external-fork", "enqueue", "finalize-preflight"):
+            download = next(step for step in jobs[job_name]["steps"]
+                            if step.get("uses") == "actions/download-artifact@v4")
+            self.assertEqual(download["with"]["name"], artifact_name)
         cancel = next(step for step in jobs["cancel-obsolete"]["steps"] if step.get("run", "").endswith("gateway.py cancel"))
         self.assertEqual(cancel["env"]["SOURCE_BRANCH"], "${{ inputs.source_branch || github.ref_name }}")
         collect = next(step for step in jobs["publish"]["steps"] if step.get("id") == "collect")
@@ -2130,6 +2151,20 @@ class WorkflowStructureTests(unittest.TestCase):
             self.assertIn(f"needs.{publisher}.result == 'success'", jobs["enqueue"]["if"])
         sync = yaml.load((ROOT / ".github/workflows/local-ci-preflight-result.yml").read_text(), Loader=yaml.BaseLoader)
         steps = sync["jobs"]["sync"]["steps"]
+        sync_download = next(step for step in steps
+                             if step.get("uses") == "actions/download-artifact@v4")
+        self.assertEqual(sync_download["with"]["name"],
+                         "local-ci-task-${{ inputs.task_digest }}")
+        for name in ("local-ci-api-compatibility.yml", "local-ci-security.yml"):
+            workflow = yaml.load((ROOT / ".github/workflows" / name).read_text(),
+                                 Loader=yaml.BaseLoader)
+            downloads = [step for job in workflow["jobs"].values()
+                         for step in job.get("steps", [])
+                         if step.get("uses") == "actions/download-artifact@v4"]
+            self.assertTrue(downloads)
+            self.assertTrue(all(step["with"]["name"] ==
+                                "local-ci-task-${{ inputs.task_digest }}"
+                                for step in downloads))
         self.assertEqual(steps[0]["with"]["ref"], "${{ inputs.worker_revision_sha }}")
         self.assertEqual(steps[0]["with"]["persist-credentials"], "false")
         checks_step = next(step for step in steps if step.get("run") == "python3 scripts/ci/gateway.py checks")

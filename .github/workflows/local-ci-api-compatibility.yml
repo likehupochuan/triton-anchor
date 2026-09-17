@@ -31,7 +31,7 @@ jobs:
           persist-credentials: false
           submodules: false
       - uses: actions/download-artifact@v4
-        with: {name: local-ci-task}
+        with: {name: 'local-ci-task-${{ inputs.task_digest }}'}
       - name: Compare the frozen base and tested public API without exemptions
         env:
           EXPECTED_TASK_DIGEST: ${{ inputs.task_digest }}

@@ -26,7 +26,7 @@ jobs:
           persist-credentials: false
           submodules: false
       - uses: actions/download-artifact@v4
-        with: {name: local-ci-task}
+        with: {name: 'local-ci-task-${{ inputs.task_digest }}'}
       - name: Scan exact added lines with the trusted scanner
         env:
           EXPECTED_TASK_DIGEST: ${{ inputs.task_digest }}
