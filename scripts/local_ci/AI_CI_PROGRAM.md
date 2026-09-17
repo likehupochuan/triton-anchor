@@ -169,8 +169,11 @@ findings 每项提供 `severity`、`summary`、`blocking` 和可选 `evidence`�
 检查的 `details` 可直接保留基础工具结果中的业务数据，供页面展示算子、后端与性能。
 
 checks.evidence 和 artifacts 是相对 `/task/artifacts` 的实际文件路径；reviews.evidence
-也可包含代码引用。只选必要摘要、失败日志片段、定向用例和性能数据，不上传 wheel、构建目录、
-完整会话或凭据。每文件不超过 2 MiB、总计 10 MiB、最多 20 文件；过大的输出先整理摘要。
+也可包含代码引用。发布到 Gitee 时，`result.json` 与 checks.evidence 引用的检查证据是必传文件；
+artifacts 仅列任务按价值选择的补充摘要、失败日志片段、定向用例或性能数据。必传证据优先占用预算，
+缺失或无法上传时不能保持通过；选传文件超限时可留在 CI 主机并在结果中注明。
+不上传 wheel、构建目录、完整会话或凭据。每文件不超过 2 MiB、总计 10 MiB、最多 20 文件；
+过大的输出先整理摘要。
 
 Worker 核对必需汇总及证据文件、显式 full 覆盖、必要审查与阻塞项；影响判断和验证是否
 充分由 Codex 负责。结果和所选文件一次提交到 Gitee。

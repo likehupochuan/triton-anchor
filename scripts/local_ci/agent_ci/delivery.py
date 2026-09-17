@@ -176,10 +176,14 @@ def seal_result(
     source = Path(source_dir) / "artifacts"
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    chosen = agent_result.get("artifacts", [])
-    if not isinstance(chosen, list):
+    selected = agent_result.get("artifacts", [])
+    if not isinstance(selected, list):
         raise ContractError("Agent artifacts must be a list")
-    chosen = list(chosen) + [path for check in checks for path in check["evidence"]]
+    required = [path for check in checks for path in check["evidence"]]
+    # Required check evidence is copied first so optional files cannot consume
+    # its count or byte budget.  Agent-selected files use the remaining budget.
+    chosen = required + list(selected)
+    required_paths = set(required)
     artifacts = []
     seen = set()
     total = 0
@@ -198,12 +202,6 @@ def seal_result(
         }
         if not incoming.is_file():
             row["omitted"] = "文件未生成，未上传"
-            for check in checks:
-                if path in check["evidence"] and check["status"] == "pass":
-                    check["status"] = "infra_error"
-                    reasons.append(f"{check['tool_id']} 引用的证据文件不存在：{path}")
-                    if status == "pass":
-                        status = "infra_error"
         elif count >= MAX_FILES:
             row["omitted"] = "超出所选文件数量限制，保留在 CI 主机"
         elif incoming.stat().st_size > MAX_FILE_BYTES:
@@ -223,6 +221,13 @@ def seal_result(
                 row["size"] = len(data)
                 total += len(data)
                 count += 1
+        if row.get("omitted") and path in required_paths:
+            for check in checks:
+                if path in check["evidence"] and check["status"] == "pass":
+                    check["status"] = "infra_error"
+            reasons.append(f"必传检查证据无法发布：{path}（{row['omitted']}）")
+            if status == "pass":
+                status = "infra_error"
         artifacts.append(row)
     result = {
         "schema": RESULT_SCHEMA,
@@ -242,7 +247,7 @@ def seal_result(
     result = _clean(result, redact)
     result["task"] = task
     validate_result(result, task)
-    atomic_json(destination / "result.json", result)
+    atomic_json(destination / "result.json", result, pretty=True)
     if (destination / "result.json").stat().st_size > MAX_RESULT_BYTES:
         raise ContractError("Result summary exceeds 2 MiB")
     return result

@@ -98,7 +98,7 @@ def test_high_risk_review_blocks_without_explicit_blocking_flag(tmp_path, locati
     assert all("findings" not in review for review in result["reviews"])
 
 
-def test_missing_referenced_file_is_incomplete_but_large_file_is_omitted(tmp_path):
+def test_required_evidence_must_publish_while_optional_files_use_remaining_budget(tmp_path):
     value = answer()
     value["checks"][0]["evidence"] = ["report.txt"]
     assert seal(tmp_path, value)["status"] == "infra_error"
@@ -106,9 +106,28 @@ def test_missing_referenced_file_is_incomplete_but_large_file_is_omitted(tmp_pat
     artifacts.mkdir(parents=True)
     (artifacts / "report.txt").write_bytes(b"x" * (MAX_FILE_BYTES + 1))
     result = seal(tmp_path, value)
-    assert result["status"] == "pass"
+    assert result["status"] == "infra_error"
     assert result["artifacts"][0]["omitted"]
     assert not (tmp_path / "sealed/artifacts/report.txt").exists()
+
+    (artifacts / "report.txt").write_text("required evidence\n")
+    (artifacts / "optional.log").write_bytes(b"x" * (MAX_FILE_BYTES + 1))
+    value["artifacts"] = ["optional.log"]
+    result = seal(tmp_path, value)
+    assert result["status"] == "pass"
+    assert [row["path"] for row in result["artifacts"]] == [
+        "report.txt", "optional.log",
+    ]
+    assert "omitted" not in result["artifacts"][0]
+    assert result["artifacts"][1]["omitted"]
+
+
+def test_published_result_json_is_readable_without_changing_its_data(tmp_path):
+    result = seal(tmp_path, answer())
+    text = (tmp_path / "sealed/result.json").read_text()
+    assert text.startswith("{\n  ")
+    assert "\n  \"checks\":" in text
+    assert json.loads(text) == result
 
 
 def test_lightweight_diff_evidence_can_pass_but_cannot_replace_explicit_full(tmp_path):

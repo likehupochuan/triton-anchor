@@ -92,7 +92,10 @@ current/cancel 指针和去重规则。同一 SHA 的不同任务用独立 `run_
 旧的 `<task_id>` 分组目录及 `runs/<task_id>/<run_id>/` 保持原位，重启后仍能去重、恢复
 和重试上传，不因目录升级重新执行；新运行使用 SHA 目录。清理 work 不删除 runs 中的证据，
 也不删除同一 SHA 下其他运行；清理失败会保留待清理状态而不是报告成功。
-本地私有状态与完整日志不上传；仅将 `sealed/` 中的公开结果与所选文件提交到 Gitee 的对应运行目录。
+本地私有状态与完整日志不上传。Gitee 每次必须发布可读格式的 `result.json` 和其中
+`checks.evidence` 引用的检查证据；任务可通过 `artifacts` 追加少量有价值的摘要、失败片段、
+定向用例或性能数据。必传证据优先占用发布预算，缺失或无法上传时结果不能保持通过；
+选传文件超限时保留在 CI 主机并在 `result.json` 中注明。两类文件均从 `sealed/` 与结果一起提交。
 结果提交标题参考 `CI_dev_forPR`，使用 `local-ci: <status> <head_sha前12位> <run_id>`，
 其中 status 保留 `pass/fail/infra_error/cancelled` 的真实结果语义；上传重试不产生重复提交。
 不使用 Release 附件或额外交付索引。单文件 2 MiB、总计 10 MiB、

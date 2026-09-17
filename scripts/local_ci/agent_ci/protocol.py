@@ -211,7 +211,7 @@ def within(root: Path, relative: str, *, must_exist: bool = False) -> Path:
     return path
 
 
-def atomic_json(path: Path, value: Any) -> None:
+def atomic_json(path: Path, value: Any, *, pretty: bool = False) -> None:
     import os
     import tempfile
 
@@ -219,7 +219,17 @@ def atomic_json(path: Path, value: Any) -> None:
     fd, name = tempfile.mkstemp(prefix=".write-", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as stream:
-            stream.write(canonical(value) + b"\n")
+            data = (
+                json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ).encode()
+                if pretty
+                else canonical(value)
+            )
+            stream.write(data + b"\n")
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(name, path)
