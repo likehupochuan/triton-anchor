@@ -15,7 +15,8 @@ on:
       card_result:
         description: Publication outcome used by the gateway finalizer.
         value: ${{ jobs.sync.outputs.card_result }}
-permissions: {contents: read, pull-requests: write, checks: write, statuses: read, actions: read}
+# Permissions are supplied by each caller. Basic/API publishers stay read-only;
+# only the security publisher that may create a review card receives PR write.
 jobs:
   sync:
     name: Sync ${{ inputs.stage }} result
