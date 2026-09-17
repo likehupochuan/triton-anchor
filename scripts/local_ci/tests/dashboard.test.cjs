@@ -20,6 +20,15 @@ test('omitted files and unsafe URLs are not clickable', () => {
   assert.deepEqual(data.runs[0].artifacts.map(a=>a.url),['','https://gitee.com/report','']);
 });
 
+test('dashboard preserves not-selected, skipped, and not-applicable as distinct states', () => {
+  const run = normalize({schema:'triton-anchor-dashboard',tasks:[{task:task('a','2026-09-10'),result:{checks:[
+    {tool_id:'frontend_build',status:'not_selected'},
+    {tool_id:'frontend_tests',status:'skipped'},
+    {tool_id:'backend_build',status:'not_applicable'},
+  ]}}]}).runs[0];
+  assert.deepEqual(run.checks.map(check => check.status), ['not_selected','skipped','not_applicable']);
+});
+
 test('full view excludes impact-only selection and preserves failing operator details', () => {
   const run = {task:task('a','2026-09-10'),result:{environment:{profile:'fixture'},checks:[{tool_id:'flaggems',status:'fail',details:{"flaggems-summary":{mode:'full',results:[{op:'softmax',test_status:'失败',first_failed_stage:'准确率验证',duration_seconds:2}]}}}]}};
   let data = business(normalize({schema:'triton-anchor-dashboard',tasks:[run]}));

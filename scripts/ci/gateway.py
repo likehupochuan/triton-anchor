@@ -57,9 +57,12 @@ RECEIVER_POLL_SECONDS = 60
 RECEIVER_MAX_ROUNDS = 3
 
 CHECK_NAMES = {
-    "basic": "local-ci/basic",
-    "api": "local-ci/api",
-    "security": "local-ci/security",
+    # These checks are executed by GitHub Actions.  Keep their namespace
+    # separate from local-ci/*, which is reserved for the Gitee/worker
+    # lifecycle and its final summary.
+    "basic": "github/basic",
+    "api": "github/api",
+    "security": "github/security",
 }
 # Approval is conditional: only external-fork PRs enter the protected
 # environment.  Keeping it as a repository-wide required context would leave
@@ -68,6 +71,20 @@ REQUIRED_CONTEXTS = (*CHECK_NAMES.values(), "local-ci/dispatch", "local-ci/summa
 ALL_CHECK_NAMES = {**CHECK_NAMES, "approve": "local-ci/approve", "dispatch": "local-ci/dispatch"}
 LEGACY_CHECK_NAMES = {"preflight": "local-ci/preflight"}
 READ_CHECK_NAMES = {**ALL_CHECK_NAMES, **LEGACY_CHECK_NAMES, "native_prepare": "Prepare exact task"}
+# GitHub keeps completed Check Runs forever and has no delete endpoint.  These
+# names belong to superseded gateway revisions; unfinished rows may be closed
+# when the current task starts, but they must never be recreated or treated as
+# evidence for a current task.
+RETIRED_CHECK_NAMES = frozenset({
+    "local-ci/basic",
+    "local-ci/api",
+    "local-ci/security",
+    "local-ci/sophgo-cmodel",
+    "local-ci/sophgo-cmodel/routing",
+    "local-ci/soghgo-cmodel",
+    "local-ci/sophgp-cmodel/routing",
+})
+RETIRED_STATUS_CONTEXTS = RETIRED_CHECK_NAMES
 CHECK_CONCLUSIONS = {
     "success",
     "failure",
@@ -241,6 +258,19 @@ class GitHub:
         if task.get("task_id"):
             url = url or workflow_url() or f"https://github.com/{self.repository}/commit/{task['tested_sha']}"
             url = url.split("#", 1)[0] + f"#local-ci-task={task['task_id']}"
+            # Commit Status entries are append-only.  Avoid adding an
+            # identical final/pending status when a receiver or finalizer is
+            # retried after the first writer has already completed it.
+            latest = self.latest_summary(task)
+            owner = urlparse((latest or {}).get("target_url") or "").fragment
+            if (
+                latest
+                and latest.get("state") == state
+                and latest.get("description") == description[:140]
+                and latest.get("target_url") == url
+                and owner == f"local-ci-task={task['task_id']}"
+            ):
+                return
         # Every gate belongs to the same tested commit throughout the lifecycle.
         for sha in (task["tested_sha"],):
             self.request(
@@ -275,13 +305,16 @@ class GitHub:
                     break
             else:
                 raise ValueError("Cannot reconcile an incomplete legacy status listing")
-            for context in ("local-ci/summary", "local-ci/sophgo-cmodel"):
-                if context == "local-ci/summary" and sha == task["tested_sha"]:
+            # Only the canonical summary may be reconciled.  Old backend
+            # contexts such as local-ci/sophgo-cmodel were produced by a
+            # superseded workflow and must not be refreshed on a new result.
+            for context in ("local-ci/summary",):
+                if sha == task["tested_sha"]:
                     continue
                 old = latest.get(context)
                 if not old or (old.get("creator") or {}).get("login") != "github-actions[bot]":
                     continue
-                detail = description if context == "local-ci/summary" else "Retired context; follows local-ci/summary: " + state
+                detail = description
                 target = url.split("#", 1)[0] + f"#local-ci-task={task['task_id']}"
                 if (old.get("state"), old.get("description"), old.get("target_url")) == (state, detail[:140], target):
                     continue
@@ -482,18 +515,21 @@ class GitHub:
             )
         return True
 
-    def check_runs(self, task: dict, key: str, *, sha: str | None = None) -> list[dict]:
+    def check_runs_named(self, task: dict, name: str, *, sha: str | None = None) -> list[dict]:
         runs = []
         for page in range(1, 21):
             response = self.request(
                 f"commits/{sha or task['tested_sha']}/check-runs?check_name="
-                f"{quote(READ_CHECK_NAMES[key], safe='')}&filter=all&per_page=100&page={page}"
+                f"{quote(name, safe='')}&filter=all&per_page=100&page={page}"
             )
             batch = response.get("check_runs", [])
             runs.extend(batch)
             if len(batch) < 100:
                 return runs
         raise ValueError("Cannot determine Local CI ownership from incomplete checks")
+
+    def check_runs(self, task: dict, key: str, *, sha: str | None = None) -> list[dict]:
+        return self.check_runs_named(task, READ_CHECK_NAMES[key], sha=sha)
 
     def task_start(self, task: dict) -> dict:
         """Reuse the first real check instead of creating a future-stage placeholder."""
@@ -591,10 +627,68 @@ class GitHub:
                 self.request(f"check-runs/{row['id']}", "PATCH", {
                     "status": "completed", "conclusion": "cancelled",
                     "output": {"title": "Superseded task cancelled" if superseded else "Stage not completed",
-                               "summary": check_summary(
+                    "summary": check_summary(
                                    "A newer task owns this commit." if superseded else
                                    "The workflow ended before this stage completed.", check_workflow_id(row))},
                 })
+        # The old gateway emitted local-ci/basic, local-ci/api and
+        # local-ci/security, and an even older backend workflow emitted
+        # sophgo-cmodel variants.  They cannot be deleted through GitHub's
+        # API, but leaving them pending makes the Checks page look as if this
+        # task still has extra work.  Close only exact retired names created by
+        # GitHub Actions on this task's tested/head commits.
+        seen = set()
+        for sha in dict.fromkeys((task["tested_sha"], task["head_sha"])):
+            for name in RETIRED_CHECK_NAMES:
+                for row in self.check_runs_named(task, name, sha=sha):
+                    if (
+                        row.get("id") in seen
+                        or row.get("status") == "completed"
+                        or row.get("name") != name
+                        or (row.get("app") or {}).get("slug") != "github-actions"
+                    ):
+                        continue
+                    seen.add(row["id"])
+                    self.request(f"check-runs/{row['id']}", "PATCH", {
+                        "status": "completed", "conclusion": "cancelled",
+                        "output": {
+                            "title": "Retired CI check context",
+                            "summary": check_summary(
+                                "This check context was retired and is not part of the current task.",
+                                check_workflow_id(row),
+                            ),
+                        },
+                    })
+        # A superseded workflow may have published one of these names as a
+        # Commit Status rather than a Check Run.  Statuses are append-only, so
+        # close only the latest pending bot-owned row; never rewrite completed
+        # history or touch a non-Local-CI context.
+        for sha in dict.fromkeys((task["tested_sha"], task["head_sha"])):
+            latest = {}
+            for page in range(1, 21):
+                statuses = self.request(f"commits/{sha}/statuses?per_page=100&page={page}")
+                for row in statuses:
+                    latest.setdefault(row.get("context"), row)
+                if len(statuses) < 100:
+                    break
+            else:
+                raise ValueError("Cannot retire an incomplete status listing")
+            for context in RETIRED_STATUS_CONTEXTS:
+                old = latest.get(context) or {}
+                if (
+                    old.get("state") == "pending"
+                    and (old.get("creator") or {}).get("login") == "github-actions[bot]"
+                ):
+                    self.request(
+                        f"statuses/{sha}",
+                        "POST",
+                        {
+                            "context": context,
+                            "state": "error",
+                            "description": "Local CI retired: superseded check context",
+                            "target_url": old.get("target_url") or "",
+                        },
+                    )
 
     def latest_dispatch(self, task: dict) -> dict:
         start = self.task_start(task)
@@ -658,7 +752,7 @@ class GitHub:
                 break
         else:
             raise ValueError("Cannot finish an incomplete status listing")
-        for context in ("local-ci/summary", "local-ci/sophgo-cmodel"):
+        for context in ("local-ci/summary", *RETIRED_STATUS_CONTEXTS):
             old = latest.get(context) or {}
             if old.get("state") != "pending":
                 continue
@@ -674,10 +768,16 @@ class GitHub:
             runs = response.get("check_runs", [])
             for run in runs:
                 if (
-                    run.get("name") in {**ALL_CHECK_NAMES, **LEGACY_CHECK_NAMES}.values()
+                    run.get("name") in {
+                        *{**ALL_CHECK_NAMES, **LEGACY_CHECK_NAMES}.values(),
+                        *RETIRED_CHECK_NAMES,
+                    }
                     and (run.get("app") or {}).get("slug") == "github-actions"
-                    and str(run.get("external_id", "")).startswith(
-                        ("triton-anchor-local-ci:", "triton-anchor-ci-v4:")
+                    and (
+                        run.get("name") in RETIRED_CHECK_NAMES
+                        or str(run.get("external_id", "")).startswith(
+                            ("triton-anchor-local-ci:", "triton-anchor-ci-v4:")
+                        )
                     )
                     and run.get("status") != "completed"
                     and run["id"] not in seen
@@ -1249,6 +1349,7 @@ DISPLAY_CHECKS = {
     "backend_smoke": "后端基本功能", "backend_tests": "后端测试", "flaggems": "FlagGems 算子验证",
     "compile_time": "编译耗时", "pass_profile": "编译阶段性能", "ir_serialization": "IR 序列化性能",
 }
+COMMENT_OMIT_STATUSES = frozenset({"not_selected", "skipped", "not_applicable"})
 
 
 def feedback_text(value: object, limit: int = 1600) -> str:
@@ -1256,6 +1357,27 @@ def feedback_text(value: object, limit: int = 1600) -> str:
     text = re.sub(r"\s+", " ", str(value)).strip()[:limit]
     text = html.escape(text).replace("@", "＠").replace("|", "/").replace("`", "'")
     return re.sub(r"([\\\[\]()*_~#!])", r"\\\1", text)
+
+
+def dashboard_url(task: dict) -> str:
+    """Return a stable, PR-filtered link to the published task dashboard."""
+    configured = os.getenv("DASHBOARD_URL") or os.getenv("GITHUB_PAGES_URL")
+    if configured:
+        parsed = urlparse(configured)
+        if parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password:
+            page = configured.rstrip("/")
+        else:
+            page = ""
+    else:
+        owner, _, repository = task.get("repository", REPOSITORY).partition("/")
+        page = f"https://{owner}.github.io/{repository}/local-ci.html"
+    if not page:
+        return ""
+    if not page.lower().endswith(".html"):
+        page += "/local-ci.html"
+    if task.get("pr_number"):
+        page += ("&" if "?" in page else "?") + f"pr={task['pr_number']}"
+    return page
 
 
 def display_state(value: str) -> str:
@@ -1282,6 +1404,9 @@ def feedback_evidence(item: dict, task: dict, artifact_urls: dict) -> str:
 def result_comment(result: dict, result_url: str = "", artifact_urls: dict | None = None) -> str:
     task = result["task"]
     records = [*result["checks"], *result["reviews"]]
+    visible_records = [
+        item for item in records if item.get("status") not in COMMENT_OMIT_STATUSES
+    ]
     verdict = {
         "pass": "本次要求的检查已通过。",
         "fail": "发现合入阻塞，需要处理后重新验证。",
@@ -1293,18 +1418,24 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
         f"PR 提交：`{task['head_sha']}`", "",
         f"合并后验证提交：`{task['tested_sha']}`",
         "", "### 变更意图与审查结论", "", feedback_text(result["summary"]),
-        "", "### 查看审查详情", "", "<details>", "<summary>展开检查与审查记录</summary>", "",
-        "| 检查 | 结果 | 说明 |", "| --- | --- | --- |",
     ]
-    for item in records:
+    dashboard = dashboard_url(task)
+    if dashboard:
+        lines.extend(["", f"[在 Dashboard 查看本次任务详情]({dashboard})"])
+    lines.extend(["", "### 查看审查详情"])
+    if visible_records:
+        lines.extend(["", "<details>", "<summary>展开已执行的检查与审查记录</summary>", "",
+                      "| 检查 | 结果 | 说明 |", "| --- | --- | --- |"])
+    else:
+        lines.extend(["", "本次评论没有可列出的已执行检查或审查记录；未选择、未执行和不适用项已保留在 Dashboard。"])
+    for item in visible_records:
         name = item.get("tool_id", item.get("kind", ""))
         label = DISPLAY_CHECKS.get(name, "补充检查（" + feedback_text(name) + "）")
         state = display_state(item["status"])
         detail = feedback_text(item.get("summary", ""))
         lines.append(f"| {label} | {state} | {detail} |")
-    if not records:
-        lines.append("| 检查与审查 | 未完成 | 尚无可核对的记录 |")
-    lines.extend(["", "</details>"])
+    if visible_records:
+        lines.extend(["", "</details>"])
     blockers = [feedback_text(reason) for reason in result["blocking_reasons"]]
     findings = []
     for finding in result["findings"]:
@@ -1339,6 +1470,68 @@ def pr_info_comment(errors: list[str]) -> str:
         + "\n".join(f"- {feedback_text(error)}" for error in errors)
         + "\n\n请直接更新 PR 描述，系统会重新检查。PR 信息检查通过后会进入后续检查与必要验证"
     )
+
+
+def contributor_mention(pull: dict | None) -> str:
+    login = ((pull or {}).get("user") or {}).get("login", "")
+    return f"@{login} " if re.fullmatch(r"[A-Za-z0-9-]{1,39}", str(login)) else ""
+
+
+def preflight_failure_comment(error: BaseException, link: str = "", pull: dict | None = None) -> str:
+    """Explain the failure boundary without blaming a workflow by default."""
+    text = str(error)
+    if isinstance(error, GitHubAPIError) and (error.code >= 500 or error.code == 429):
+        category = "GitHub 服务暂时不可用或受到限流"
+        explanation = "失败发生在 GitHub 服务请求阶段，不能据此判断 PR 代码或工作流逻辑失败。"
+    elif re.search(r"merge result is not ready|Merge parents do not match|PR merge result", text, re.I):
+        category = "GitHub 尚未完成 PR 合并状态准备"
+        explanation = "GitHub 侧的 merge ref/父提交状态尚未稳定，不能据此判断 PR 代码或工作流逻辑失败。"
+    elif re.search(r"Gitee|transport|publication|code refs|control publication|result publication", text, re.I):
+        category = "Gitee 中转或投递阶段异常"
+        explanation = "失败发生在任务投递或结果发布边界，不等同于 Basic、API 或 Security 检查失败。"
+    else:
+        category = "原因待确认"
+        explanation = "目前只能确认准备/投递阶段没有完成；现有信息不足以把原因归于 GitHub、工作流、Gitee 或 PR 代码。"
+    detail = feedback_text(text if isinstance(error, (ValueError, GitHubAPIError)) and text else type(error).__name__)
+    lines = [
+        contributor_mention(pull) + "## CI 准备或投递未完成",
+        "",
+        f"**初步归因：{category}。**",
+        "",
+        explanation,
+        "",
+        f"原始阶段信息：{detail}",
+        "",
+        "请查看本次工作流证据；确认 GitHub PR 状态和中转服务恢复后，再重新触发本次检查。",
+    ]
+    if link:
+        lines.extend(["", f"[查看工作流证据]({link})"])
+    return "\n".join(lines)
+
+
+def approval_rejection_comment(gh: GitHub, task: dict, outcome: str, url: str = "") -> str:
+    try:
+        pull = gh.request(f"pulls/{task['pr_number']}")
+    except (GitHubAPIError, OSError, ValueError):
+        # The notification itself should still be attempted when the PR
+        # lookup is the transiently failing GitHub request; omit only the
+        # contributor mention if the login cannot be read.
+        pull = None
+    wording = ("审批未通过或审批验证失败" if outcome == "failure"
+               else "审批被取消或未获批准")
+    lines = [
+        contributor_mention(pull) + "## Local CI 外部 fork 审批未完成",
+        "",
+        f"本次固定版本的外部 fork {wording}，因此没有投递到 Local CI，贡献者无需根据这次运行修改代码。",
+        "",
+        f"PR 提交：`{task['head_sha']}`",
+        f"合并后验证提交：`{task['tested_sha']}`",
+        "",
+        "如需继续验证，请由维护者在 `local-ci-fork-approval` 环境对新的、仍然匹配的 PR 提交重新作出审批。",
+    ]
+    if url:
+        lines.extend(["", f"[查看审批结果与工作流证据]({url})"])
+    return "\n".join(lines)
 
 
 def approval_card(task: dict, stages: dict, eligible: bool, approval_error: str = "",
@@ -1516,6 +1709,21 @@ def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
         detail += f"\n\n[Open approval controls and workflow evidence]({workflow_url()})"
     gh.check(task, key, "completed", "cancelled" if "cancelled" in stages.values() else "failure",
              description, detail, workflow_url())
+    if (
+        key == "approve"
+        and task.get("external_fork")
+        and stages.get("card") == "success"
+        and stages.get("approval") in {"failure", "cancelled"}
+    ):
+        gh.comment(
+            task,
+            approval_rejection_comment(gh, task, stages["approval"], workflow_url()),
+            event_key={
+                "kind": "approval-rejected",
+                "task_id": task["task_id"],
+                "outcome": stages["approval"],
+            },
+        )
     if pending and stages.get("enqueue") in {"failure", "cancelled"}:
         gh.status(task, "error", description, workflow_url())
         gh.reconcile_legacy_statuses(task, "error", description, workflow_url())
@@ -1975,7 +2183,7 @@ def main() -> int:
                      "Update the PR information before Basic CI can start.", workflow_url())
             gh.comment(task, pr_info_comment(errors))
         else:
-            gh.check(task, "basic", "in_progress", None, "local-ci/basic: running",
+            gh.check(task, "basic", "in_progress", None, f"{CHECK_NAMES['basic']}: running",
                      "PR information passed; Basic CI can now run.", workflow_url())
         return int(bool(errors))
     if args.command == "card":
@@ -2145,14 +2353,9 @@ if __name__ == "__main__":
                             if run_id.isdigit()
                             else ""
                         )
-                        reason = (
-                            str(error)
-                            if isinstance(error, (ValueError, GitHubAPIError))
-                            else type(error).__name__
-                        )
                         client.comment(
                             context,
-                            f"## CI 准备或投递未完成\n\n{feedback_text(reason)}\n\n请查看本次工作流证据并修复对应检查或中转配置，然后重试：{link}",
+                            preflight_failure_comment(error, link, pull),
                         )
             except (ValueError, OSError, RuntimeError):
                 print(

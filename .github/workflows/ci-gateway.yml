@@ -278,7 +278,7 @@ jobs:
     needs: [prepare, basic, api, security, basic-result, api-result, security-result, approve-external-fork, enqueue]
     if: ${{ always() && needs.prepare.outputs.task_id != '' && needs.enqueue.result != 'success' }}
     runs-on: ubuntu-latest
-    permissions: {contents: read, pull-requests: read, statuses: write, checks: write, actions: read}
+    permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: read}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -389,6 +389,7 @@ jobs:
         id: collect
         env:
           RECEIVER_TASK_ID: ${{ inputs.task_id }}
+          DASHBOARD_URL: ${{ vars.DASHBOARD_URL || '' }}
         run: python3 scripts/ci/gateway.py collect
       - name: Check whether dashboard content changed
         id: dashboard

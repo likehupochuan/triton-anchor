@@ -1,7 +1,9 @@
 /* Shared result projection for task, operator and performance views. */
 (function (global) {
   const array = value => Array.isArray(value) ? value : [];
-  const status = value => ({pass:'passed',fail:'failed',infra_error:'error',pending:'waiting',not_selected:'skipped'}[value] || value || 'unknown');
+  // Keep selection semantics distinct in the dashboard.  A check that was
+  // not selected is not the same as a selected check that was skipped.
+  const status = value => ({pass:'passed',fail:'failed',infra_error:'error',pending:'waiting'}[value] || value || 'unknown');
   const safeUrl = value => { try { const url = new URL(value); return url.protocol === 'https:' ? url.href : ''; } catch { return ''; } };
   const subject = task => task.repository + '/' + (task.pr_number ? 'pr/' + task.pr_number : 'branch/' + task.target_branch);
   const timestamp = value => typeof value === 'number' ? value * 1000 : Date.parse(value) || 0;
