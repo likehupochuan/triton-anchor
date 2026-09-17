@@ -977,6 +977,34 @@ README only
         self.assertIsNone(request.call_args.args[2]["conclusion"])
         self.assertEqual(g.check_workflow_id(request.call_args.args[2]), "200")
 
+    def test_pending_check_transition_omits_null_conclusion(self):
+        gh = g.GitHub(g.REPOSITORY, token="fixture")
+        pending = {
+            "id": 11, "name": "local-ci/basic", "status": "queued",
+            "conclusion": None,
+            "external_id": f"triton-anchor-local-ci:basic:{self.task['task_id']}",
+            "output": {
+                "title": "Checking PR information",
+                "summary": g.check_summary(
+                    "Basic CI will start after the required PR information is checked.",
+                    "200",
+                ),
+            },
+            "app": {"slug": "github-actions"},
+        }
+        with patch.object(gh, "request", return_value={"check_runs": [pending]}) as request:
+            gh.check(
+                self.task,
+                "basic",
+                "in_progress",
+                None,
+                "local-ci/basic: running",
+                "PR information passed; Basic CI can now run.",
+                run_id="200",
+            )
+        self.assertEqual(request.call_args.args[:2], ("check-runs/11", "PATCH"))
+        self.assertNotIn("conclusion", request.call_args.args[2])
+
     def test_new_task_cancels_only_superseded_trusted_pending_checks(self):
         gh = g.GitHub(g.REPOSITORY, token="fixture")
         old = {"id": 11, "name": "local-ci/basic", "status": "queued",

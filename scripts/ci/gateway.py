@@ -463,10 +463,12 @@ class GitHub:
             payload["details_url"] = desired_url
         if conclusion:
             payload["conclusion"] = conclusion
-        elif existing:
+        elif existing and existing.get("conclusion") is not None:
             # Reopening a completed row must clear its old conclusion; without
             # this explicit null GitHub (and lightweight API fakes) can retain
-            # the previous success/failure and defeat idempotency.
+            # the previous success/failure and defeat idempotency.  A pending
+            # row has no conclusion to clear, and GitHub rejects an explicit
+            # null conclusion on an ordinary queued -> in_progress update.
             payload["conclusion"] = None
         if existing and key == "basic" and restart:
             payload["started_at"] = started_at or now()
