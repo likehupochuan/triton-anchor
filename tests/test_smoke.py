@@ -62,6 +62,8 @@ def test_import_triton():
     """验证 triton 核心包可以正常导入"""
     import triton
 
+    assert triton.__version__.startswith("3.3."), "Expected Triton 3.3 for isolation smoke"
+
     print(f"  triton version: {triton.__version__}")
     print(f"  triton path: {triton.__file__}")
 
