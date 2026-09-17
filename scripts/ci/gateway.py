@@ -413,9 +413,16 @@ class GitHub:
                     key=lambda run: int(run["id"]),
                     default=None,
                 )
-                if current_run_id and newer and check_workflow_id(newer) == current_run_id:
+                newer_workflow = check_workflow_id(newer) if newer else ""
+                if (current_run_id and newer_workflow
+                        and (newer_workflow == current_run_id
+                             or (current_run_id.isdigit() and newer_workflow.isdigit()
+                                 and int(newer_workflow) < int(current_run_id)))):
+                    # The current workflow is at least as new as this row, so
+                    # retag the newest ID instead of reviving an older Check.
                     existing = newer
-                elif not current_run_id:
+                else:
+                    # Without comparable workflow ownership, create a newer ID.
                     existing = None
             for run in trusted:
                 if run.get("status") != "completed" and (

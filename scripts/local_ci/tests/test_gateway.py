@@ -962,18 +962,20 @@ README only
             gh.check(self.task, "basic", "queued", None, "Queued", "New task")
             self.assertEqual(writes[-1][0], "check-runs")
 
-    def test_preflight_rerun_creates_new_check_after_completed_check(self):
+    def test_preflight_rerun_reuses_latest_completed_check(self):
         gh = g.GitHub(g.REPOSITORY, token="fixture")
         old = {
             "id": 11, "name": "local-ci/basic", "status": "completed",
             "conclusion": "success",
             "external_id": f"triton-anchor-local-ci:basic:{self.task['task_id']}",
+            "output": {"summary": g.check_summary("Passed", "100")},
             "app": {"slug": "github-actions"},
         }
         with patch.object(gh, "request", return_value={"check_runs": [old]}) as request:
-            gh.check(self.task, "basic", "queued", None, "Queued", "Rerun")
-        self.assertEqual(request.call_args.args[:2], ("check-runs", "POST"))
-        self.assertNotIn("conclusion", request.call_args.args[2])
+            gh.check(self.task, "basic", "queued", None, "Queued", "Rerun", run_id="200")
+        self.assertEqual(request.call_args.args[:2], ("check-runs/11", "PATCH"))
+        self.assertIsNone(request.call_args.args[2]["conclusion"])
+        self.assertEqual(g.check_workflow_id(request.call_args.args[2]), "200")
 
     def test_new_task_cancels_only_superseded_trusted_pending_checks(self):
         gh = g.GitHub(g.REPOSITORY, token="fixture")
@@ -992,13 +994,18 @@ README only
         gh = g.GitHub(g.REPOSITORY, token="fixture")
         old = {"id": 11, "name": "local-ci/basic", "status": "queued",
                "external_id": f"triton-anchor-local-ci:basic:{self.task['task_id']}",
+               "output": {"summary": g.check_summary("Old task", "100")},
                "app": {"slug": "github-actions"}}
-        newer = {**old, "id": 12, "external_id": "triton-anchor-local-ci:basic:other-task"}
+        newer = {**old, "id": 12, "external_id": "triton-anchor-local-ci:basic:other-task",
+                 "output": {"summary": g.check_summary("Newer task", "200")}}
         with patch.object(gh, "request", return_value={"check_runs": [old, newer]}) as request:
-            gh.check(self.task, "basic", "queued", None, "等待执行", "重新请求")
+            gh.check(self.task, "basic", "queued", None, "等待执行", "重新请求", run_id="300")
         writes = [call for call in request.call_args_list if len(call.args) > 1]
         self.assertEqual([call.args[:2] for call in writes], [
-            ("check-runs/11", "PATCH"), ("check-runs/12", "PATCH"), ("check-runs", "POST")])
+            ("check-runs/11", "PATCH"), ("check-runs/12", "PATCH")])
+        self.assertEqual(writes[-1].args[2]["external_id"],
+                         f"triton-anchor-local-ci:basic:{self.task['task_id']}")
+        self.assertEqual(g.check_workflow_id(writes[-1].args[2]), "300")
 
     def test_preflight_reports_cancelled_and_unexecuted_without_passing_them(self):
         with patch.object(self.gh, "check", return_value=True) as check:
@@ -1057,9 +1064,11 @@ README only
         gh = g.GitHub(g.REPOSITORY, token="fixture")
         row = {"id": 21, "name": "local-ci/api", "status": "completed", "conclusion": "success",
                "external_id": f"triton-anchor-local-ci:api:{self.task['task_id']}",
+               "output": {"summary": g.check_summary("Passed", "200")},
                "app": {"slug": "github-actions"}}
         with patch.object(gh, "request", return_value={"check_runs": [row]}) as request:
-            self.assertFalse(gh.check(self.task, "api", "in_progress", None, "Running", "Previous stage passed"))
+            self.assertFalse(gh.check(self.task, "api", "in_progress", None, "Running",
+                                      "Previous stage passed", run_id="200"))
             self.assertTrue(all(call.args[1:] == () for call in request.call_args_list))
 
     def test_dispatch_success_follows_pending_summary_for_worker(self):
