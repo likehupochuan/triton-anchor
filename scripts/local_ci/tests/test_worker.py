@@ -7,6 +7,7 @@ from pathlib import Path
 import select
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -58,6 +59,32 @@ def revised_manifest(revision, captured_at):
         head_task_ref=prefix + "/head",
     )
     return value
+
+
+def test_idle_relay_failure_persists_until_success_and_old_codex_state_is_hidden(tmp_path):
+    class Relay:
+        failing = True
+
+        def refresh(self):
+            if self.failing:
+                raise OSError("private relay endpoint unavailable")
+
+    relay = Relay()
+    worker = Worker(
+        {"state_dir": str(tmp_path)}, relay=relay, manager=SimpleNamespace(),
+        driver=SimpleNamespace(health={"codex_status": "connection_error"}),
+    )
+    with pytest.raises(OSError):
+        worker.refresh_relay()
+    for _ in range(2):
+        worker.heartbeat()
+        heartbeat = json.loads((tmp_path / "health/worker.json").read_text())
+        assert heartbeat["control_channel"] == "unreachable"
+        assert "codex_status" not in heartbeat
+    relay.failing = False
+    worker.refresh_relay()
+    worker.heartbeat()
+    assert json.loads((tmp_path / "health/worker.json").read_text())["control_channel"] == "reachable"
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
@@ -164,6 +191,9 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
     worker.scan()
     row = worker.journal.task(task["task_id"])
     assert row["phase"] == "publish_pending"
+    queued_at = worker.journal.delivery(task["task_id"])["queued_at"]
+    worker.journal.publication_failure(task["task_id"])
+    assert worker.journal.delivery(task["task_id"])["queued_at"] == queued_at
     result = json.loads(
         (worker.journal.run_dir(task["task_id"]) / "sealed/result.json").read_text()
     )

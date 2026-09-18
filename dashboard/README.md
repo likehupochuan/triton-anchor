@@ -1,7 +1,7 @@
 # CI Dashboard
 
-提供三个业务视图：`local-ci.html` 的任务与证据，`index.html` 的全量算子和后端与性能。
-前端统一读取 Gateway 短作业生成的 `data/tasks.json`（`triton-anchor-dashboard`）；
+提供三个业务视图：`local-ci.html` 的任务与证据，`index.html` 的全量算子和后端与性能；另有独立的 `worker.html`「Worker 运行状态」页面。
+业务视图统一读取 Gateway 短作业生成的 `data/tasks.json`（`triton-anchor-dashboard`）；
 `data.js` 将统一结果投影到三个界面，保留选测/未执行原因、审查依据、失败详情、筛选、分页及 CSV/XLSX 下载。
 
 结果与所选文件随同一 Git 提交发布。页面展示所有检查状态、审查结论和文件链接；未选择、未执行和不适用的检查保留原始状态及说明，未选中或超预算的文件保留在主机，并说明省略原因。PR 评论只列出实际执行的检查，并链接回本页面查看完整记录。
@@ -31,5 +31,7 @@ python3 -m http.server 8000 --directory dashboard --bind 127.0.0.1
 ```
 
 Gateway 发布时将 `_site/data/tasks.json` 复制到页面的 `data/`。
-Worker/健康界面已移到独立 `scripts/local_ci/maintenance/health_site/`，业务页面没有 Worker 第四模块、运维 Issue 或邮件入口。
+`worker.html` 独立加载 `health.js`，展示运行概览、当前异常、服务与资源、当前任务和最近异常记录；业务页面只保留导航入口，不加载健康数据。Worker 页面每五分钟匿名读取 Gitee 文件 API 的 `snapshot/<worker>/worker-health.json` 和 `watchdog/watchdog.json`，不等待任务发布，不增加 Actions 定时任务。健康仓库、Worker ID 和 20 分钟过期阈值集中在 `health.js` 的 `source` 中；普通 raw URL 没有浏览器跨域许可，不能替代文件 API。
+服务、Gitee 访问、环境/磁盘、任务交付与 Codex 异常分别展示；Codex 连接、认证、限流等分类需要服务器更新后的结构化健康字段，旧快照显示未上报，不推测错误原因。心跳过期时不继续展示旧的绿色状态，浏览器读取失败也不判成服务器断网。按需 oneshot 服务未运行不算故障；旧 watchdog 结论不会覆盖较新的健康采集。
+「Cloudflare 告警记录」匿名读取同一健康仓库最近 50 条更新的 Issues，筛选当前 Worker 的自动告警标记，展示最近 10 条及详情入口。它与实时健康快照分开展示：Issue 已关闭不代表服务已经恢复，没有 Issue 也不表示外部监测已启用。页面不触发通知；无人打开页面时的检测和 Issue 写入由独立 [Cloudflare Worker](../scripts/local_ci/maintenance/cloudflare/README.md) 执行，无需为每次告警重新发布 Pages。
 本地静态预览不代表已部署 Pages，也不代表真实工具链或生产门禁验收通过。

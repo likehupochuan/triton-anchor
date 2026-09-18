@@ -8,6 +8,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from agent_ci.codex import CodexDriver
 from agent_ci.executor import LAUNCH_PROGRAM, STOP_PROGRAM
 
@@ -61,9 +63,32 @@ def test_cli_resumes_with_original_configuration_and_without_service_credentials
     assert sessions[0][0]["config.toml"] == settings
     assert "GITEE_TOKEN" not in sessions[0][1]
     assert sessions[0][1]["COMPANY_CREDENTIAL"] == "fixture-provider-key"
+    assert driver.health["codex_status"] == "succeeded"
+    assert driver.health["codex_alive"] is False
     assert (
         driver.redact("fixture-model-key fixture-gitee-key") == "[redacted] [redacted]"
     )
+
+
+@pytest.mark.parametrize("message,status", [
+    ("stream disconnected before completion: secret endpoint", "connection_error"),
+    ("401 Unauthorized: secret token", "auth_error"),
+    ("429 rate limit exceeded", "rate_limited"),
+    ("unexpected internal error", "failed"),
+])
+def test_cli_health_classifies_errors_without_publishing_text(tmp_path, message, status):
+    driver = CodexDriver({}, tmp_path)
+    driver.health = {"codex_status": "running", "codex_alive": True, "last_progress_at": 1}
+    driver.observe_event({"type": "turn.failed", "error": {"message": message}})
+    assert driver.health["codex_status"] == status
+    assert message not in json.dumps(driver.health)
+    assert driver.health["last_progress_at"] == 1
+    # A later valid CLI event recovers; a tool printing errors is not a CLI failure.
+    driver.observe_event({"type": "item.completed", "item": {
+        "type": "command_execution", "aggregated_output": message,
+    }})
+    assert driver.health["codex_status"] == "running"
+    assert driver.health["last_progress_at"] > 1
 
 
 def test_one_group_cancel_preserves_same_uid_agent(tmp_path):

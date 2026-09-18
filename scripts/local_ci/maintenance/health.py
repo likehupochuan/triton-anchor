@@ -73,7 +73,9 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
                 uploads.append(
                     {
                         "task_id": task["task_id"],
-                        "queued_at": task["updated_at"],
+                        "queued_at": iso(record["delivery"]["queued_at"])
+                        if isinstance((record.get("delivery") or {}).get("queued_at"), (int, float))
+                        else task["updated_at"],
                         "attempts": (record.get("delivery") or {}).get("attempts", 0),
                     }
                 )
@@ -83,8 +85,9 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
         (entry for entry in tasks if entry["stage"] == "running"),
         tasks[0] if tasks else None,
     )
-    if active and active["stage"] == "running":
-        for key in ("last_progress_at", "codex_alive"):
+    if (active and active["stage"] == "running" and alive and not stale
+            and worker.get("active_task") == active["task_id"]):
+        for key in ("last_progress_at", "codex_alive", "codex_status"):
             if key in worker:
                 value = worker[key]
                 active[key] = (
@@ -237,7 +240,7 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
             "heartbeat_stale": stale,
             "last_poll_status": "error"
             if worker.get("control_channel") == "unreachable"
-            else "success",
+            else "success" if worker.get("control_channel") == "reachable" else "unknown",
         },
         "active_task": active,
         "tasks": tasks,
@@ -298,6 +301,12 @@ def public_snapshot(snapshot):
             "codex_alive": row.get("codex_alive")
             if type(row.get("codex_alive")) is bool
             else None,
+            "codex_status": row.get("codex_status")
+            if row.get("codex_status") in {
+                "starting", "running", "retrying", "connection_error", "auth_error",
+                "rate_limited", "failed", "succeeded", "cancelled", "timeout",
+            }
+            else None,
         }
 
     poller = snapshot.get("poller", {})
@@ -316,9 +325,9 @@ def public_snapshot(snapshot):
             "alive": poller.get("alive") is True,
             "heartbeat_at": instant(poller.get("heartbeat_at")),
             "heartbeat_stale": poller.get("heartbeat_stale") is True,
-            "last_poll_status": "error"
-            if poller.get("last_poll_status") == "error"
-            else "success",
+            "last_poll_status": poller.get("last_poll_status")
+            if poller.get("last_poll_status") in {"error", "success"}
+            else "unknown",
         },
         "control_update": {
             "state": control_update.get("state")

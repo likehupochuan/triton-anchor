@@ -153,6 +153,7 @@ class Worker:
         self.control_request_selector = control_request_selector
         self.stop_event = threading.Event()
         self.active = None
+        self.control_channel = "unknown"
 
     def heartbeat(self, **extra):
         atomic_json(
@@ -163,18 +164,29 @@ class Worker:
                 "heartbeat_at": time.time(),
                 "pid": os.getpid(),
                 "head_sha": self.active.task["head_sha"] if self.active else None,
+                "active_task": self.active.task["task_id"] if self.active else None,
+                "control_channel": self.control_channel,
                 "tasks": [
                     {k: r[k] for k in ("task_id", "head_sha", "phase", "updated")}
                     for r in self.journal.tasks()
                 ],
+                **(getattr(self.driver, "health", {}) if self.active else {}),
                 **extra,
             },
         )
 
+    def refresh_relay(self):
+        try:
+            self.relay.refresh()
+        except Exception:
+            self.control_channel = "unreachable"
+            raise
+        self.control_channel = "reachable"
+
     def watch(self, active, done):
         while not done.wait(self.config.get("poll_interval_seconds", 60)):
             try:
-                self.relay.refresh()
+                self.refresh_relay()
                 valid, reason = self.relay.validity(active.task)
                 if not valid:
                     active.cancel(reason)
@@ -183,7 +195,7 @@ class Worker:
                 self.journal.event(
                     active.task["task_id"], "poll_error", {"error": str(exc)}
                 )
-                self.heartbeat(control_channel="unreachable")
+                self.heartbeat()
 
     def queue_sealed(self, task_id, path):
         self.journal.queue_result(
@@ -213,6 +225,7 @@ class Worker:
             run_dir = self.journal.run_dir(task["task_id"])
         self.journal.phase(task["task_id"], "preparing", {"started": True})
         active = ActiveTask(task, self.manager)
+        self.driver.health = {}
         self.active = active
         self.manager.cancel_event = active.cancelled
         done = threading.Event()
@@ -292,17 +305,29 @@ class Worker:
                 except TimeoutError:
                     raise
                 except Exception as exc:
+                    self.driver.health = {
+                        **getattr(self.driver, "health", {}),
+                        "codex_status": "failed", "codex_alive": False,
+                    }
                     self.journal.event(
                         task["task_id"], "codex_error", {"error": str(exc)}
                     )
                 if attempt + 1 < self.config.get("codex_attempts", 10):
+                    if self.driver.health.get("codex_status") not in {
+                        "connection_error", "auth_error", "rate_limited", "failed",
+                    }:
+                        self.driver.health = {
+                            **self.driver.health, "codex_status": "retrying",
+                            "codex_alive": False,
+                        }
+                    self.heartbeat()
                     active.cancelled.wait(self.config.get("retry_delay_seconds", 30))
             if not completed:
                 raise ContractError(
                     "Codex未完成任务或未生成最终结果；请查看本机Codex日志"
                 )
             report = None
-            self.relay.refresh()
+            self.refresh_relay()
             valid, reason = self.relay.validity(task)
             if not valid:
                 active.cancel(reason)
@@ -427,7 +452,7 @@ class Worker:
         if retain_local(self.config)["pause_intake"]:
             self.heartbeat(runtime="disk_budget_exceeded")
             return
-        self.relay.refresh()
+        self.refresh_relay()
         waiting = []
         current_revision = self.running_control_revision
         for task in self.relay.tasks():

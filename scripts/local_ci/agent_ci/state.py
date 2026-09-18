@@ -182,6 +182,7 @@ class Journal:
                 "payload_path": str(path),
                 "digest": result_digest,
                 "attempts": 0,
+                "queued_at": time.time(),
                 "published": None,
             }
             state["phase"] = (

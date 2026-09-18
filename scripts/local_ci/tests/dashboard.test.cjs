@@ -1,7 +1,94 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { normalize, business, blockerGroups } = require('../../../dashboard/data.js');
+const { assess: assessHealth, readSnapshot, readAlerts, source: healthSource } = require('../../../dashboard/health.js');
 const task = (id, date) => ({task_id:id, repository:'example/repo',pr_number:7,target_branch:'main',head_sha:('f'+id).repeat(20),tested_sha:id.repeat(40),captured_at:date});
+
+const healthNow = Date.parse('2026-09-17T10:00:00Z');
+function healthyWorker() {
+  return {schema:'triton-anchor-worker-health',worker_id:healthSource.worker,collected_at:new Date(healthNow).toISOString(),
+    poller:{alive:true,heartbeat_stale:false,heartbeat_at:new Date(healthNow-30000).toISOString(),last_poll_status:'success'},
+    runtime:{available:true},services:[],storage:[],active_task:null};
+}
+function healthWatchdog(worker) {
+  return {updated_at:new Date(healthNow).toISOString(),source_state:'readable',worker_health:[worker],active:{},history:[]};
+}
+
+test('health freshness does not turn a normal five-minute sampling gap into a dead Worker', () => {
+  const worker=healthyWorker(), watchdog=healthWatchdog(worker);
+  assert.equal(assessHealth(worker,watchdog,{now:healthNow+240000}).issues.length,0);
+  const stale=assessHealth(worker,watchdog,{now:healthNow+1201000});
+  assert.equal(stale.current,false);
+  assert.ok(stale.issues.some(row=>row.code==='snapshot_stale'));
+  assert.ok(stale.cards.every(row=>row.tone==='muted'));
+  const unreadable=assessHealth(worker,watchdog,{now:healthNow,workerError:'浏览器请求失败'});
+  assert.equal(unreadable.current,false);
+  assert.deepEqual(unreadable.issues.map(row=>row.code),['health_read']);
+});
+
+test('health separates service, relay and Codex evidence without treating idle oneshots as failures', () => {
+  const worker=healthyWorker();
+  worker.services=[{name:'triton-anchor-local-ci-control-update.service',available:true,active_state:'inactive'}];
+  worker.active_task={stage:'running'};
+  let result=assessHealth(worker,healthWatchdog(worker),{now:healthNow});
+  assert.equal(result.issues.length,0);
+  assert.equal(result.cards[3].text,'连接状态未上报');
+  worker.services.push({name:'triton-anchor-local-ci-health.timer',available:false,active_state:'unknown'});
+  result=assessHealth(worker,healthWatchdog(worker),{now:healthNow});
+  assert.equal(result.tone,'warn');
+  assert.equal(result.issues[0].category,'服务状态待确认');
+  worker.services.pop();
+  worker.services.push({name:'triton-anchor-local-ci-health.timer',available:true,active_state:'failed'});
+  worker.poller.last_poll_status='error';
+  for (const status of ['connection_error','auth_error','rate_limited','timeout','failed']) {
+    worker.active_task.codex_status=status;
+    result=assessHealth(worker,healthWatchdog(worker),{now:healthNow});
+    assert.ok(result.issues.some(row=>row.code==='service_triton-anchor-local-ci-health.timer'));
+    assert.ok(result.issues.some(row=>row.code==='relay_poll_failed'));
+    assert.ok(result.issues.some(row=>row.code==='codex_'+status));
+  }
+});
+
+test('older or unreadable watchdog observations cannot override a recovered Worker', () => {
+  const worker=healthyWorker(), old={...worker,collected_at:new Date(healthNow-300000).toISOString()};
+  const watchdog=healthWatchdog(old);
+  watchdog.active.x={worker_id:healthSource.worker,code:'relay_poll_failed'};
+  assert.equal(assessHealth(worker,watchdog,{now:healthNow}).issues.length,0);
+  watchdog.worker_health=[worker];watchdog.source_state='unknown';
+  assert.deepEqual(assessHealth(worker,watchdog,{now:healthNow}).issues.map(row=>row.code),['watchdog_unknown']);
+  watchdog.source_state='readable';watchdog.updated_at=new Date(healthNow-1201000).toISOString();
+  assert.deepEqual(assessHealth(worker,watchdog,{now:healthNow}).issues.map(row=>row.code),['watchdog_stale']);
+});
+
+test('health reader anonymously decodes the Gitee file API and rejects a different worker', async t => {
+  const worker={...healthyWorker(),note:'中文'};
+  t.mock.method(global,'fetch',async (url,options)=>{
+    assert.match(url,/\/api\/v5\/repos\/.+\/contents\/worker-health.json\?ref=snapshot%2Fjiwang-ci-race-1$/);
+    assert.equal(options.credentials,'omit');
+    return {ok:true,json:async()=>({encoding:'base64',content:Buffer.from(JSON.stringify(worker)).toString('base64')})};
+  });
+  assert.deepEqual(await readSnapshot('worker-health.json','snapshot/'+healthSource.worker,worker.schema),worker);
+  worker.worker_id='another-server';
+  await assert.rejects(readSnapshot('worker-health.json','snapshot/'+healthSource.worker,worker.schema),/身份不匹配/);
+});
+
+test('health alerts select this worker only and link to the health repository without credentials', async t => {
+  const marker = '<!-- local-ci-alert:' + healthSource.worker + ' -->';
+  t.mock.method(global, 'fetch', async (url, options) => {
+    assert.match(url, /\/issues\?state=all&sort=updated/);
+    assert.equal(options.credentials, 'omit');
+    assert.equal(options.headers, undefined);
+    return {ok:true, json:async()=>[
+      {number:'IABC01',title:'连接异常',body:marker,state:'open',html_url:'javascript:alert(1)'},
+      {number:'IABC02',body:'<!-- local-ci-alert:another-worker -->',state:'open'},
+      {number:'../settings',body:marker,state:'open'},
+      {number:'IABC03',body:marker,state:'closed'},
+    ]};
+  });
+  const alerts = await readAlerts();
+  assert.deepEqual(alerts.map(row=>row.state), ['open','closed']);
+  assert.equal(alerts[0].url, 'https://gitee.com/' + healthSource.repository + '/issues/IABC01');
+});
 
 test('old pass cannot override a newer pending or cancelled task', () => {
   const data = normalize({schema:'triton-anchor-dashboard',tasks:[

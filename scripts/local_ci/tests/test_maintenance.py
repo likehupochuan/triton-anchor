@@ -144,6 +144,41 @@ def test_health_whitelist_removes_nested_private_configuration():
     assert result["runtime"]["available"]
 
 
+def test_health_publishes_only_current_codex_status_and_original_upload_age(tmp_path):
+    run = make_run(tmp_path, "active", "running", None)
+    task_id = "a" * 64
+    (run / "state.json").write_text(json.dumps({
+        "task_id": task_id, "phase": "running", "updated": 100,
+    }))
+    pending = make_run(tmp_path, "pending", "publish_pending", None)
+    (pending / "state.json").write_text(json.dumps({
+        "task_id": "b" * 64, "phase": "publish_pending", "updated": 1900,
+        "delivery": {"queued_at": 100, "attempts": 20},
+    }))
+    heartbeat = {
+        "pid": os.getpid(), "heartbeat_at": 1900, "active_task": task_id,
+        "codex_status": "connection_error", "codex_alive": True,
+        "last_progress_at": 100, "control_channel": "unreachable",
+        "private_error": "PRIVATE_SENTINEL",
+    }
+    (tmp_path / "health").mkdir()
+    path = tmp_path / "health/worker.json"
+    path.write_text(json.dumps(heartbeat))
+    config = {"state_dir": str(tmp_path), "monitor_services": []}
+    manager = SimpleNamespace(health=lambda: {})
+    snapshot = public_snapshot(health.collect(config, now=1900, manager=manager))
+    assert snapshot["active_task"]["codex_status"] == "connection_error"
+    assert snapshot["active_task"]["last_progress_at"] == health.iso(100)
+    assert snapshot["uploads"][0]["queued_at"] == health.iso(100)
+    assert snapshot["poller"]["last_poll_status"] == "error"
+    assert "PRIVATE_SENTINEL" not in json.dumps(snapshot)
+    heartbeat["active_task"] = "c" * 64
+    path.write_text(json.dumps(heartbeat))
+    snapshot = public_snapshot(health.collect(config, now=1900, manager=manager))
+    assert snapshot["active_task"]["codex_status"] is None
+    assert public_snapshot({})["poller"]["last_poll_status"] == "unknown"
+
+
 def test_health_defaults_do_not_monitor_removed_control_update_timer(tmp_path):
     manager = SimpleNamespace(health=lambda: {"images": [], "attempts": []})
     shown = []

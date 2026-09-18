@@ -18,6 +18,7 @@ from .protocol import atomic_json
 class CodexDriver:
     def __init__(self, config, state_dir):
         self.config, self.state_dir = config, Path(state_dir)
+        self.health = {}
         self.secrets = {
             v
             for k, v in os.environ.items()
@@ -30,6 +31,26 @@ class CodexDriver:
             text = text.replace(value, "[redacted]")
         return text
 
+    def observe_event(self, event):
+        """Publish only categories from CLI errors, never tool output or error text."""
+        kind = event.get("type")
+        if kind in {"error", "turn.failed"}:
+            error = event.get("error", {})
+            message = str(error.get("message", "") if isinstance(error, dict) else error)
+            message = (message + " " + str(event.get("message", ""))).lower()
+            status = "failed"
+            if re.search(r"\b(401|403)\b|unauthorized|invalid api key|authentication", message):
+                status = "auth_error"
+            elif re.search(r"\b429\b|rate limit|quota exceeded", message):
+                status = "rate_limited"
+            elif re.search(r"connection|reconnect|network|timed? out|timeout|error sending request|stream disconnected|dns", message):
+                status = "connection_error"
+            self.health = {**self.health, "codex_status": status}
+        elif kind in {"item.started", "item.updated", "item.completed", "turn.completed"}:
+            self.health = {
+                **self.health, "codex_status": "running", "last_progress_at": time.time(),
+            }
+
     @staticmethod
     def client_environment():
         # The Docker client never needs Gitee or model credentials.
@@ -40,6 +61,10 @@ class CodexDriver:
         }
 
     def run(self, executor, *, cancelled, deadline, recovery=""):
+        self.health = {
+            "codex_status": "starting", "codex_alive": False,
+            "last_progress_at": time.time(),
+        }
         home = validate_credentials(
             Path(
                 self.config.get("codex_home") or os.environ.get("CODEX_AI_CI_HOME", "")
@@ -136,6 +161,7 @@ class CodexDriver:
             env=self.client_environment(),
             start_new_session=True,
         )
+        self.health = {**self.health, "codex_status": "starting", "codex_alive": True}
 
         def read_output():
             with path.open("ab") as log, (logs / "progress.log").open("a") as progress:
@@ -144,6 +170,9 @@ class CodexDriver:
                     log.flush()
                     try:
                         event = json.loads(line)
+                        if not isinstance(event, dict):
+                            continue
+                        self.observe_event(event)
                         if event.get("type") == "thread.started" and isinstance(
                             event.get("thread_id"), str
                         ):
@@ -207,3 +236,11 @@ class CodexDriver:
                 process.wait()
             reader.join(timeout=5)
             process.stdout.close()
+            status = self.health.get("codex_status")
+            if reason:
+                status = reason
+            elif process.returncode == 0:
+                status = "succeeded"
+            elif status not in {"connection_error", "auth_error", "rate_limited"}:
+                status = "failed"
+            self.health = {**self.health, "codex_status": status, "codex_alive": False}

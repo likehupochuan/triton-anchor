@@ -8,6 +8,8 @@
 
 公开快照按字段构造，包含状态、时间和资源统计；控制更新显示 `idle`、`pending`、`updating`、`failed`、`invalid` 或 `blocked`。宿主路径、模型配置、凭据与原始异常留在本机。health 与 watchdog 不依赖 Worker 或 Codex 运行；同机停机时二者也会停止。
 
+Codex 的连接、认证和限流状态只根据 CLI 顶层结构化错误分类，不从工具命令输出推断，公开快照仅提供类别。缺失观测保留 unknown（Codex 字段为 null），旧快照不会据此显示为正常；原始错误和认证信息不对外发布。
+
 结果和选择上传的文件按事件与目标分支保存在 Gitee 的 `runs/pr/...` 或 `runs/push/...`，其中 PR 目录包含 `pr-<PR号>`。本地清理不改写远端结果。磁盘可用空间不足或结果存储超出配置预算时，Worker 暂停接收新任务。
 
 可单独运行 `python3 scripts/local_ci/maintenance/<入口>.py --config <配置>`。health、watchdog 加 `--publish` 发布快照；retention 默认预览，加 `--apply` 执行清理。各入口均支持 `--help`。
