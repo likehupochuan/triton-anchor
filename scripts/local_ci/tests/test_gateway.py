@@ -988,8 +988,7 @@ README only
             {**dict.fromkeys(("prepare", *g.CHECK_NAMES, "card"), "success"),
              "approval": "failure", "enqueue": "skipped"},
         ):
-            with patch.object(self.gh, "latest_summary", return_value=pending), \
-                atch.dict(g.os.environ, {"GITHUB_RUN_ID": ""}): 
+            with patch.object(self.gh, "latest_summary", return_value=pending), atch.dict(g.os.environ, {"GITHUB_RUN_ID": ""}): 
                 g.finalize_preflight(self.gh, self.task, outcomes)
             self.assertEqual(self.gh.statuses[-1], (self.task["task_id"], "error"))
 
