@@ -1,12 +1,15 @@
 name: CI Request
 run-name: >-
-  PR #${{ github.event.pull_request.number }} | h:${{ github.event.pull_request.head.sha }} | request
+  ${{ github.event_name == 'pull_request_target' && format('PR #{0}', github.event.pull_request.number) || format('Branch {0}', github.ref_name) }} | request
 on:
   pull_request_target:
+    branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, edited, closed, converted_to_draft, labeled, unlabeled]
+  push:
+    branches: [main]
 permissions: {}
 concurrency:
-  group: local-ci-request-${{ github.event.pull_request.number }}
+  group: local-ci-request-${{ github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: true
 jobs:
   route:
@@ -21,21 +24,23 @@ jobs:
           script: |
             const {owner, repo} = context.repo;
             const pull = context.payload.pull_request;
+            const branch = pull?.base.ref || context.ref.replace('refs/heads/', '');
             // When the full Gateway moves to main, this is the only migration switch.
             const controlRef = 'local-ci-unified';
             const {data: release} = await github.rest.repos.getBranch({owner, repo, branch: controlRef});
             const revision = release.commit.sha;
-            const requestedSha = pull.head.sha;
+            const requestedSha = pull?.head.sha || context.sha;
+            const subject = pull ? `PR #${pull.number}` : `Branch ${branch}`;
             await github.rest.actions.createWorkflowDispatch({
               owner, repo, workflow_id: 'ci-gateway.yml', ref: controlRef,
               inputs: {
                 mode: 'run',
-                pr_number: String(pull.number),
-                source_branch: pull.base.ref,
+                pr_number: String(pull?.number || 0),
+                source_branch: branch,
                 requested_sha: requestedSha,
-                run_title: `PR #${pull.number} | h:${requestedSha.slice(0, 7)}`,
+                run_title: `${subject} | h:${requestedSha.slice(0, 7)}`,
                 worker_revision_sha: revision,
-                action: context.payload.action || '',
+                action: pull ? context.payload.action || '' : 'push',
                 full: 'false'
               }
             });
