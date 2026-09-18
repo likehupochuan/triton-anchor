@@ -1,12 +1,12 @@
 name: CI Gateway
 run-name: >-
-  ${{ inputs.run_title || (inputs.task_id && format('Task {0}', inputs.task_id)) || 'Local CI result' }} | receive ${{ inputs.receiver_round }}
+  ${{ inputs.mode == 'publish' && 'Dashboard | 发布页面' || format('{0} | receive {1}', inputs.run_title || (inputs.task_id && format('Task {0}', inputs.task_id)) || 'Local CI result', inputs.receiver_round) }}
 on:
   workflow_dispatch:
     inputs:
       mode:
         type: choice
-        options: [receive]
+        options: [receive, publish]
         default: receive
       task_id: {type: string, default: ''}
       receiver_round: {type: choice, options: ['1', '2', '3'], default: '1'}
@@ -53,7 +53,10 @@ jobs:
   publish:
     name: Publish CI results
     needs: receive
-    if: needs.receive.outputs.state == 'ready'
+    if: >-
+      !cancelled() &&
+      (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
+      (inputs.mode == 'publish' || needs.receive.outputs.state == 'ready')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
@@ -70,17 +73,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.receive.outputs.control_sha }}
+          ref: ${{ inputs.mode == 'publish' && 'local-ci-unified' || needs.receive.outputs.control_sha }}
           persist-credentials: false
           submodules: false
       - name: Prepare business dashboard
         run: |
           mkdir -p _site
           cp -R dashboard/. _site/
-      - name: Receive results and update PRs
+      - name: Collect dashboard data
         id: collect
         env:
-          RECEIVER_TASK_ID: ${{ inputs.task_id }}
+          RECEIVER_TASK_ID: ${{ inputs.mode == 'receive' && inputs.task_id || '' }}
         run: python3 scripts/ci/gateway.py collect
       - name: Check whether dashboard content changed
         id: dashboard
@@ -119,10 +122,10 @@ jobs:
         if: steps.dashboard.outputs.changed == 'true'
         with: {path: _site}
       - name: Surface incomplete receiver operations
-        if: steps.collect.outputs.receiver_errors != '0'
+        if: inputs.mode == 'receive' && steps.collect.outputs.receiver_errors != '0'
         run: exit 1
       - name: Retry incomplete publication within the receiver round limit
-        if: failure() && inputs.receiver_round != '3'
+        if: failure() && inputs.mode == 'receive' && inputs.receiver_round != '3'
         uses: actions/github-script@v7
         env:
           TASK_ID: ${{ inputs.task_id }}
@@ -142,7 +145,7 @@ jobs:
   deploy-dashboard:
     name: Deploy dashboard (independent of test results)
     needs: publish
-    if: needs.publish.outputs.dashboard_changed == 'true'
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.publish.outputs.dashboard_changed == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
