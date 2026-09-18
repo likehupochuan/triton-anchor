@@ -57,18 +57,22 @@ RECEIVER_POLL_SECONDS = 60
 RECEIVER_MAX_ROUNDS = 3
 
 CHECK_NAMES = {
-    # These checks are executed by GitHub Actions.  Keep their namespace
-    # separate from local-ci/*, which is reserved for the Gitee/worker
-    # lifecycle and its final summary.
-    "basic": "github/basic",
-    "api": "github/api",
-    "security": "github/security",
+    # These are the visible GitHub Check Run names.  The internal keys remain
+    # stable so task protocols and result records do not change.
+    "basic": "Basic CI",
+    "api": "API Compatibility",
+    "security": "Security Gate",
 }
+SUMMARY_CONTEXT = "Local CI Summary"
 # Approval is conditional: only external-fork PRs enter the protected
 # environment.  Keeping it as a repository-wide required context would leave
 # trusted/internal PRs waiting forever when no approval is applicable.
-REQUIRED_CONTEXTS = (*CHECK_NAMES.values(), "local-ci/dispatch", "local-ci/summary")
-ALL_CHECK_NAMES = {**CHECK_NAMES, "approve": "local-ci/approve", "dispatch": "local-ci/dispatch"}
+ALL_CHECK_NAMES = {
+    **CHECK_NAMES,
+    "approve": "Local CI Approve",
+    "dispatch": "Local CI Dispatch",
+}
+REQUIRED_CONTEXTS = (*CHECK_NAMES.values(), ALL_CHECK_NAMES["dispatch"], SUMMARY_CONTEXT)
 LEGACY_CHECK_NAMES = {"preflight": "local-ci/preflight"}
 READ_CHECK_NAMES = {**ALL_CHECK_NAMES, **LEGACY_CHECK_NAMES, "native_prepare": "Prepare exact task"}
 # GitHub keeps completed Check Runs forever and has no delete endpoint.  These
@@ -280,7 +284,7 @@ class GitHub:
             "POST",
             {
                 "state": state,
-                "context": "local-ci/summary",
+                "context": SUMMARY_CONTEXT,
                 "description": description[:140],
                 "target_url": url,
             },
@@ -290,7 +294,7 @@ class GitHub:
         for page in range(1, 21):
             rows = self.request(f"commits/{github_sha(task)}/statuses?per_page=100&page={page}")
             latest = next(
-                (row for row in rows if row.get("context") == "local-ci/summary"),
+                (row for row in rows if row.get("context") == SUMMARY_CONTEXT),
                 None,
             )
             if latest or len(rows) < 100:
@@ -719,11 +723,11 @@ class GitHub:
                 break
         else:
             raise ValueError("Cannot finish an incomplete status listing")
-        for context in ("local-ci/summary", *RETIRED_STATUS_CONTEXTS):
+        for context in (SUMMARY_CONTEXT, *RETIRED_STATUS_CONTEXTS):
             old = latest.get(context) or {}
             if old.get("state") != "pending":
                 continue
-            if context != "local-ci/summary" and (old.get("creator") or {}).get("login") != "github-actions[bot]":
+            if context != SUMMARY_CONTEXT and (old.get("creator") or {}).get("login") != "github-actions[bot]":
                 continue
             self.request(f"statuses/{sha}", "POST", {"context": context, "state": "error",
                          "description": "Local CI cancelled: PR closed or became draft",
@@ -1057,12 +1061,13 @@ class GitStore:
 
     def __init__(self, url: str, branch: str):
         parsed = urlparse(url)
-        if not parsed.scheme and not Path(url).exists():
+        local_path = Path(url).exists()
+        if not parsed.scheme and not local_path:
             raise ValueError(
                 "An unqualified transport must be an existing local test repository"
             )
         if (
-            parsed.scheme
+            parsed.scheme and not local_path
             and parsed.scheme != "file"
             and (
                 parsed.scheme != "https"
@@ -1389,6 +1394,17 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
         f"合并后验证提交：`{task['tested_sha']}`",
         "", "### 变更意图与审查结论", "", feedback_text(result["summary"]),
     ]
+    blockers = [feedback_text(reason) for reason in result["blocking_reasons"]]
+    findings = []
+    for finding in result["findings"]:
+        text = feedback_text(finding.get("summary", ""))
+        if text:
+            if not finding.get("blocking"):
+                risk = {"critical": "严重", "high": "高", "medium": "中", "low": "低", "info": "提示"}.get(finding.get("severity"), "未标注")
+                text = f"【风险：{risk}】{text}"
+            (blockers if finding.get("blocking") else findings).append(text)
+    if findings:
+        lines.extend(["", "### 需要关注的发现", "", *(f"- {x}" for x in dict.fromkeys(findings))])
     lines.extend(["", "### 查看审查详情"])
     if visible_records:
         lines.extend(["", "<details>", "<summary>展开已执行的检查与审查记录</summary>", "",
@@ -1406,24 +1422,21 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
     dashboard = dashboard_url(task)
     if dashboard:
         lines.extend(["", f"[在 Dashboard 查看本次任务详情]({dashboard})"])
-    blockers = [feedback_text(reason) for reason in result["blocking_reasons"]]
-    findings = []
-    for finding in result["findings"]:
-        text = feedback_text(finding.get("summary", ""))
-        if text:
-            if not finding.get("blocking"):
-                risk = {"critical": "严重", "high": "高", "medium": "中", "low": "低", "info": "提示"}.get(finding.get("severity"), "未标注")
-                text = f"【风险：{risk}】{text}"
-            (blockers if finding.get("blocking") else findings).append(text)
-    if findings:
-        lines.extend(["", "### 需要关注的发现", "", *(f"- {x}" for x in dict.fromkeys(findings))])
-    lines.extend(["", "### 合入阻塞与重要限制", ""])
-    lines.extend(f"- {x}" for x in dict.fromkeys(blockers))
-    if not blockers:
-        lines.append("- 已完成的检查未报告合入阻塞。" if result["status"] == "pass" else "- 尚无完整通过结论，请补齐验证。")
+    limitations = list(dict.fromkeys(blockers))
+    delivery = result.get("evidence_delivery") or {}
+    if delivery.get("status") == "incomplete":
+        limitations.append(
+            "执行通过，证据发布不完整。"
+            if result["status"] == "pass"
+            else "证据发布不完整，不改变执行结论。"
+        )
+    if not limitations and result["status"] != "pass":
+        limitations.append("尚无完整通过结论，请补齐验证。")
     if not any(c["tool_id"].startswith(("frontend_", "backend_")) or c["tool_id"] == "flaggems"
                for c in result["checks"] if c["status"] in {"pass", "fail"}):
-        lines.append("- 报告未列出编译器构建或运行检查；不能据此声称编译器运行行为已验证。")
+        limitations.append("报告未列出编译器构建或运行检查；不能据此声称编译器运行行为已验证。")
+    if limitations:
+        lines.extend(["", "### 限制说明", "", *(f"- {x}" for x in dict.fromkeys(limitations))])
     if result_url:
         lines.extend(["", f"[完整执行报告与所选文件]({result_url})"])
     return "\n".join(lines)
@@ -1651,6 +1664,9 @@ def begin_checks(gh: GitHub, task: dict) -> None:
         raise ValueError("A newer workflow owns this task")
     gh.retire_open_checks(task, superseded=True)
     gh.reset_existing_summary(task)
+    # Keep the required commit status pending from the first request until a
+    # receiver publishes the final result.
+    gh.status(task, "pending", "Local CI: preflight checks are running", workflow_url())
 
 
 def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:

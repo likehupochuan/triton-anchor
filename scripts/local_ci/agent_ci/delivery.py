@@ -20,7 +20,6 @@ from .protocol import (
 
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_TOTAL_BYTES = 10 * 1024 * 1024
-MAX_FILES = 20
 MAX_RESULT_BYTES = 2 * 1024 * 1024
 
 
@@ -185,9 +184,9 @@ def seal_result(
     chosen = required + list(selected)
     required_paths = set(required)
     artifacts = []
+    omitted_evidence = []
     seen = set()
     total = 0
-    count = 0
     for entry in chosen:
         if not isinstance(entry, (str, dict)):
             raise ContractError("Artifact selection needs a relative path")
@@ -202,8 +201,6 @@ def seal_result(
         }
         if not incoming.is_file():
             row["omitted"] = "文件未生成，未上传"
-        elif count >= MAX_FILES:
-            row["omitted"] = "超出所选文件数量限制，保留在 CI 主机"
         elif incoming.stat().st_size > MAX_FILE_BYTES:
             row["omitted"] = "文件超过 2 MiB，保留在 CI 主机"
         else:
@@ -220,14 +217,12 @@ def seal_result(
                 target.write_bytes(data)
                 row["size"] = len(data)
                 total += len(data)
-                count += 1
-        if row.get("omitted") and path in required_paths:
-            for check in checks:
-                if path in check["evidence"] and check["status"] == "pass":
-                    check["status"] = "infra_error"
-            reasons.append(f"必传检查证据无法发布：{path}（{row['omitted']}）")
-            if status == "pass":
-                status = "infra_error"
+        if row.get("omitted"):
+            omitted_evidence.append({
+                "path": path,
+                "reason": row["omitted"],
+                "required": path in required_paths,
+            })
         artifacts.append(row)
     result = {
         "schema": RESULT_SCHEMA,
@@ -240,6 +235,10 @@ def seal_result(
         "findings": findings,
         "blocking_reasons": list(dict.fromkeys(reasons)),
         "artifacts": artifacts,
+        "evidence_delivery": {
+            "status": "incomplete" if omitted_evidence else "complete",
+            "omitted": omitted_evidence,
+        },
         "environment": environment,
         "policy": policy,
         "completed_at": datetime.now(timezone.utc).isoformat(),

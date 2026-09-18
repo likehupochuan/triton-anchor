@@ -127,13 +127,15 @@
       const performance = checks.filter(check => ['compile_time','pass_profile','ir_serialization'].includes(check.id))
         .map(check => ({...check, tool: check.tool_id, summary: check.summary || '测量和比较结果见所选报告。'}));
       const blockers = array(result.blocking_reasons);
+      const evidence_delivery = result.evidence_delivery && typeof result.evidence_delivery === 'object'
+        ? result.evidence_delivery : {status:'complete',omitted:[]};
       return {...task, task_id: task.task_id || result.task?.task_id || '', run_id: result.run_id || 'pending',
         completed_at: result.completed_at || Math.max(0,...checks.map(c => timestamp(c.finished_at))) / 1000 || task.captured_at,
         is_current: !item.historical && latest.get(subject(task)) === task.task_id, historical:!!item.historical, conclusion, local_conclusion: status(result.status || local),
         artifacts, checks, evidence, performance,
         policy: {...(result.policy || {}), docs_only: result.policy?.impact?.level === 'non_executable',
                  manual_full: task.full, changed_paths: array(result.policy?.changes).map(c => c.path)},
-        blocking_reasons: blockers,
+        blocking_reasons: blockers, evidence_delivery,
         ai_review: {summary: result.summary,
           ...Object.fromEntries(['pr_info','architecture','intent'].filter(kind => reviews[kind])
             .map(kind => [kind, {...reviews[kind], status: status(reviews[kind].status)}])),

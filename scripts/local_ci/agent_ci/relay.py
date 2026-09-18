@@ -35,12 +35,13 @@ class GitRelay:
         results_branch: str = "local-ci-results",
     ):
         parsed = urllib.parse.urlsplit(url)
+        local_path = Path(url).exists()
         if parsed.scheme == "https":
             if parsed.hostname != "gitee.com" or parsed.username or parsed.password:
                 raise ContractError(
                     "Production relay must be a credential-free HTTPS Gitee URL"
                 )
-        elif not allow_local or parsed.scheme not in {"", "file"}:
+        elif not allow_local or (not local_path and parsed.scheme not in {"", "file"}):
             raise ContractError(
                 "Local relay transports are only allowed in explicit simulations"
             )

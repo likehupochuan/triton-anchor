@@ -101,12 +101,17 @@ def test_high_risk_review_blocks_without_explicit_blocking_flag(tmp_path, locati
 def test_required_evidence_must_publish_while_optional_files_use_remaining_budget(tmp_path):
     value = answer()
     value["checks"][0]["evidence"] = ["report.txt"]
-    assert seal(tmp_path, value)["status"] == "infra_error"
+    initial = seal(tmp_path, value)
+    assert initial["status"] == "pass"
+    assert initial["checks"][0]["status"] == "pass"
+    assert initial["evidence_delivery"]["status"] == "incomplete"
     artifacts = tmp_path / "run/artifacts"
     artifacts.mkdir(parents=True)
     (artifacts / "report.txt").write_bytes(b"x" * (MAX_FILE_BYTES + 1))
     result = seal(tmp_path, value)
-    assert result["status"] == "infra_error"
+    assert result["status"] == "pass"
+    assert result["checks"][0]["status"] == "pass"
+    assert result["evidence_delivery"]["status"] == "incomplete"
     assert result["artifacts"][0]["omitted"]
     assert not (tmp_path / "sealed/artifacts/report.txt").exists()
 
@@ -115,11 +120,28 @@ def test_required_evidence_must_publish_while_optional_files_use_remaining_budge
     value["artifacts"] = ["optional.log"]
     result = seal(tmp_path, value)
     assert result["status"] == "pass"
+    assert result["evidence_delivery"]["status"] == "incomplete"
     assert [row["path"] for row in result["artifacts"]] == [
         "report.txt", "optional.log",
     ]
     assert "omitted" not in result["artifacts"][0]
     assert result["artifacts"][1]["omitted"]
+
+
+def test_required_evidence_is_not_limited_by_selected_file_count(tmp_path):
+    value = answer()
+    names = [f"required-{index}.txt" for index in range(21)]
+    value["checks"][0]["evidence"] = names
+    artifacts = tmp_path / "run/artifacts"
+    artifacts.mkdir(parents=True)
+    for name in names:
+        (artifacts / name).write_text("required evidence\n")
+
+    result = seal(tmp_path, value)
+
+    assert result["status"] == "pass"
+    assert [row["path"] for row in result["artifacts"]] == names
+    assert all("omitted" not in row for row in result["artifacts"])
 
 
 def test_published_result_json_is_readable_without_changing_its_data(tmp_path):

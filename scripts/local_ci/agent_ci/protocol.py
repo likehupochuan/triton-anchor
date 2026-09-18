@@ -258,6 +258,13 @@ def validate_result(result: dict, expected_task: dict | None = None) -> dict:
     for name in ("policy", "environment"):
         if not isinstance(result.get(name), dict):
             raise ContractError(f"Result {name} must be an object")
+    delivery = result.get("evidence_delivery")
+    if delivery is not None and (
+        not isinstance(delivery, dict)
+        or delivery.get("status") not in {"complete", "incomplete"}
+        or not isinstance(delivery.get("omitted", []), list)
+    ):
+        raise ContractError("Invalid evidence delivery status")
     for name, identity in (("checks", "tool_id"), ("reviews", "kind")):
         for row in result[name]:
             if (

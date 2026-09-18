@@ -82,12 +82,17 @@ function renderBlockers(parent, run) {
   {
     const selected=groups;
     const box=el('section','ci-blockers');
-    box.append(el('h3','','阻塞原因'));
+    box.append(el('h3','','整体阻塞结论'));
     const list=el('ul'),visible=[];
     for(const group of selected){
-      // Generic incompletion is secondary when an actual cause is available.
-      const reasons=group.reasons.filter(item=>item.source!=='展示说明'||selected.every(g=>g.reasons.every(r=>r.source==='展示说明')));
-      visible.push(...reasons.map(item=>shortBlocker(item,group.id)));
+      // Show one root cause per category. Check rows and generic incomplete
+      // impacts remain available in the detail table.
+      const direct=group.reasons.filter(item=>!String(item.source||'').startsWith('检查：') && item.source!=='展示说明');
+      const reasons=direct.length ? direct : group.reasons.filter(item=>item.source!=='展示说明');
+      if(reasons.length) {
+        const summary=shortBlocker(reasons[0],group.id);
+        visible.push(reasons.length>1 ? `${summary}（另有 ${reasons.length-1} 项同类原因，详见执行报告）` : summary);
+      } else if(group.impacts.length) visible.push('部分必检项未完成，具体原因见执行报告');
     }
     for(const text of new Set(visible))list.append(el('li','',text));
     box.append(list);
@@ -101,6 +106,7 @@ function renderDetail(run) {
   const head=el('div','ci-detail-head'); const heading=el('div'); heading.append(el('p','eyebrow','验证与审查'),el('h2','',title(run))); head.append(heading,badge(run.conclusion));root.append(head);
   const identity=el('div','ci-identity'); identity.append(el('code','',displaySha(run)),el('span','',date(run.completed_at))); root.append(identity);
   facts(root,[['本地验证',labels[run.local_conclusion]||run.local_conclusion],['环境',run.environment.profile||'未记录']]);
+  if(run.evidence_delivery?.status==='incomplete')root.append(el('p','ci-notice',run.local_conclusion==='passed'?'执行通过，证据发布不完整。':'证据发布不完整，不改变执行结论。'));
   if(run.receiver_message)root.append(el('p','ci-notice',run.receiver_message));
   const links=el('div','ci-links'); for(const [label,url] of [['查看完整结果',run.result_url],['查看执行产物',run.artifacts_url]]) { const a=link(label,url); if(a)links.append(a); }root.append(links);
   const metrics=el('div','ci-metrics'); const checks=arr(run.checks); const values=[[checks.filter(c=>c.required).length,'最低必检项'],[checks.filter(c=>c.status==='passed').length,'已通过检查'],[checks.filter(c=>['skipped','not_selected','not_applicable'].includes(c.status)).length,'未选择 / 未执行 / 不适用'],[arr(run.artifacts).filter(artifact=>!artifact.omitted).length,'所选证据文件']];

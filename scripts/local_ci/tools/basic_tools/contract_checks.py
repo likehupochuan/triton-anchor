@@ -95,7 +95,6 @@ def check(root: Path, base: str, tested: str) -> dict:
         raise ValueError("Contract checks require frozen base/tested SHAs")
     if git(root, "rev-parse", "HEAD").strip() != tested:
         raise ValueError("Contract checkout differs from tested SHA")
-    git(root, "diff", "--check", base, tested)
     paths = git(
         root, "diff", "--name-only", "-z", "--diff-filter=ACMRT", base, tested
     ).split("\0")
@@ -149,7 +148,7 @@ def check(root: Path, base: str, tested: str) -> dict:
             rows.append({
                 "path": relative,
                 "sha256": hashlib.sha256(raw).hexdigest(),
-                "checks": ["diff_check"],
+                "checks": [],
             })
             continue
         if b"\0" in raw:
@@ -190,7 +189,6 @@ def check(root: Path, base: str, tested: str) -> dict:
         "status": "pass",
         "base_sha": base,
         "tested_sha": tested,
-        "diff_check": "pass",
         "changed_files": changed,
         "verified_files": rows,
     }

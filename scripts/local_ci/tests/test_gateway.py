@@ -474,7 +474,7 @@ README only
         )
         self.assertEqual([row["task_id"] for row in published], [self.task["task_id"]])
         self.assertEqual(self.gh.statuses[-1][1], "success")
-        snapshot = json.loads((self.root / "dashboard/tasks.json").read_text())
+        snapshot = json.loads((self.root / "dashboard/tasks.json").read_text(encoding="utf-8"))
         self.assertEqual(
             [row["task"]["task_id"] for row in snapshot["tasks"]],
             [self.task["task_id"]],
@@ -655,7 +655,7 @@ README only
                 g.collect_results(self.gh, control, results, self.root / "dashboard"),
                 [],
             )
-        snapshot = json.loads((self.root / "dashboard/tasks.json").read_text())
+        snapshot = json.loads((self.root / "dashboard/tasks.json").read_text(encoding="utf-8"))
         self.assertEqual(snapshot["tasks"][0]["status"], "pass")
         self.assertIn("receiver_error", snapshot["tasks"][0])
         self.assertEqual(self.gh.statuses[-1][1], "success")
@@ -990,7 +990,7 @@ README only
     def test_push_checks_use_tested_commit_and_cannot_overwrite_a_new_owner(self):
         task = {**self.task, "pr_number": 0, "tested_sha": self.head, "event_kind": "push"}
         gh = g.GitHub(g.REPOSITORY, token="fixture")
-        runs = [github_check({"name": "github/basic", "status": "queued",
+        runs = [github_check({"name": g.CHECK_NAMES["basic"], "status": "queued",
                               "external_id": f"triton-anchor-local-ci:basic:{task['task_id']}",
                               "output": {"summary": "<!-- local-ci-workflow:1234 -->"}}, 1)]
         writes = []
@@ -1080,10 +1080,19 @@ README only
         result = self.result()
         result["checks"].append({"tool_id": "frontend_build", "status": "not_selected", "summary": "无需构建"})
         rendered = g.result_comment(result)
-        details = rendered.split("### 查看审查详情", 1)[1].split("### 合入阻塞与重要限制", 1)[0]
+        details = rendered.split("### 查看审查详情", 1)[1].split("### 限制说明", 1)[0]
         self.assertIn("CI 流程验证 | 通过", details)
         self.assertNotIn("前端构建", details)
         self.assertLess(details.index("</details>"), details.index("在 Dashboard 查看本次任务详情"))
+
+    def test_result_comment_separates_evidence_delivery_from_execution(self):
+        result = self.result()
+        result["evidence_delivery"] = {
+            "status": "incomplete", "omitted": [{"path": "report.txt"}]
+        }
+        rendered = g.result_comment(result)
+        self.assertIn("执行通过，证据发布不完整", rendered)
+        self.assertNotIn("环境或执行异常", rendered)
 
     def test_dashboard_history_restores_modern_and_legacy_data_without_gate_writes(self):
         from types import SimpleNamespace
@@ -1162,7 +1171,7 @@ README only
     def test_pr_checks_and_summary_are_published_on_head_sha(self):
         client = g.GitHub(g.REPOSITORY, token="fixture")
         snapshots = {self.head: [
-            {"context": "local-ci/summary", "state": "pending", "creator": {"login": "github-actions[bot]"}},
+            {"context": g.SUMMARY_CONTEXT, "state": "pending", "creator": {"login": "github-actions[bot]"}},
             {"context": "local-ci/sophgo-cmodel", "state": "error", "creator": {"login": "github-actions[bot]"}},
             {"context": "external/build", "state": "failure", "creator": {"login": "another-bot"}},
         ], self.tested: []}
@@ -1201,7 +1210,7 @@ README only
         def request(path, method="GET", data=None):
             if method == "GET":
                 if "/check-runs?" in path:
-                    if path.startswith(f"commits/{self.tested}/") and "check_name=github%2Fbasic&" in path:
+                    if path.startswith(f"commits/{self.tested}/") and f"check_name={g.quote(g.CHECK_NAMES['basic'])}&" in path:
                         return {"check_runs": [{
                             "id": 42, "name": g.CHECK_NAMES["basic"], "status": "queued",
                             "app": {"slug": "github-actions"},
@@ -1249,7 +1258,7 @@ README only
         ]
         result["findings"] = [{"summary": "架构契约遭到破坏", "blocking": True}]
         rendered = g.result_comment(result)
-        limitations = rendered.split("### 合入阻塞与重要限制", 1)[1]
+        limitations = rendered.split("### 限制说明", 1)[1]
         for reason in [*result["blocking_reasons"], result["findings"][0]["summary"]]:
             self.assertIn(g.feedback_text(reason), limitations)
 
@@ -1270,24 +1279,24 @@ README only
                 patch.object(g, "load_task", return_value=self.task), patch.object(g, "output"), \
                 patch.dict(g.os.environ, {"GITHUB_STEP_SUMMARY": ""}):
             g.begin_checks(self.gh, self.task)
-            self.assertEqual(events, [("basic", "queued")])
+            self.assertEqual(events[:2], [("basic", "queued"), ("summary", "pending")])
             self.assertEqual(check.call_args.kwargs, {"restart": True})
             for stage, visible in (("basic", ["basic", "api"]),
                                    ("api", ["basic", "api", "security"]),
                                    ("security", ["basic", "api", "security"])):
                 self.assertTrue(g.sync_preflight(self.gh, self.task, {stage: "success"}))
-                self.assertEqual(list(dict.fromkeys(key for key, _ in events)), visible)
+                self.assertEqual(list(dict.fromkeys(key for key, _ in events if key != "summary")), visible)
             with patch.object(g.sys, "argv", ["gateway.py", "card", "--stages", json.dumps(stages)]):
                 self.assertEqual(g.main(), 0)
             self.assertEqual(events[-1], ("approve", "in_progress"))
-            self.assertEqual(list(dict.fromkeys(key for key, _ in events)), ["basic", "api", "security", "approve"])
+            self.assertEqual(list(dict.fromkeys(key for key, _ in events if key != "summary")), ["basic", "api", "security", "approve"])
             with patch.object(g.sys, "argv", ["gateway.py", "approval"]):
                 self.assertEqual(g.main(), 0)
             self.assertEqual(events[-1], ("approve", "completed"))
             g.enqueue(self.task, self.gh, control, self.source)
             self.assertEqual(events[-3:], [("dispatch", "in_progress"), ("summary", "pending"), ("dispatch", "completed")])
-            self.assertEqual(list(dict.fromkeys(key for key, _ in events)),
-                             ["basic", "api", "security", "approve", "dispatch", "summary"])
+            self.assertEqual(list(dict.fromkeys(key for key, _ in events if key != "summary")),
+                             ["basic", "api", "security", "approve", "dispatch"])
 
     def test_same_task_receiver_waits_for_successful_dispatch(self):
         control = self.store(g.CONTROL_BRANCH)
@@ -1313,7 +1322,7 @@ README only
         url = f"https://github.com/{g.REPOSITORY}/runs/"
         start = {"id": 20, "details_url": url + "20", "started_at": "2026-09-17T00:10:00Z",
                  "output": {"summary": "<!-- local-ci-workflow:200 -->"}}
-        dispatch = {"id": 10, "name": "local-ci/dispatch", "status": "completed", "conclusion": "success",
+        dispatch = {"id": 10, "name": g.ALL_CHECK_NAMES["dispatch"], "status": "completed", "conclusion": "success",
                     "external_id": f"triton-anchor-local-ci:dispatch:{self.task['task_id']}",
                     "details_url": url + "10", "app": {"slug": "github-actions"}}
         for completed_at, run_id, current in (
@@ -1371,7 +1380,7 @@ README only
         result = self.result()
         results.put({f"runs/{self.task['task_id']}/{result['run_id']}/result.json": result})
         gh = g.GitHub(g.REPOSITORY, token="fixture")
-        newer = {"id": 12, "name": "github/basic", "status": "queued",
+        newer = {"id": 12, "name": g.CHECK_NAMES["basic"], "status": "queued",
                  "external_id": "triton-anchor-local-ci:basic:new-task",
                  "app": {"slug": "github-actions"}}
         before = len(self.gh.statuses)
@@ -1418,7 +1427,7 @@ README only
             if path == "pulls/7":
                 return {**self.gh.pull, "state": "closed"}
             if "/statuses?" in path:
-                return [{"context": "local-ci/summary", "state": "pending"}]
+                return [{"context": g.SUMMARY_CONTEXT, "state": "pending"}]
             if "/check-runs?" in path:
                 return {"check_runs": [pending, completed]}
             raise AssertionError(path)

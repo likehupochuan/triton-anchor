@@ -193,6 +193,13 @@ test('omitted files and unsafe URLs are not clickable', () => {
   assert.deepEqual(data.runs[0].artifacts.map(a=>a.url),['','https://gitee.com/report','']);
 });
 
+test('evidence delivery warnings do not change a passing execution result', () => {
+  const run = normalize({schema:'triton-anchor-dashboard',tasks:[{task:task('a','2026-09-10'),status:'pass',result:{status:'pass',evidence_delivery:{status:'incomplete',omitted:[{path:'report.txt'}]}}}]}).runs[0];
+  assert.equal(run.conclusion,'success');
+  assert.equal(run.local_conclusion,'passed');
+  assert.equal(run.evidence_delivery.status,'incomplete');
+});
+
 test('dashboard preserves not-selected, skipped, and not-applicable as distinct states', () => {
   const run = normalize({schema:'triton-anchor-dashboard',tasks:[{task:task('a','2026-09-10'),result:{checks:[
     {tool_id:'frontend_build',status:'not_selected'},
@@ -427,7 +434,7 @@ test('blockers render one concise section without duplicate reviews or expandabl
   assert.ok(!rendered.some(node=>node.tag==='img'));
   const visible = node => [node,...(node.tag==='details'?[]:node.children.flatMap(visible))];
   const mainText=visible(root).map(node=>node.textContent).join('\n');
-  assert.ok(mainText.includes('阻塞原因'));
+  assert.ok(mainText.includes('整体阻塞结论'));
   assert.ok(mainText.includes('控制版本不匹配'));
   assert.ok(!mainText.includes('架构契约审查尚未完成'));
   assert.ok(!mainText.includes('必要审查未通过'));
@@ -440,7 +447,7 @@ test('blockers render one concise section without duplicate reviews or expandabl
   ],checks:[{tool_id:'frontend_tests',status:'fail',summary:'三个测试失败'}],
   blocking_reasons:['最低必检未通过：frontend_tests','额外审查细节不应重复展示']});
   vm.runInNewContext('renderBlockers(root,run);',context);
-  assert.deepEqual(mixedRoot.children.map(box=>box.children[0].textContent),['阻塞原因']);
+  assert.deepEqual(mixedRoot.children.map(box=>box.children[0].textContent),['整体阻塞结论']);
   const mixedText=visible(mixedRoot.children[0]).map(node=>node.textContent);
   assert.ok(!flatten(mixedRoot).some(node=>node.tag==='h4'));
   assert.ok(!mixedText.includes('审查阻塞'));
@@ -450,7 +457,7 @@ test('blockers render one concise section without duplicate reviews or expandabl
   assert.ok(!mixedText.includes('额外审查细节不应重复展示'));
   vm.runInNewContext('renderDetail(run);',context);
   const detail=flatten(document.getElementById('taskDetail'));
-  assert.equal(detail.filter(node=>node.tag==='h3'&&node.textContent==='阻塞原因').length,1);
+  assert.equal(detail.filter(node=>node.tag==='h3'&&node.textContent==='整体阻塞结论').length,1);
   assert.ok(!detail.some(node=>node.tag==='h3'&&node.textContent==='Codex 审查与定向验证'));
   assert.ok(!detail.some(node=>node.textContent==='查看详情'));
   context.run=errorRun({status:'pass',findings:[
