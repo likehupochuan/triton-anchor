@@ -1,15 +1,17 @@
 name: CI Request
 run-name: >-
-  ${{ github.event_name == 'pull_request_target' && format('PR #{0}', github.event.pull_request.number) || format('Branch {0}', github.ref_name) }} | request
+  ${{ github.event_name == 'pull_request_target' && format('PR #{0}', github.event.pull_request.number) || format('Branch {0}', inputs.source_branch) }} | request
 on:
   pull_request_target:
-    branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, edited, closed, converted_to_draft, labeled, unlabeled]
-  push:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      source_branch: {type: string, required: true, description: 'Branch to validate'}
+      requested_sha: {type: string, default: '', description: 'Optional exact branch HEAD SHA'}
 permissions: {}
 concurrency:
-  group: local-ci-request-${{ github.event.pull_request.number || github.ref_name }}
+  group: >-
+    local-ci-request-${{ github.event_name == 'pull_request_target' && format('pr-{0}', github.event.pull_request.number) || format('branch-{0}', inputs.source_branch) }}
   cancel-in-progress: true
 jobs:
   route:
@@ -20,16 +22,50 @@ jobs:
     steps:
       - name: Route to local-ci-unified
         uses: actions/github-script@v7
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          REQUESTED_SHA: ${{ inputs.requested_sha }}
         with:
           script: |
             const {owner, repo} = context.repo;
             const pull = context.payload.pull_request;
-            const branch = pull?.base.ref || context.ref.replace('refs/heads/', '');
+            const manual = context.eventName === 'workflow_dispatch';
+            const shaPattern = /^[0-9a-f]{40}$/i;
+            let branch = pull?.base.ref || '';
+            let requestedSha = pull?.head.sha || '';
+            let action = context.payload.action || '';
+            if (manual) {
+              const {data: repository} = await github.rest.repos.get({owner, repo});
+              const runRef = context.ref.replace('refs/heads/', '');
+              if (runRef !== repository.default_branch) {
+                throw new Error(`Manual branch routing must run on the default branch ${repository.default_branch}`);
+              }
+              const {data: permission} = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner, repo, username: context.actor
+              });
+              if (!['write', 'maintain', 'admin'].includes(permission.permission)) {
+                throw new Error(`Actor ${context.actor} cannot route a manual branch task`);
+              }
+              branch = process.env.SOURCE_BRANCH.trim();
+              if (!branch) throw new Error('source_branch is required');
+              const {data: source} = await github.rest.repos.getBranch({owner, repo, branch});
+              requestedSha = source.commit.sha;
+              const expected = process.env.REQUESTED_SHA.trim();
+              if (expected && (!shaPattern.test(expected) || expected.toLowerCase() !== requestedSha.toLowerCase())) {
+                throw new Error(`Requested SHA does not match the current head of ${branch}`);
+              }
+              action = 'manual';
+            }
+            if (!pull && !manual) throw new Error(`Unsupported event ${context.eventName}`);
+            if (!branch || !shaPattern.test(requestedSha)) throw new Error('Invalid branch routing request');
             // When the full Gateway moves to main, this is the only migration switch.
             const controlRef = 'local-ci-unified';
             const {data: release} = await github.rest.repos.getBranch({owner, repo, branch: controlRef});
             const revision = release.commit.sha;
-            const requestedSha = pull?.head.sha || context.sha;
+            if (manual) {
+              const {data: latest} = await github.rest.repos.getBranch({owner, repo, branch});
+              if (latest.commit.sha !== requestedSha) throw new Error(`Branch ${branch} changed while routing`);
+            }
             const subject = pull ? `PR #${pull.number}` : `Branch ${branch}`;
             await github.rest.actions.createWorkflowDispatch({
               owner, repo, workflow_id: 'ci-gateway.yml', ref: controlRef,
@@ -40,7 +76,7 @@ jobs:
                 requested_sha: requestedSha,
                 run_title: `${subject} | h:${requestedSha.slice(0, 7)}`,
                 worker_revision_sha: revision,
-                action: pull ? context.payload.action || '' : 'push',
+                action,
                 full: 'false'
               }
             });
