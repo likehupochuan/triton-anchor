@@ -1,10 +1,11 @@
-/* Public Gitee health snapshots; independent of task-result publication. */
+/* Public Gitee health snapshots with a Cloudflare cache fallback. */
 (function () {
   const source = {
     repository: 'likehupochuan/triton-anchor-worker-health',
     worker: 'jiwang-ci-race-1',
     staleSeconds: 1200,
     refreshMs: 300000,
+    cacheUrl: 'https://local-ci-alert.2272640910.workers.dev/health',
   };
   const incidents = {
     poller_unavailable: ['服务异常', 'Worker 已停止或心跳异常'],
@@ -141,6 +142,49 @@
       }));
   }
 
+  async function readHealth(retryAt = 0, previous = {}) {
+    const cooling = Date.now() < retryAt;
+    let results = cooling
+      ? Array.from({length: 3}, () => ({status: 'rejected', reason: new Error('Gitee 限流冷却中')}))
+      : await Promise.allSettled([
+        readSnapshot('worker-health.json', 'snapshot/' + source.worker, 'triton-anchor-worker-health'),
+        readSnapshot('watchdog.json', 'watchdog', 'triton-anchor-local-ci-watchdog'),
+        readAlerts(),
+      ]);
+    if (results.some(result => result.status === 'rejected' && result.reason?.rateLimited))
+      retryAt = Date.now() + 15 * 60 * 1000;
+    let notice = '';
+    if (results.some(result => result.status === 'rejected')) {
+      try {
+        const response = await fetch(source.cacheUrl, {credentials: 'omit', signal: AbortSignal.timeout(15000)});
+        if (!response.ok) throw new Error('Cloudflare 备用数据读取失败（HTTP ' + response.status + '）');
+        const cache = await response.json();
+        if (cache.schema !== 'triton-anchor-worker-health-cache' || cache.worker_id !== source.worker
+          || !Number.isFinite(Date.parse(cache.updated_at))) throw new Error('Cloudflare 缓存格式或服务器身份不匹配');
+        const stale = !fresh(cache.updated_at, Date.now());
+        const names = ['worker', 'watchdog', 'alerts'], used = [];
+        results = results.map((result, index) => {
+          const name = names[index], value = cache[name];
+          if (result.status === 'fulfilled' || value == null) return result;
+          used.push(['健康快照', 'watchdog', '告警记录'][index]);
+          const timestamp = index === 0 ? 'collected_at' : 'updated_at';
+          if (index < 2 && Date.parse(value[timestamp]) < Date.parse(previous[name]?.[timestamp]))
+            return {status: 'fulfilled', value: previous[name], error: '备用缓存早于已读取的快照，保留较新数据，当前状态待确认'};
+          return {status: 'fulfilled', value,
+            error: cache.errors?.[name] || (stale ? 'Cloudflare 缓存已过期，当前状态无法确认' : '')};
+        });
+        notice = used.length
+          ? 'Gitee 读取未成功，已使用 Cloudflare 备用缓存：' + used.join('、') + '。缓存更新：' + date(cache.updated_at)
+          : 'Cloudflare 尚无可用的备用数据。';
+      } catch (error) {
+        notice = error instanceof TypeError || ['TimeoutError', 'AbortError'].includes(error.name)
+          ? 'Cloudflare 备用数据也无法读取（网络、跨域或请求超时）；保留最后读取的数据，当前状态待确认。'
+          : error.message;
+      }
+    }
+    return {results, retryAt, notice};
+  }
+
   function mount(root) {
     const node = (tag, className, text) => { const item = document.createElement(tag); if (className) item.className = className; if (text) item.textContent = text; return item; };
     const heading = node('div', 'health-heading'), title = node('div');
@@ -150,15 +194,15 @@
     const content = node('div'); content.setAttribute('aria-live', 'polite');
     root.append(heading, content);
     let worker = null, watchdog = null, workerError = '', watchdogError = '', loading = false, renderedState = '';
-    let alerts = [], alertsError = '', retryAt = 0;
+    let alerts = [], alertsError = '', retryAt = 0, sourceNotice = '';
 
     function render() {
       const cooling = Date.now() < retryAt;
-      refresh.disabled = loading || cooling;
-      refresh.textContent = loading ? '读取中…' : cooling ? '限流中，暂停刷新' : '刷新健康状态';
+      refresh.disabled = loading;
+      refresh.textContent = loading ? '读取中…' : cooling ? '刷新备用数据' : '刷新健康状态';
       if (loading && !worker) { renderedState = ''; content.replaceChildren(node('p', 'health-muted', '正在读取健康数据…')); return; }
       const model = assess(worker, watchdog, {workerError, watchdogError});
-      const viewState = JSON.stringify([model, worker?.collected_at, watchdog?.updated_at, alerts, alertsError]);
+      const viewState = JSON.stringify([model, worker?.collected_at, watchdog?.updated_at, alerts, alertsError, sourceNotice, cooling]);
       if (viewState === renderedState) return;
       renderedState = viewState;
       content.replaceChildren();
@@ -166,6 +210,8 @@
       summary.append(node('strong', 'health-badge ' + model.tone, model.title));
       summary.append(node('span', 'health-muted', '采集：' + date(worker?.collected_at) + ' · Worker 心跳：' + date(worker?.poller?.heartbeat_at)));
       content.append(summary);
+      if (sourceNotice) content.append(node('p', 'health-muted', sourceNotice));
+      if (cooling) content.append(node('p', 'health-muted', 'Gitee 被限流，冷却期间只读取 Cloudflare；' + date(new Date(retryAt).toISOString()) + ' 后重试 Gitee。'));
       const cards = node('div', 'health-cards');
       for (const card of model.cards) {
         const item = node('div', 'health-card');
@@ -243,24 +289,19 @@
     }
 
     async function refreshHealth() {
-      if (loading || Date.now() < retryAt) return;
+      if (loading) return;
       loading = true;
       render();
-      const results = await Promise.allSettled([
-        readSnapshot('worker-health.json', 'snapshot/' + source.worker, 'triton-anchor-worker-health'),
-        readSnapshot('watchdog.json', 'watchdog', 'triton-anchor-local-ci-watchdog'),
-        readAlerts(),
-      ]);
-      if (results.some(result => result.status === 'rejected' && result.reason?.rateLimited))
-        retryAt = Date.now() + 15 * 60 * 1000;
-      const error = result => result.status === 'fulfilled' ? '' : result.reason instanceof TypeError || ['TimeoutError', 'AbortError'].includes(result.reason?.name)
+      const response = await readHealth(retryAt, {worker, watchdog}), results = response.results;
+      retryAt = response.retryAt; sourceNotice = response.notice;
+      const error = result => result.status === 'fulfilled' ? result.error || '' : result.reason instanceof TypeError || ['TimeoutError', 'AbortError'].includes(result.reason?.name)
         ? '浏览器未能读取 Gitee（可能是网络、跨域限制或请求超时），当前状态无法确认'
         : result.reason?.message || '健康数据读取失败';
       workerError = error(results[0]); watchdogError = error(results[1]);
-      if (!workerError) worker = results[0].value;
-      if (!watchdogError) watchdog = results[1].value;
+      if (results[0].status === 'fulfilled') worker = results[0].value;
+      if (results[1].status === 'fulfilled') watchdog = results[1].value;
       alertsError = error(results[2]);
-      if (!alertsError) alerts = results[2].value;
+      if (results[2].status === 'fulfilled') alerts = results[2].value;
       loading = false; render();
     }
     refresh.addEventListener('click', refreshHealth);
@@ -270,7 +311,7 @@
     setInterval(() => { if (!document.hidden) render(); }, 60000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
   }
-  if (typeof module !== 'undefined') module.exports = {assess, readSnapshot, readAlerts, source};
+  if (typeof module !== 'undefined') module.exports = {assess, readSnapshot, readAlerts, readHealth, source};
   if (typeof document !== 'undefined') {
     const root = document.getElementById('serverHealth');
     if (root) mount(root);

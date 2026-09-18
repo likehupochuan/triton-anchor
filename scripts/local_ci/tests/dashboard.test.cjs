@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { normalize, business, blockerGroups } = require('../../../dashboard/data.js');
-const { assess: assessHealth, readSnapshot, readAlerts, source: healthSource } = require('../../../dashboard/health.js');
+const { assess: assessHealth, readSnapshot, readAlerts, readHealth, source: healthSource } = require('../../../dashboard/health.js');
 const task = (id, date) => ({task_id:id, repository:'example/repo',pr_number:7,target_branch:'main',head_sha:('f'+id).repeat(20),tested_sha:id.repeat(40),captured_at:date});
 
 const healthNow = Date.parse('2026-09-17T10:00:00Z');
@@ -104,6 +104,76 @@ test('health alerts select this worker only and link to the health repository wi
   const alerts = await readAlerts();
   assert.deepEqual(alerts.map(row=>row.state), ['open','closed']);
   assert.equal(alerts[0].url, 'https://gitee.com/' + healthSource.repository + '/issues/IABC01');
+});
+
+test('health uses Gitee first, falls back once, and observes rate-limit cooldown', async t => {
+  let now=healthNow, limited=false;
+  const calls=[], worker=healthyWorker(), watchdog={...healthWatchdog(worker),schema:'triton-anchor-local-ci-watchdog'};
+  const cache={schema:'triton-anchor-worker-health-cache',worker_id:healthSource.worker,
+    updated_at:new Date(now).toISOString(),worker,watchdog,alerts:[],errors:{}};
+  t.mock.method(Date,'now',()=>now);
+  t.mock.method(global,'fetch',async (url,options)=>{
+    calls.push(url); assert.equal(options.credentials,'omit');
+    if(url===healthSource.cacheUrl) return {ok:true,json:async()=>cache};
+    if(limited) return {ok:false,status:403,text:async()=>'403 Forbidden (Rate Limit Exceeded)'};
+    return {ok:true,json:async()=>url.includes('/issues?') ? [] : url.includes('worker-health.json') ? worker : watchdog};
+  });
+  let result=await readHealth();
+  assert.equal(result.notice,'');
+  assert.equal(calls.length,3); assert.ok(!calls.includes(healthSource.cacheUrl));
+  limited=true; calls.length=0;
+  result=await readHealth();
+  assert.equal(calls.length,4); assert.equal(calls.at(-1),healthSource.cacheUrl);
+  assert.equal(result.retryAt,now+900000); assert.match(result.notice,/Cloudflare/);
+  assert.equal(result.results[0].value.collected_at,worker.collected_at);
+  calls.length=0; now+=300000;
+  result=await readHealth(result.retryAt);
+  assert.deepEqual(calls,[healthSource.cacheUrl]);
+  limited=false; calls.length=0; now+=600001;
+  result=await readHealth(result.retryAt);
+  assert.equal(calls.length,3); assert.equal(result.notice,'');
+});
+
+test('cache only fills failed reads and never presents stale or failed collection as current', async t => {
+  const worker=healthyWorker(), watchdog={...healthWatchdog(worker),schema:'triton-anchor-local-ci-watchdog'};
+  const cache={schema:'triton-anchor-worker-health-cache',worker_id:healthSource.worker,
+    updated_at:new Date(healthNow-1201000).toISOString(),worker:{...worker,collected_at:'2026-09-17T09:00:00Z'},
+    watchdog,alerts:[],errors:{alerts:'Cloudflare 未能更新告警记录'}};
+  t.mock.method(Date,'now',()=>healthNow);
+  t.mock.method(global,'fetch',async url=>{
+    if(url===healthSource.cacheUrl) return {ok:true,json:async()=>cache};
+    if(url.includes('worker-health.json')) return {ok:true,json:async()=>worker};
+    throw new TypeError('Network unavailable');
+  });
+  let result=await readHealth();
+  assert.equal(result.results[0].value,worker);
+  assert.match(result.results[1].error,/缓存已过期/);
+  assert.match(result.results[2].error,/未能更新告警/);
+  result=await readHealth(healthNow+900000);
+  const model=assessHealth(result.results[0].value,result.results[1].value,
+    {now:healthNow,workerError:result.results[0].error,watchdogError:result.results[1].error});
+  assert.equal(model.current,false);
+  assert.ok(model.cards.every(card=>card.tone==='muted'));
+  cache.updated_at=new Date(healthNow).toISOString();
+  const newer={...worker,poller:{...worker.poller,alive:false}};
+  const newerWatchdog={...watchdog,updated_at:new Date(healthNow+1000).toISOString()};
+  result=await readHealth(healthNow+900000,{worker:newer,watchdog:newerWatchdog});
+  assert.equal(result.results[0].value,newer);
+  assert.equal(result.results[1].value,newerWatchdog);
+  assert.match(result.results[0].error,/保留较新数据/);
+});
+
+test('failure of both health sources leaves existing data untouched and is not a server fault', async t => {
+  const calls=[];
+  t.mock.method(global,'fetch',async url=>{calls.push(url);throw new TypeError('offline');});
+  const result=await readHealth();
+  assert.equal(calls.length,4);
+  assert.ok(result.results.every(row=>row.status==='rejected' && row.value===undefined));
+  assert.match(result.notice,/保留最后读取的数据/);
+  const model=assessHealth(healthyWorker(),healthWatchdog(healthyWorker()),
+    {now:healthNow,workerError:result.notice,watchdogError:result.notice});
+  assert.equal(model.current,false);
+  assert.ok(!model.issues.some(row=>row.code==='poller_unavailable'));
 });
 
 test('old pass cannot override a newer pending or cancelled task', () => {

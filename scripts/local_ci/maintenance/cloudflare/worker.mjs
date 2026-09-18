@@ -10,6 +10,7 @@ const CONFIG = Object.freeze({
 
 const API = 'https://gitee.com/api/v5';
 const KEY = `local-ci-alert:${CONFIG.worker}`;
+const CACHE_KEY = `local-ci-health-cache:${CONFIG.worker}`;
 const MARKER = `<!-- ${KEY} -->`;
 const LABELS = Object.freeze({
   source_unreadable: '连续两次无法读取健康数据（不能据此判断服务器宕机）',
@@ -75,9 +76,9 @@ function faults(snapshot, previous, now) {
   return [...result].sort();
 }
 
-async function snapshot(fetcher, now) {
-  const ref = encodeURIComponent(`snapshot/${CONFIG.worker}`);
-  const response = await fetcher(`${API}/repos/${CONFIG.owner}/${CONFIG.repository}/contents/worker-health.json?ref=${ref}`, {
+async function readDocument(fetcher, filename, branch, schema) {
+  const ref = encodeURIComponent(branch);
+  const response = await fetcher(`${API}/repos/${CONFIG.owner}/${CONFIG.repository}/contents/${filename}?ref=${ref}`, {
     headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000),
   });
   if (!response.ok) throw new Error('Health data unavailable');
@@ -85,7 +86,13 @@ async function snapshot(fetcher, now) {
   if (envelope.encoding !== 'base64' || typeof envelope.content !== 'string') throw new Error('Invalid health document');
   const bytes = Uint8Array.from(atob(envelope.content.replace(/\s/g, '')), character => character.charCodeAt(0));
   const value = JSON.parse(new TextDecoder().decode(bytes));
-  if (value.schema !== 'triton-anchor-worker-health' || value.worker_id !== CONFIG.worker
+  if (value.schema !== schema) throw new Error('Invalid health document');
+  return value;
+}
+
+async function snapshot(fetcher, now) {
+  const value = await readDocument(fetcher, 'worker-health.json', `snapshot/${CONFIG.worker}`, 'triton-anchor-worker-health');
+  if (value.worker_id !== CONFIG.worker
       || !Number.isFinite(Date.parse(value.collected_at))
       || Date.parse(value.collected_at) > now + 60000) throw new Error('Invalid health identity');
   return value;
@@ -132,7 +139,7 @@ function resetIncident(state) {
   state.pending_close = null;
 }
 
-async function runMonitor(env, { fetcher = fetch, now = new Date() } = {}) {
+async function runMonitor(env, { fetcher, now, current }) {
   const state = await env.ALERT_STATE.get(KEY, 'json') || {
     first_seen: null, issue_number: null, signature: '', codes: [], read_failures: 0,
   };
@@ -146,13 +153,7 @@ async function runMonitor(env, { fetcher = fetch, now = new Date() } = {}) {
       await patch(issueBody(state, state.pending_close, true), { state: 'closed' });
       resetIncident(state);
     }
-    let current;
-    try {
-      current = await snapshot(fetcher, now.getTime());
-      state.read_failures = 0;
-    } catch {
-      state.read_failures += 1;
-    }
+    state.read_failures = current ? 0 : state.read_failures + 1;
     // Reconcile before deciding recovery as well: POST or KV acknowledgement may have been lost.
     if (!state.issue_number) {
       const existing = await findOpenIssue(fetcher, env.GITEE_TOKEN);
@@ -197,7 +198,59 @@ async function runMonitor(env, { fetcher = fetch, now = new Date() } = {}) {
   }
 }
 
+async function refreshCache(env, { fetcher, now, current }) {
+  const previous = await env.ALERT_STATE.get(CACHE_KEY, 'json');
+  const cache = {
+    schema: 'triton-anchor-worker-health-cache', worker_id: CONFIG.worker,
+    updated_at: now.toISOString(), worker: current || previous?.worker || null,
+    watchdog: previous?.watchdog || null, alerts: previous?.alerts || [],
+    errors: { worker: current ? '' : 'Cloudflare 未能读取 Gitee 健康快照', watchdog: '', alerts: '' },
+  };
+  const [watchdog, alerts] = await Promise.allSettled([
+    readDocument(fetcher, 'watchdog.json', 'watchdog', 'triton-anchor-local-ci-watchdog'),
+    issueRequest(fetcher, env.GITEE_TOKEN,
+      `/repos/${CONFIG.owner}/${CONFIG.repository}/issues?state=all&sort=updated&direction=desc&per_page=50`)
+      .then(rows => {
+        if (!Array.isArray(rows)) throw new Error('Invalid Issue list');
+        return rows.filter(row => typeof row.body === 'string' && row.body.includes(MARKER)
+          && /^[A-Za-z0-9]+$/.test(String(row.number))).slice(0, 10).map(row => ({
+          title: String(row.title || 'Local CI 告警'), state: row.state, updated_at: row.updated_at,
+          url: `https://gitee.com/${CONFIG.owner}/${CONFIG.repository}/issues/${row.number}`,
+        }));
+      }),
+  ]);
+  if (watchdog.status === 'fulfilled') cache.watchdog = watchdog.value;
+  else cache.errors.watchdog = 'Cloudflare 未能读取 Gitee watchdog 记录';
+  if (alerts.status === 'fulfilled') cache.alerts = alerts.value;
+  else cache.errors.alerts = 'Cloudflare 未能读取 Gitee 告警记录';
+  // One combined public cache: 288 writes/day, separate from the private incident state.
+  await env.ALERT_STATE.put(CACHE_KEY, JSON.stringify(cache));
+}
+
+async function runScheduled(env, now) {
+  const fetcher = fetch;
+  const current = await snapshot(fetcher, now.getTime()).catch(() => null);
+  try {
+    await runMonitor(env, { fetcher, now, current });
+  } finally {
+    // Preserve display updates when Issue delivery fails, and cache the latest Issue state.
+    await refreshCache(env, { fetcher, now, current });
+  }
+}
+
 export default {
-  scheduled(event, env, ctx) { ctx.waitUntil(runMonitor(env, { now: new Date(event.scheduledTime) })); },
-  fetch() { return new Response('Not found', { status: 404 }); },
+  scheduled(event, env, ctx) { ctx.waitUntil(runScheduled(env, new Date(event.scheduledTime))); },
+  async fetch(request, env) {
+    if (new URL(request.url).pathname !== '/health') return new Response('Not found', { status: 404 });
+    const headers = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS' };
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers });
+    if (request.method !== 'GET') return new Response('Method not allowed', { status: 405, headers });
+    try {
+      const cache = await env.ALERT_STATE.get(CACHE_KEY, 'json');
+      if (cache) return Response.json(cache, { headers: { ...headers, 'Cache-Control': 'public, max-age=60' } });
+    } catch { /* A cache outage does not imply a server outage. */ }
+    return Response.json({ error: 'Health cache unavailable' }, {
+      status: 503, headers: { ...headers, 'Cache-Control': 'no-store' },
+    });
+  },
 };
