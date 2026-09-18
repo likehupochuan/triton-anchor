@@ -1,7 +1,4 @@
 [hidden] { display:none !important; }
-.ci-blocker-group { border-top:1px solid var(--border); margin-top:14px; padding-top:12px; }
-.ci-blocker-group h4 { margin:0 0 6px; font-size:14px; }
-.ci-blocker-group p { margin:0; line-height:1.7; }
 .ci-blockers li { overflow-wrap:anywhere; white-space:pre-wrap; }
 .ci-blocker-raw { margin-top:16px; font-size:12px; }
 .ci-blocker-raw summary { cursor:pointer; }

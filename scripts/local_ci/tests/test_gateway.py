@@ -1188,7 +1188,7 @@ README only
             client.status(self.task, "success", "Local CI: pass", "https://gitee.com/other-report")
             self.assertEqual(len(writes), 2)
 
-    def test_reopen_closes_pending_retired_status_contexts(self):
+    def test_reopen_closes_pending_tested_sha_check_and_retired_status(self):
         client = g.GitHub(g.REPOSITORY, token="fixture")
         snapshots = {
             self.head: [{"context": "local-ci/sophgo-cmodel", "state": "pending",
@@ -1201,19 +1201,27 @@ README only
         def request(path, method="GET", data=None):
             if method == "GET":
                 if "/check-runs?" in path:
+                    if path.startswith(f"commits/{self.tested}/") and "check_name=github%2Fbasic&" in path:
+                        return {"check_runs": [{
+                            "id": 42, "name": g.CHECK_NAMES["basic"], "status": "queued",
+                            "app": {"slug": "github-actions"},
+                            "external_id": f"triton-anchor-local-ci:basic:{self.task['task_id']}",
+                        }]}
                     return {"check_runs": []}
                 if "/statuses?" in path:
                     return snapshots[path.split("/")[1]]
                 raise AssertionError(path)
             writes.append((path, data))
-            snapshots[path.split("/")[1]].insert(0, {**data, "creator": {"login": "github-actions[bot]"}})
+            if path.startswith("statuses/"):
+                snapshots[path.split("/")[1]].insert(0, {**data, "creator": {"login": "github-actions[bot]"}})
             return {}
 
         with patch.object(client, "request", side_effect=request):
             client.retire_open_checks(self.task)
-        self.assertEqual([path for path, _ in writes], [f"statuses/{self.head}"])
-        self.assertEqual(writes[0][1]["context"], "local-ci/sophgo-cmodel")
-        self.assertEqual(writes[0][1]["state"], "error")
+        self.assertEqual([path for path, _ in writes], ["check-runs/42", f"statuses/{self.head}"])
+        self.assertEqual(writes[0][1]["conclusion"], "cancelled")
+        self.assertEqual(writes[1][1]["context"], "local-ci/sophgo-cmodel")
+        self.assertEqual(writes[1][1]["state"], "error")
 
     def test_approval_context_is_frozen_and_displays_contributor_claims_safely(self):
         client = g.GitHub(g.REPOSITORY, token="fixture")

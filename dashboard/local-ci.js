@@ -73,8 +73,7 @@ function shortBlocker(item, category) {
   if(category==='network')return '网络连接异常';
   if(category==='execution'&&/timed? ?out|timeout|time budget exhausted|超时/i.test(text))return '执行超时';
   if(item.source==='展示说明'||item.source==='任务状态')return '原因未明确，需查看执行日志';
-  const compact=publicText(text).replace(/\s+/g,' ').trim();
-  return compact.length>100?compact.slice(0,100)+'…':compact;
+  return publicText(text).replace(/\s+/g,' ').trim();
 }
 
 function renderBlockers(parent, run) {
@@ -84,14 +83,14 @@ function renderBlockers(parent, run) {
     const selected=groups;
     const box=el('section','ci-blockers');
     box.append(el('h3','','阻塞原因'));
+    const list=el('ul'),visible=[];
     for(const group of selected){
       // Generic incompletion is secondary when an actual cause is available.
       const reasons=group.reasons.filter(item=>item.source!=='展示说明'||selected.every(g=>g.reasons.every(r=>r.source==='展示说明')));
-      if(!reasons.length)continue;
-      const category=el('div','ci-blocker-group');category.append(el('h4','',group.label));
-      const list=el('ul');for(const text of new Set(reasons.map(item=>shortBlocker(item,group.id))))list.append(el('li','',text));
-      category.append(list);box.append(category);
+      visible.push(...reasons.map(item=>shortBlocker(item,group.id)));
     }
+    for(const text of new Set(visible))list.append(el('li','',text));
+    box.append(list);
     parent.append(box);
   }
 }

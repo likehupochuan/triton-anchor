@@ -578,31 +578,34 @@ class GitHub:
         """Close existing unfinished checks without creating unreached stages."""
         start = self.task_start(task)
         start_workflow = check_workflow_id(start) if start else ""
+        seen = set()
         for key, name in {**ALL_CHECK_NAMES, **LEGACY_CHECK_NAMES}.items():
-            for row in self.check_runs(task, key):
-                identity = str(row.get("external_id", ""))
-                ours = (identity == f"triton-anchor-local-ci:{key}:{task['task_id']}"
-                        and (not start or int(row["id"]) >= int(start["id"]))
-                        and (not start_workflow or check_workflow_id(row) == start_workflow))
-                if (row.get("name") != name or row.get("status") == "completed"
-                        or (row.get("app") or {}).get("slug") != "github-actions"
-                        or not identity.startswith(("triton-anchor-local-ci:", "triton-anchor-ci-v4:"))
-                        or (key not in LEGACY_CHECK_NAMES and ours == superseded)):
-                    continue
-                self.request(f"check-runs/{row['id']}", "PATCH", {
-                    "status": "completed", "conclusion": "cancelled",
-                    "output": {"title": "Superseded task cancelled" if superseded else "Stage not completed",
-                    "summary": check_summary(
-                                   "A newer task owns this commit." if superseded else
-                                   "The workflow ended before this stage completed.", check_workflow_id(row))},
-                })
+            for sha in dict.fromkeys((github_sha(task), task["tested_sha"])):
+                for row in self.check_runs(task, key, sha=sha):
+                    identity = str(row.get("external_id", ""))
+                    ours = (identity == f"triton-anchor-local-ci:{key}:{task['task_id']}"
+                            and (not start or int(row["id"]) >= int(start["id"]))
+                            and (not start_workflow or check_workflow_id(row) == start_workflow))
+                    if (row.get("id") in seen or row.get("name") != name
+                            or row.get("status") == "completed"
+                            or (row.get("app") or {}).get("slug") != "github-actions"
+                            or not identity.startswith(("triton-anchor-local-ci:", "triton-anchor-ci-v4:"))
+                            or (key not in LEGACY_CHECK_NAMES and ours == superseded)):
+                        continue
+                    seen.add(row["id"])
+                    self.request(f"check-runs/{row['id']}", "PATCH", {
+                        "status": "completed", "conclusion": "cancelled",
+                        "output": {"title": "Superseded task cancelled" if superseded else "Stage not completed",
+                        "summary": check_summary(
+                                       "A newer task owns this commit." if superseded else
+                                       "The workflow ended before this stage completed.", check_workflow_id(row))},
+                    })
         # The old gateway emitted local-ci/basic, local-ci/api and
         # local-ci/security, and an even older backend workflow emitted
         # sophgo-cmodel variants.  They cannot be deleted through GitHub's
         # API, but leaving them pending makes the Checks page look as if this
         # task still has extra work.  Close only exact retired names created by
         # GitHub Actions on this task's tested/head commits.
-        seen = set()
         for sha in dict.fromkeys((task["tested_sha"], task["head_sha"])):
             for name in RETIRED_CHECK_NAMES:
                 for row in self.check_runs_named(task, name, sha=sha):

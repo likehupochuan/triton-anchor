@@ -239,7 +239,7 @@ test('blockers render one concise section without duplicate reviews or expandabl
     return nodes.get(id);
   }};
   const root = new Element('main');
-  const original = '未知异常 <img src=x onerror=alert(1)>';
+  const original = '未知异常 <img src=x onerror=alert(1)> '+ '完整原因'.repeat(30);
   const context = {document,URLSearchParams,URL,setInterval:()=>{},fetch:()=>new Promise(()=>{}),
     location:{search:''},LocalCIData:{blockerGroups},root,
     run:errorRun({summary:'Task worker revision differs from installed control',
@@ -248,8 +248,7 @@ test('blockers render one concise section without duplicate reviews or expandabl
     '\nrenderBlockers(root,run);',context);
   const flatten = node => [node,...node.children.flatMap(flatten)];
   const rendered = flatten(root);
-  assert.ok(rendered.some(node=>node.tag==='h4'&&node.textContent.startsWith('服务器环境问题')));
-  assert.ok(!rendered.some(node=>node.tag==='h4'&&node.textContent.startsWith('必检 / 审查未完成')));
+  assert.ok(!rendered.some(node=>node.tag==='h4'));
   assert.ok(!rendered.some(node=>node.tag==='details'||node.textContent==='查看详情'));
   assert.ok(rendered.some(node=>node.textContent===original));
   assert.ok(!rendered.some(node=>node.tag==='img'));
@@ -270,7 +269,8 @@ test('blockers render one concise section without duplicate reviews or expandabl
   vm.runInNewContext('renderBlockers(root,run);',context);
   assert.deepEqual(mixedRoot.children.map(box=>box.children[0].textContent),['阻塞原因']);
   const mixedText=visible(mixedRoot.children[0]).map(node=>node.textContent);
-  assert.ok(mixedText.includes('审查阻塞'));
+  assert.ok(!flatten(mixedRoot).some(node=>node.tag==='h4'));
+  assert.ok(!mixedText.includes('审查阻塞'));
   assert.ok(mixedText.includes('架构契约：内存不足时没有清理资源'));
   assert.ok(!mixedText.includes('服务器环境问题'));
   assert.ok(!mixedText.includes('三个测试失败'));
