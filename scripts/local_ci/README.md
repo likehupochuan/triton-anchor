@@ -120,7 +120,7 @@ python3 scripts/local_ci/prepare/install.py \
 
 空服务器使用[服务器准备](prepare/README.md)中的独立引导脚本和经审核的精确控制提交 SHA 自动创建 checkout，再调用同一正式安装器。安装入口准备环境并启动 Worker、控制仓更新和必要维护定时器；不需要工具服务或独立调度控制台。
 详见 [服务器准备](prepare/README.md)、[维护](maintenance/README.md)
-与 [GitHub 配置](../ci/README.md)。新 PR 任务使用 `control_policy=worker`，不绑定控制提交；网关记录的 `worker_revision_sha` 仅作来源记录，不参与该类任务 ID，Worker 使用已安装的可信控制代码，并在结果 `environment.control_revision` 记录实际版本。源码 head/base/tested、LLVM 与 PR 信息仍按原规则冻结。旧任务身份保持兼容；push/manual 等固定版本任务要求不同控制版本时，在释放任务锁后将任务身份和 SHA 原子写入单一 `control-update/request.json`，再触发一次 `control-update.service`。多个等待版本按控制仓祖先顺序选择最早的前向提交。更新只允许从配置的 Gitee `control_anchor` 镜像快进到任务指定提交，在同一次 Worker 重启前同步该提交的配置；Worker 检查进程与磁盘版本一致，任务执行期间不会切换控制版本。没有需要更新的新任务时不轮询控制仓，也不定时追随分支最新提交。
+与 [GitHub 配置](../ci/README.md)。新 PR 任务使用 `control_policy=worker`，不绑定控制提交；网关记录的 `worker_revision_sha` 仅作来源记录，不参与该类任务 ID，Worker 使用已安装的可信控制代码，并在结果 `environment.control_revision` 记录实际版本。源码 head/base/tested、LLVM 与 PR 信息仍按原规则冻结。旧任务身份保持兼容；手动分支等固定版本任务要求不同控制版本时，在释放任务锁后将任务身份和 SHA 原子写入单一 `control-update/request.json`，再触发一次 `control-update.service`。多个等待版本按控制仓祖先顺序选择最早的前向提交。更新只允许从配置的 Gitee `control_anchor` 镜像快进到任务指定提交，在同一次 Worker 重启前同步该提交的配置；Worker 检查进程与磁盘版本一致，任务执行期间不会切换控制版本。没有需要更新的新任务时不轮询控制仓，也不定时追随分支最新提交。
 
 安装和更新共用配置同步：按 JSON 结构比较，相同则不写；有差异时先校验，再原子替换，保持 CI 用户所有和 600 权限。`control_update.py --config <运行配置> --expected-revision <40位SHA>` 默认预览，加 `--apply` 应用，也可用当前同一 SHA 修复配置偏差。首次经旧更新器到达新提交后，用新脚本对当前 SHA 执行一次 `--apply` 完成迁移。修改 `control_root`、`state_dir`、`python_bin` 或 `runtime` 等宿主部署锚点需要重新运行安装器。具体命令见[服务器准备](prepare/README.md)。
 

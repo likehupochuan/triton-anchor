@@ -2,8 +2,6 @@ name: CI Gateway
 run-name: >-
   ${{ inputs.run_title || (inputs.pr_number != '' && inputs.pr_number != '0' && format('PR #{0}', inputs.pr_number)) || format('Branch {0}', inputs.source_branch || github.ref_name) }} | dispatch
 on:
-  push:
-    branches: ['**']
   workflow_dispatch:
     inputs:
       mode:
@@ -25,20 +23,19 @@ jobs:
   cancel-obsolete:
     name: Cancel obsolete tasks
     needs: validate-worker
-    if: needs.validate-worker.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: read}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'push' && github.sha || inputs.worker_revision_sha }}
+          ref: ${{ inputs.worker_revision_sha }}
           persist-credentials: false
           submodules: false
       - name: Notify local workers about obsolete tasks
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number }}
-          SOURCE_BRANCH: ${{ inputs.source_branch || github.ref_name }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
           GITEE_USERNAME: ${{ vars.GITEE_USERNAME || 'likehupochuan' }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
@@ -59,17 +56,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'push' && github.sha || inputs.worker_revision_sha }}
+          ref: ${{ inputs.worker_revision_sha }}
           persist-credentials: false
           submodules: false
       - name: Freeze exact task and candidate LLVM
         id: task
         env:
           GH_TOKEN: ${{ github.token }}
-          WORKER_SHA: ${{ github.event_name == 'push' && github.sha || inputs.worker_revision_sha }}
+          WORKER_SHA: ${{ inputs.worker_revision_sha }}
           PR_NUMBER: ${{ inputs.pr_number }}
-          SOURCE_BRANCH: ${{ inputs.source_branch || github.ref_name }}
-          REQUESTED_SHA: ${{ inputs.requested_sha || (github.event_name == 'push' && github.sha) || '' }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          REQUESTED_SHA: ${{ inputs.requested_sha }}
           FULL: ${{ inputs.full }}
           GITEE_SUBMODULE_MIRRORS: ${{ vars.GITEE_SUBMODULE_MIRRORS || '{}' }}
           EVENT_KIND: ${{ inputs.action == 'manual' && 'manual' || 'push' }}
@@ -97,7 +94,7 @@ jobs:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
       tested_sha: ${{ needs.prepare.outputs.tested_sha }}
       base_sha: ${{ needs.prepare.outputs.base_sha }}
-      worker_revision_sha: ${{ github.event_name == 'push' && github.sha || inputs.worker_revision_sha }}
+      worker_revision_sha: ${{ inputs.worker_revision_sha }}
   security:
     name: Security gate
     needs: [prepare, api]
@@ -106,7 +103,7 @@ jobs:
     with:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
       tested_sha: ${{ needs.prepare.outputs.tested_sha }}
-      worker_revision_sha: ${{ github.event_name == 'push' && github.sha || inputs.worker_revision_sha }}
+      worker_revision_sha: ${{ inputs.worker_revision_sha }}
   basic-result:
     name: Publish Basic CI result
     needs: [prepare, basic]
@@ -115,7 +112,7 @@ jobs:
     uses: ./.github/workflows/local-ci-preflight-result.yml
     with:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
-      worker_revision_sha: ${{ github.event_name == 'push' && github.sha || inputs.worker_revision_sha }}
+      worker_revision_sha: ${{ inputs.worker_revision_sha }}
       stage: basic
       outcome: ${{ needs.basic.result }}
   api-result:
@@ -126,7 +123,7 @@ jobs:
     uses: ./.github/workflows/local-ci-preflight-result.yml
     with:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
-      worker_revision_sha: ${{ github.event_name == 'push' && github.sha || inputs.worker_revision_sha }}
+      worker_revision_sha: ${{ inputs.worker_revision_sha }}
       stage: api
       outcome: ${{ needs.api.result }}
   security-result:
@@ -139,7 +136,7 @@ jobs:
     uses: ./.github/workflows/local-ci-preflight-result.yml
     with:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
-      worker_revision_sha: ${{ github.event_name == 'push' && github.sha || inputs.worker_revision_sha }}
+      worker_revision_sha: ${{ inputs.worker_revision_sha }}
       stage: security
       outcome: ${{ needs.security.result }}
       external_fork: ${{ needs.prepare.outputs.external_fork == 'true' }}
@@ -154,7 +151,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'push' && github.sha || inputs.worker_revision_sha }}
+          ref: ${{ inputs.worker_revision_sha }}
           persist-credentials: false
           submodules: false
       - uses: actions/download-artifact@v4
@@ -183,7 +180,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'push' && github.sha || inputs.worker_revision_sha }}
+          ref: ${{ inputs.worker_revision_sha }}
           path: trusted
           persist-credentials: false
           submodules: false
@@ -230,7 +227,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'push' && github.sha || inputs.worker_revision_sha }}
+          ref: ${{ inputs.worker_revision_sha }}
           persist-credentials: false
           submodules: false
       - uses: actions/download-artifact@v4
@@ -246,28 +243,12 @@ jobs:
     if: >-
       (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
       github.ref_name == 'local-ci-unified' &&
-      ((github.event_name == 'workflow_dispatch' && inputs.mode == 'run') ||
-       (github.event_name == 'push' && !github.event.deleted))
+      github.event_name == 'workflow_dispatch' && inputs.mode == 'run'
     runs-on: ubuntu-latest
-    permissions: {pull-requests: read}
-    outputs:
-      proceed: ${{ github.event_name != 'push' || steps.pr.outputs.proceed == 'true' }}
     steps:
       - name: Require the routed trusted worker revision
         env:
-          WORKER_SHA: ${{ github.event_name == 'push' && github.sha || inputs.worker_revision_sha }}
+          WORKER_SHA: ${{ inputs.worker_revision_sha }}
         run: |
           test "$GITHUB_REF_NAME" = local-ci-unified
           test "$GITHUB_SHA" = "$WORKER_SHA"
-      - name: Let an existing ready PR own this push
-        id: pr
-        if: github.event_name == 'push'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const {owner, repo} = context.repo;
-            const branch = context.ref.replace('refs/heads/', '');
-            const {data: pulls} = await github.rest.pulls.list({owner, repo, state:'open', head:owner+':'+branch, per_page:100});
-            const duplicate = pulls.some(pr => !pr.draft && pr.head.sha === context.sha);
-            if (duplicate) core.info('The ready PR event owns this revision; avoid a duplicate branch task.');
-            core.setOutput('proceed', !duplicate);

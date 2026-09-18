@@ -8,7 +8,7 @@
 
 旧版 schema 的任务记录保留在 Gitee，网关的取消扫描与接收器识别后跳过，不让旧记录阻断新任务，也不据此回写通过；旧记录不列入新版看板当前任务列表。新版任务仍要求完整 task ID 对应的固定 refs，损坏记录不会被当成旧格式忽略。
 
-`main` 的 `ci-request.yml` 同时监听以 `main` 为目标分支的 `pull_request_target` 和直接推送到 `main` 的 push，不向其他 PR 目标分支同步。两类事件都由同一个 route job 将 `mode=run` 调度到 `local-ci-unified`：PR 使用贡献者的 HEAD SHA，main push 使用该分支提交 SHA。请求入口不包含接收、发布和 Dashboard 部署作业，因此不会为这些不适用阶段生成 skipped Check Runs。`main` 的 `ci-gateway.yml` 继续负责 receive、publish 和 Dashboard，完整执行流程暂时位于 `local-ci-unified`。未来完整 Gateway 合入 `main` 时，只需将请求入口中的 `controlRef` 从 `local-ci-unified` 改为 `main`，无需增加仓库变量。控制分支的 push 直接执行检查，使用本次提交 SHA，不再向自身派发；删除分支不投递任务。
+`main` 的 `ci-request.yml` 自动监听所有目标分支的 `pull_request_target`，并通过 `workflow_dispatch` 接收任意分支的手动验证请求，不向各 PR 目标分支同步，也不自动监听分支 push。两类请求都由同一个 route job 将 `mode=run` 调度到 `local-ci-unified`：PR 使用贡献者的 HEAD SHA，并以 `pull.base.ref` 记录真实目标分支；手动分支任务由维护者填写 `source_branch`，可选填写 `requested_sha` 以拒绝分支漂移。手动入口只允许从默认分支运行，并要求发起者拥有 write、maintain 或 admin 权限。请求入口不包含接收、发布和 Dashboard 部署作业，因此不会为这些不适用阶段生成 skipped Check Runs。`main` 的 `ci-gateway.yml` 继续负责 receive、publish 和 Dashboard，完整执行流程暂时位于 `local-ci-unified`；执行侧自身也不监听 push。未来完整 Gateway 合入 `main` 时，只需将请求入口中的 `controlRef` 从 `local-ci-unified` 改为 `main`，无需增加仓库变量。
 
 请求入口展示名为 `CI Request`，控制执行与接收入口展示名为 `CI Gateway`，作业按职责命名。自动派发的运行标题例如 `PR #55 | h:079850a | dispatch`、`PR #55 | h:079850a m:adc03ab | receive 1`；接续保留同一任务身份并递增轮次。可选内部参数 `run_title` 只用于展示，不参与任务校验，不需配置仓库变量。
 
