@@ -1,9 +1,11 @@
 name: CI Request
 run-name: >-
-  ${{ github.event_name == 'pull_request_target' && format('PR #{0}', github.event.pull_request.number) || format('Branch {0}', inputs.source_branch) }} | request
+  ${{ github.event_name == 'pull_request_target' && format('PR #{0}', github.event.pull_request.number) || format('Branch {0}', github.ref_name || inputs.source_branch) }} | request
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, edited, closed, converted_to_draft, labeled, unlabeled]
+  push:
+    branches: ['**']
   workflow_dispatch:
     inputs:
       source_branch: {type: string, required: true, description: 'Branch to validate'}
@@ -11,7 +13,7 @@ on:
 permissions: {}
 concurrency:
   group: >-
-    local-ci-request-${{ github.event_name == 'pull_request_target' && format('pr-{0}', github.event.pull_request.number) || format('branch-{0}', inputs.source_branch) }}
+    local-ci-request-${{ github.event_name == 'pull_request_target' && format('pr-{0}', github.event.pull_request.number) || format('branch-{0}', github.ref_name || inputs.source_branch) }}
   cancel-in-progress: true
 jobs:
   route:
@@ -30,10 +32,11 @@ jobs:
             const {owner, repo} = context.repo;
             const pull = context.payload.pull_request;
             const manual = context.eventName === 'workflow_dispatch';
+            const push = context.eventName === 'push';
             const shaPattern = /^[0-9a-f]{40}$/i;
-            let branch = pull?.base.ref || '';
-            let requestedSha = pull?.head.sha || '';
-            let action = context.payload.action || '';
+            let branch = pull?.base.ref || (push ? context.ref_name : '');
+            let requestedSha = pull?.head.sha || (push ? context.sha : '');
+            let action = context.payload.action || (push ? 'push' : '');
             if (manual) {
               const {data: repository} = await github.rest.repos.get({owner, repo});
               const runRef = context.ref.replace('refs/heads/', '');
@@ -56,7 +59,7 @@ jobs:
               }
               action = 'manual';
             }
-            if (!pull && !manual) throw new Error(`Unsupported event ${context.eventName}`);
+            if (!pull && !manual && !push) throw new Error(`Unsupported event ${context.eventName}`);
             if (!branch || !shaPattern.test(requestedSha)) throw new Error('Invalid branch routing request');
             // When the full Gateway moves to main, this is the only migration switch.
             const controlRef = 'local-ci-unified';

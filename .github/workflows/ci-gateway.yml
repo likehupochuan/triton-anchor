@@ -119,7 +119,6 @@ jobs:
             const content = data => JSON.stringify({schema: data?.schema, tasks: data?.tasks, site_digest: data?.site_digest});
             core.setOutput('changed', content(previous) !== content(next));
       - uses: actions/upload-pages-artifact@v3
-        if: steps.dashboard.outputs.changed == 'true'
         with: {path: _site}
       - name: Surface incomplete receiver operations
         if: inputs.mode == 'receive' && steps.collect.outputs.receiver_errors != '0'
@@ -145,7 +144,7 @@ jobs:
   deploy-dashboard:
     name: Deploy dashboard (independent of test results)
     needs: publish
-    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.publish.outputs.dashboard_changed == 'true' }}
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
