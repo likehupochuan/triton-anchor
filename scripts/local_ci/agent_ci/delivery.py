@@ -180,7 +180,7 @@ def seal_result(
         raise ContractError("Agent artifacts must be a list")
     required = [path for check in checks for path in check["evidence"]]
     # Required check evidence is copied first so optional files cannot consume
-    # its count or byte budget.  Agent-selected files use the remaining budget.
+    # its byte budget. Agent-selected files use the remaining budget.
     chosen = required + list(selected)
     required_paths = set(required)
     artifacts = []
@@ -223,6 +223,12 @@ def seal_result(
                 "reason": row["omitted"],
                 "required": path in required_paths,
             })
+            if path in required_paths:
+                reasons.append(
+                    f"必传检查证据未完整发布，整体结论待确认：{path}（{row['omitted']}）"
+                )
+                if status == "pass":
+                    status = "infra_error"
         artifacts.append(row)
     result = {
         "schema": RESULT_SCHEMA,

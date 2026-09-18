@@ -87,7 +87,7 @@ class ContractTests(unittest.TestCase):
 
     def test_docs_main_without_scripts_runs_real_contract(self):
         sha = self.change(
-            "README.md", "# CI\n\nDispatch runs against a frozen commit.\n"
+            "README.md", "# CI\n\nDispatch runs against a frozen commit.  \n\n"
         )
         process = self.invoke(sha)
         self.assertEqual(0, process.returncode, process.stderr)
@@ -99,6 +99,8 @@ class ContractTests(unittest.TestCase):
             ["utf8", "no_conflict_markers"], result["verified_files"][0]["checks"]
         )
         self.assertEqual(self.base, result["base_sha"])
+        self.assertIn("文档格式提示（非阻塞）", result["warnings"][0])
+        self.assertIn("trailing whitespace", result["warnings"][0])
 
     def test_router_main_has_workflow_shape_contract(self):
         sha = self.change(

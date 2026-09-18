@@ -75,20 +75,25 @@ ALL_CHECK_NAMES = {
 REQUIRED_CONTEXTS = (*CHECK_NAMES.values(), ALL_CHECK_NAMES["dispatch"], SUMMARY_CONTEXT)
 LEGACY_CHECK_NAMES = {"preflight": "local-ci/preflight"}
 READ_CHECK_NAMES = {**ALL_CHECK_NAMES, **LEGACY_CHECK_NAMES, "native_prepare": "Prepare exact task"}
+CHECK_ALIASES = {
+    "basic": ("github/basic", "local-ci/basic"),
+    "api": ("github/api", "local-ci/api"),
+    "security": ("github/security", "local-ci/security"),
+    "approve": ("local-ci/approve",),
+    "dispatch": ("local-ci/dispatch",),
+}
 # GitHub keeps completed Check Runs forever and has no delete endpoint.  These
 # names belong to superseded gateway revisions; unfinished rows may be closed
-# when the current task starts, but they must never be recreated or treated as
-# evidence for a current task.
+# when the current task starts. Completed aliases remain readable only with
+# matching task identity; new checks always use the current names.
 RETIRED_CHECK_NAMES = frozenset({
-    "local-ci/basic",
-    "local-ci/api",
-    "local-ci/security",
+    *(name for names in CHECK_ALIASES.values() for name in names),
     "local-ci/sophgo-cmodel",
     "local-ci/sophgo-cmodel/routing",
     "local-ci/soghgo-cmodel",
     "local-ci/sophgp-cmodel/routing",
 })
-RETIRED_STATUS_CONTEXTS = RETIRED_CHECK_NAMES
+RETIRED_STATUS_CONTEXTS = RETIRED_CHECK_NAMES | {"local-ci/summary"}
 CHECK_CONCLUSIONS = {
     "success",
     "failure",
@@ -126,8 +131,8 @@ def has_native_preflight(task: dict) -> bool:
 
 
 def github_sha(task: dict) -> str:
-    """Commit where GitHub presents this task's checks."""
-    return task["head_sha"] if task.get("pr_number") else task["tested_sha"]
+    """Keep all required checks on the commit actually tested."""
+    return task["tested_sha"]
 
 
 class GitHubAPIError(RuntimeError):
@@ -270,17 +275,18 @@ class GitHub:
             # Commit Status entries are append-only.  Avoid adding an
             # identical final/pending status when a receiver or finalizer is
             # retried after the first writer has already completed it.
-            latest = self.latest_summary(task)
+            latest = self.latest_summary(task, sha=task["tested_sha"])
             owner = urlparse((latest or {}).get("target_url") or "").fragment
             if (
                 latest
+                and latest.get("context") == SUMMARY_CONTEXT
                 and latest.get("state") == state
                 and latest.get("description") == description[:140]
                 and owner == f"local-ci-task={task['task_id']}"
             ):
                 return
         self.request(
-            f"statuses/{github_sha(task)}",
+            f"statuses/{task['tested_sha']}",
             "POST",
             {
                 "state": state,
@@ -290,23 +296,30 @@ class GitHub:
             },
         )
 
-    def latest_summary(self, task: dict) -> dict | None:
-        for page in range(1, 21):
-            rows = self.request(f"commits/{github_sha(task)}/statuses?per_page=100&page={page}")
-            latest = next(
-                (row for row in rows if row.get("context") == SUMMARY_CONTEXT),
-                None,
-            )
-            if latest or len(rows) < 100:
-                return latest
+    def latest_summary(self, task: dict, *, sha: str | None = None) -> dict | None:
+        # The tested commit owns the verdict. Read head-only/old-name records
+        # only for tasks published before this convention was established.
+        for revision in dict.fromkeys((sha,) if sha else (task["tested_sha"], task["head_sha"])):
+            legacy = None
+            for page in range(1, 21):
+                rows = self.request(f"commits/{revision}/statuses?per_page=100&page={page}")
+                latest = next((row for row in rows if row.get("context") == SUMMARY_CONTEXT), None)
+                legacy = legacy or next((row for row in rows if row.get("context") == "local-ci/summary"), None)
+                if latest:
+                    return latest
+                if len(rows) < 100:
+                    break
+            if legacy:
+                return legacy
         return None
 
     def status_matches(self, task: dict, state: str, description: str) -> bool:
-        """Read the latest summary on the same commit as the preflight checks."""
-        latest = self.latest_summary(task)
+        """Read the current verdict on the actual tested commit."""
+        latest = self.latest_summary(task, sha=task["tested_sha"])
         owner = urlparse((latest or {}).get("target_url") or "").fragment
         return bool(
             latest
+            and latest.get("context") == SUMMARY_CONTEXT
             and latest.get("state") == state
             and latest.get("description") == description[:140]
             and owner == f"local-ci-task={task['task_id']}"
@@ -498,12 +511,14 @@ class GitHub:
         raise ValueError("Cannot determine Local CI ownership from incomplete checks")
 
     def check_runs(self, task: dict, key: str, *, sha: str | None = None) -> list[dict]:
-        return self.check_runs_named(task, READ_CHECK_NAMES[key], sha=sha)
+        return [row for name in (READ_CHECK_NAMES[key], *CHECK_ALIASES.get(key, ()))
+                for row in self.check_runs_named(task, name, sha=sha)]
 
     def task_start(self, task: dict) -> dict:
         """Reuse the first real check instead of creating a future-stage placeholder."""
-        starts = [row for row in self.check_runs(task, "basic")
-                  if row.get("name") == CHECK_NAMES["basic"]
+        starts = [row for sha in dict.fromkeys((task["tested_sha"], task["head_sha"]))
+                  for row in self.check_runs(task, "basic", sha=sha)
+                  if row.get("name") in (CHECK_NAMES["basic"], *CHECK_ALIASES["basic"])
                   and (row.get("app") or {}).get("slug") == "github-actions"
                   and str(row.get("external_id", "")).startswith("triton-anchor-local-ci:basic:")
                   and check_workflow_id(row)]
@@ -520,7 +535,7 @@ class GitHub:
                 if match[1] not in self.run_identities:
                     self.run_identities[match[1]] = self.request(f"actions/runs/{match[1]}")
                 run = self.run_identities[match[1]]
-                if (run.get("event") == "push" and run.get("head_branch") == "local-ci-unified"
+                if (run.get("event") in {"push", "workflow_dispatch"} and run.get("head_branch") == "local-ci-unified"
                         and run.get("head_sha") == task["tested_sha"]
                         and run.get("path") == ".github/workflows/ci-gateway.yml"):
                     starts.append({**row, "native": True,
@@ -538,8 +553,9 @@ class GitHub:
                              or check_workflow_id(start) == os.getenv("GITHUB_RUN_ID"))
         owners = []
         for key in ("dispatch", "preflight"):
-            owners = [row for row in self.check_runs(task, key)
-                      if row.get("name") == ({**ALL_CHECK_NAMES, **LEGACY_CHECK_NAMES})[key]
+            owners = [row for sha in dict.fromkeys((task["tested_sha"], task["head_sha"]))
+                      for row in self.check_runs(task, key, sha=sha)
+                      if row.get("name") in (READ_CHECK_NAMES[key], *CHECK_ALIASES.get(key, ()))
                       and (row.get("app") or {}).get("slug") == "github-actions"
                       and str(row.get("external_id", "")).startswith(f"triton-anchor-local-ci:{key}:")]
             if owners:
@@ -559,13 +575,12 @@ class GitHub:
         if has_native_preflight(task):
             return owner == expected
         for key, name in CHECK_NAMES.items():
-            runs = self.check_runs(task, key)
-            if not runs and github_sha(task) != task["tested_sha"]:
-                runs = self.check_runs(task, key, sha=task["tested_sha"])
+            runs = [row for sha in dict.fromkeys((task["tested_sha"], task["head_sha"]))
+                    for row in self.check_runs(task, key, sha=sha)]
             owned = [
                 row
                 for row in runs
-                if row.get("name") == name
+                if row.get("name") in (name, *CHECK_ALIASES.get(key, ()))
                 and (row.get("app") or {}).get("slug") == "github-actions"
                 and str(row.get("external_id", "")).startswith(
                     (f"triton-anchor-local-ci:{key}:", f"triton-anchor-ci-v4:{key}:")
@@ -584,7 +599,7 @@ class GitHub:
         start_workflow = check_workflow_id(start) if start else ""
         seen = set()
         for key, name in {**ALL_CHECK_NAMES, **LEGACY_CHECK_NAMES}.items():
-            for sha in dict.fromkeys((github_sha(task), task["tested_sha"])):
+            for sha in dict.fromkeys((task["tested_sha"], task["head_sha"])):
                 for row in self.check_runs(task, key, sha=sha):
                     identity = str(row.get("external_id", ""))
                     ours = (identity == f"triton-anchor-local-ci:{key}:{task['task_id']}"
@@ -645,7 +660,8 @@ class GitHub:
                     break
             else:
                 raise ValueError("Cannot retire an incomplete status listing")
-            for context in RETIRED_STATUS_CONTEXTS:
+            contexts = RETIRED_STATUS_CONTEXTS | ({SUMMARY_CONTEXT} if sha != task["tested_sha"] else set())
+            for context in contexts:
                 old = latest.get(context) or {}
                 if (
                     old.get("state") == "pending"
@@ -687,17 +703,19 @@ class GitHub:
                 )
             )
 
-        owned = [row for row in self.check_runs(task, "dispatch")
+        owned = [row for sha in dict.fromkeys((task["tested_sha"], task["head_sha"]))
+                 for row in self.check_runs(task, "dispatch", sha=sha)
                  if row.get("external_id") == f"triton-anchor-local-ci:dispatch:{task['task_id']}"
-                 and row.get("name") == ALL_CHECK_NAMES["dispatch"]
+                 and row.get("name") in (ALL_CHECK_NAMES["dispatch"], *CHECK_ALIASES["dispatch"])
                  and (row.get("app") or {}).get("slug") == "github-actions"
                  and in_current_cycle(row)]
         return max(owned, key=lambda row: int(row["id"]), default={"status": "not_started"} if start else {})
 
     def reset_existing_summary(self, task: dict) -> None:
         """Invalidate a prior verdict without creating a status before dispatch."""
-        previous = self.latest_summary(task)
-        if previous and (previous.get("creator") or {}).get("login") == "github-actions[bot]":
+        previous = self.latest_summary(task, sha=task["tested_sha"])
+        if (previous and previous.get("context") == SUMMARY_CONTEXT
+                and (previous.get("creator") or {}).get("login") == "github-actions[bot]"):
             description = "Local CI: previous result superseded; new task not dispatched yet"
             self.status(task, "error", description, workflow_url())
 
@@ -774,27 +792,27 @@ class GitHub:
         if has_native_preflight(task):
             return
         publication_sha = github_sha(task)
-        for key in CHECK_NAMES:
+        for key in (*CHECK_NAMES, "dispatch"):
             identity = f"triton-anchor-local-ci:{key}:{task['task_id']}"
-            for sha in dict.fromkeys((publication_sha, task["tested_sha"], task["head_sha"])):
-                owned = [row for row in self.check_runs(task, key, sha=sha)
-                         if row.get("external_id") == identity
-                         and row.get("name") == CHECK_NAMES[key]
-                         and (row.get("app") or {}).get("slug") == "github-actions"]
-                latest = max(owned, key=lambda row: int(row["id"]), default=None)
-                if latest:
-                    if latest.get("status") != "completed" or latest.get("conclusion") != "success":
-                        raise ValueError("Preflight is not successful for this task")
-                    if sha != publication_sha:
-                        output = latest.get("output") or {}
-                        self.check(task, key, "completed", "success",
-                                   output.get("title", CHECK_NAMES[key] + ": success"),
-                                   output.get("summary", "Preflight completed successfully."),
-                                   latest.get("details_url", ""), run_id=check_workflow_id(latest),
-                                   started_at=latest.get("started_at") or latest.get("created_at") or "")
-                    break
-            else:
+            owned = [(sha, row) for sha in dict.fromkeys((publication_sha, task["head_sha"]))
+                     for row in self.check_runs(task, key, sha=sha)
+                     if row.get("external_id") == identity
+                     and row.get("name") in (ALL_CHECK_NAMES[key], *CHECK_ALIASES[key])
+                     and (row.get("app") or {}).get("slug") == "github-actions"]
+            if not owned:
+                if key == "dispatch":
+                    continue  # Old tasks without a Dispatch check cannot manufacture one.
                 raise ValueError("Missing preflight evidence for this task")
+            sha, latest = max(owned, key=lambda entry: int(entry[1]["id"]))
+            if latest.get("status") != "completed" or latest.get("conclusion") != "success":
+                raise ValueError("Preflight is not successful for this task")
+            if sha != publication_sha or latest.get("name") != ALL_CHECK_NAMES[key]:
+                output = latest.get("output") or {}
+                self.check(task, key, "completed", "success",
+                           output.get("title", ALL_CHECK_NAMES[key] + ": success"),
+                           output.get("summary", "Preflight completed successfully."),
+                           latest.get("details_url", ""), run_id=check_workflow_id(latest),
+                           started_at=latest.get("started_at") or latest.get("created_at") or "")
 
     def approval_context(self, task: dict) -> dict:
         if not task["pr_number"]:
@@ -1362,6 +1380,10 @@ def display_state(value: str) -> str:
 def feedback_evidence(item: dict, task: dict, artifact_urls: dict) -> str:
     links = []
     for reference in item.get("evidence", [])[:3]:
+        if isinstance(reference, dict):
+            reference = str(reference.get("path", "")) + (
+                ":" + str(reference["line"]) if reference.get("line") else ""
+            )
         if not isinstance(reference, str):
             continue
         if reference in artifact_urls:
@@ -1394,15 +1416,21 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
         f"合并后验证提交：`{task['tested_sha']}`",
         "", "### 变更意图与审查结论", "", feedback_text(result["summary"]),
     ]
-    blockers = [feedback_text(reason) for reason in result["blocking_reasons"]]
     findings = []
+    finding_summaries = set()
     for finding in result["findings"]:
         text = feedback_text(finding.get("summary", ""))
         if text:
-            if not finding.get("blocking"):
-                risk = {"critical": "严重", "high": "高", "medium": "中", "low": "低", "info": "提示"}.get(finding.get("severity"), "未标注")
-                text = f"【风险：{risk}】{text}"
-            (blockers if finding.get("blocking") else findings).append(text)
+            finding_summaries.add(text)
+            risk = {"critical": "严重", "high": "高", "medium": "中", "low": "低", "info": "提示"}.get(finding.get("severity"), "未标注")
+            label = "合入阻塞" if finding.get("blocking") or finding.get("severity") in {"high", "critical"} else f"风险：{risk}"
+            evidence = feedback_evidence({
+                "kind": "finding",
+                "evidence": [*finding.get("code_evidence", []), *finding.get("evidence", [])],
+            }, task, artifact_urls or {})
+            findings.append(f"【{label}】{text}" + (f" · {evidence}" if evidence else ""))
+    findings.extend(f"【合入阻塞】{feedback_text(reason)}" for reason in result["blocking_reasons"]
+                    if feedback_text(reason) not in finding_summaries)
     if findings:
         lines.extend(["", "### 需要关注的发现", "", *(f"- {x}" for x in dict.fromkeys(findings))])
     lines.extend(["", "### 查看审查详情"])
@@ -1422,15 +1450,17 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
     dashboard = dashboard_url(task)
     if dashboard:
         lines.extend(["", f"[在 Dashboard 查看本次任务详情]({dashboard})"])
-    limitations = list(dict.fromkeys(blockers))
+    limitations = []
     delivery = result.get("evidence_delivery") or {}
     if delivery.get("status") == "incomplete":
         limitations.append(
-            "执行通过，证据发布不完整。"
+            "必传检查证据未完整发布，整体结论待确认；已执行检查结果保持原状态。"
+            if result["status"] == "infra_error" and any(row.get("required") for row in delivery.get("omitted", []))
+            else "执行通过，证据发布不完整。"
             if result["status"] == "pass"
-            else "证据发布不完整，不改变执行结论。"
+            else "证据发布不完整，已执行检查结果保持原状态。"
         )
-    if not limitations and result["status"] != "pass":
+    if not limitations and not findings and result["status"] != "pass":
         limitations.append("尚无完整通过结论，请补齐验证。")
     if not any(c["tool_id"].startswith(("frontend_", "backend_")) or c["tool_id"] == "flaggems"
                for c in result["checks"] if c["status"] in {"pass", "fail"}):
@@ -1655,6 +1685,10 @@ def sync_preflight(gh: GitHub, task: dict, stages: dict) -> bool:
 def begin_checks(gh: GitHub, task: dict) -> None:
     if not is_current(gh, task):
         raise ValueError("Task changed before preflight initialization")
+    previous_run = check_workflow_id(gh.task_start(task))
+    current_run = os.getenv("GITHUB_RUN_ID", "")
+    if previous_run.isdigit() and current_run.isdigit() and int(previous_run) > int(current_run):
+        raise ValueError("A newer workflow owns this task")
     claimed = gh.check(task, "basic", "queued", None, "Checking PR information",
                        "Basic CI will start after the required PR information is checked.",
                        workflow_url(), restart=True)
@@ -1664,9 +1698,6 @@ def begin_checks(gh: GitHub, task: dict) -> None:
         raise ValueError("A newer workflow owns this task")
     gh.retire_open_checks(task, superseded=True)
     gh.reset_existing_summary(task)
-    # Keep the required commit status pending from the first request until a
-    # receiver publishes the final result.
-    gh.status(task, "pending", "Local CI: preflight checks are running", workflow_url())
 
 
 def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
@@ -1692,6 +1723,8 @@ def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
     publish_preflight_checks(gh, task, stages, False)
     gh.retire_open_checks(task)
     if not preflight_passed(stages):
+        if pending:
+            gh.status(task, "error", "Local CI: preflight checks failed; task not dispatched", workflow_url())
         return  # Only the reached prerequisite checks are completed above.
     if task.get("external_fork") and stages.get("card", "success") != "success":
         description = "Local CI: approval card publication failed; worker verification not started"
@@ -1736,7 +1769,7 @@ def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
                 }),
             },
         )
-    if pending and stages.get("enqueue") in {"failure", "cancelled"}:
+    if pending:
         gh.status(task, "error", description, workflow_url())
 
 
@@ -1913,6 +1946,11 @@ def publication_error(gh: GitHub, control: GitStore, task: dict) -> None:
         pass
 
 
+def inactive_task_status(control: GitStore, task: dict) -> str:
+    cancellation = control.get(f"cancel/{task['task_id']}.json")
+    return "cancelled" if cancellation and cancellation.get("reason") != "superseded" else "superseded"
+
+
 def collect_results(
     gh: GitHub, control: GitStore, results: GitStore, dashboard: Path,
     task_id: str | None = None,
@@ -1931,7 +1969,8 @@ def collect_results(
         active = current_task(gh, control, task)
         row = {
             "task": task,
-            "status": "pending" if active else "cancelled",
+            "status": "pending" if active else inactive_task_status(control, task),
+            "historical": not active,
             "result": None,
         }
         status_published = False
@@ -1941,13 +1980,17 @@ def collect_results(
                 result, result_digest = read_result(path, task, results)
                 result_url, artifact_urls = result_links(results, path, result)
                 row.update(
-                    status=result["status"] if active else "cancelled",
+                    status=result["status"] if active else inactive_task_status(control, task),
                     result=result,
                     result_url=result_url,
                     artifact_urls=artifact_urls,
                 )
                 control.refresh()
-                if task["task_id"] == task_id and active and current_task(gh, control, task):
+                if task["task_id"] == task_id and active:
+                    active = current_task(gh, control, task)
+                    if not active:
+                        row.update(status=inactive_task_status(control, task), historical=True)
+                if task["task_id"] == task_id and active:
                     gh.restore_preflight(task)
                     state = GITHUB_STATES[result["status"]]
                     description = publication_description(
@@ -1959,7 +2002,7 @@ def collect_results(
                     status_published = True
                     control.refresh()
                     if not current_task(gh, control, task):
-                        row["status"] = "cancelled"
+                        row.update(status=inactive_task_status(control, task), historical=True)
                         rows.append(row)
                         continue
                     changed = gh.comment(
@@ -1980,7 +2023,7 @@ def collect_results(
                         )
         except (ValueError, OSError, RuntimeError) as error:
             if not status_published:
-                row["status"] = "infra_error" if active else "cancelled"
+                row["status"] = "infra_error" if active else inactive_task_status(control, task)
             row.update(
                 receiver_error=type(error).__name__,
                 receiver_message="结果读取或 GitHub 发布未完成；稍后重试接收，不重跑构建。",

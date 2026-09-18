@@ -101,6 +101,13 @@ def check(root: Path, base: str, tested: str) -> dict:
     changed = git(root, "diff", "--name-status", base, tested).splitlines()
     if not changed:
         raise ValueError("Contract check has no changed files to verify")
+    warnings = []
+    try:
+        git(root, "diff", "--check", base, tested, "--", "*.md", "*.rst", "*.txt")
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode != 2:
+            raise
+        warnings.append("文档格式提示（非阻塞）：\n" + exc.output.decode("utf-8").strip())
     rows = []
     for relative in filter(None, paths):
         path = root / relative
@@ -191,6 +198,7 @@ def check(root: Path, base: str, tested: str) -> dict:
         "tested_sha": tested,
         "changed_files": changed,
         "verified_files": rows,
+        "warnings": warnings,
     }
 
 

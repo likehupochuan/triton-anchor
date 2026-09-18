@@ -102,14 +102,14 @@ def test_required_evidence_must_publish_while_optional_files_use_remaining_budge
     value = answer()
     value["checks"][0]["evidence"] = ["report.txt"]
     initial = seal(tmp_path, value)
-    assert initial["status"] == "pass"
+    assert initial["status"] == "infra_error"
     assert initial["checks"][0]["status"] == "pass"
     assert initial["evidence_delivery"]["status"] == "incomplete"
     artifacts = tmp_path / "run/artifacts"
     artifacts.mkdir(parents=True)
     (artifacts / "report.txt").write_bytes(b"x" * (MAX_FILE_BYTES + 1))
     result = seal(tmp_path, value)
-    assert result["status"] == "pass"
+    assert result["status"] == "infra_error"
     assert result["checks"][0]["status"] == "pass"
     assert result["evidence_delivery"]["status"] == "incomplete"
     assert result["artifacts"][0]["omitted"]
@@ -175,7 +175,7 @@ def test_lightweight_diff_evidence_can_pass_but_cannot_replace_explicit_full(tmp
         assert result["status"] == ("infra_error" if full else "pass")
 
 
-@pytest.mark.parametrize("missing", ["summary", "evidence"])
+@pytest.mark.parametrize("missing", ["summary", "evidence", "file"])
 def test_change_validation_requires_reasoning_and_evidence(tmp_path, missing):
     artifacts = tmp_path / "run/artifacts"
     artifacts.mkdir(parents=True)
@@ -186,13 +186,17 @@ def test_change_validation_requires_reasoning_and_evidence(tmp_path, missing):
         "summary": "Targeted validation for the changed behavior",
         "evidence": ["validation.txt"],
     }
-    check[missing] = " " if missing == "summary" else []
+    if missing == "file":
+        (artifacts / "validation.txt").unlink()
+    else:
+        check[missing] = " " if missing == "summary" else []
     value["checks"] = [check]
     result = seal_result(
         task(), "20260911-run", value, {"required_checks": ["change_validation"]},
         {"profile": "test"}, tmp_path / "run", tmp_path / "sealed",
     )
     assert result["status"] == "infra_error"
+    assert result["checks"][0]["status"] == "pass"
     assert result["blocking_reasons"]
 
 

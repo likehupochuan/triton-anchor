@@ -1,5 +1,5 @@
 /* Render remote result text as text nodes. No result field can inject HTML. */
-const labels = {success:'通过',passed:'通过',failure:'未通过',failed:'未通过',error:'执行错误',cancelled:'已取消',skipped:'未执行',not_selected:'本次未选择',not_applicable:'不适用',healthy:'正常',degraded:'异常',offline:'离线',snapshot_stale:'快照已过期',unknown:'状态未知',waiting:'等待',ready:'已交付',pending:'待交付',expired:'已到期',not_comparable:'无可比基线'};
+const labels = {success:'通过',passed:'通过',failure:'未通过',failed:'未通过',error:'执行错误',evidence_pending:'证据待确认',cancelled:'已取消',superseded:'已失效 / 被替代',skipped:'未执行',not_selected:'本次未选择',not_applicable:'不适用',healthy:'正常',degraded:'异常',offline:'离线',snapshot_stale:'快照已过期',unknown:'状态未知',waiting:'等待',ready:'已交付',pending:'待交付',expired:'已到期',not_comparable:'无可比基线'};
 const names = {environment:'环境与依赖',frontend_build:'前端构建',frontend_install:'前端安装与导入',frontend_tests:'前端测试',wheel_install:'Wheel 安装与导入',frontend_smoke:'前端基本功能验证',backend_build:'后端构建',backend_install:'后端安装与发现',backend_tests:'后端测试',backend_rebuild:'后端重新构建',backend_smoke:'后端基本功能与 JIT 验证',flaggems:'FlagGems',compile_time:'编译时间性能',pass_profile:'编译阶段性能剖析',ir_serialization:'IR 序列化',pr_information:'PR 说明与改动核验',architecture_review:'架构与接口约束审查',control_plane:'CI 流程检查',custom_test:'定向测试'};
 const friendlyReasons = {'cancelled':'任务已取消','missing required check':'必检尚未完成','PR intent and attributes were not reviewed':'PR 意图与属性尚未完成核验','all commands completed successfully':'命令执行成功','not selected for this change':'本次改动未触发该项检查','minimum frontend coverage':'编译器改动的最低检查范围','frontend code or test behavior changed':'前端代码或测试行为发生变化','architecture contract review is mandatory':'架构审查为必检项'};
 const model = {data:null, selected:null};
@@ -7,7 +7,12 @@ const $ = id => document.getElementById(id);
 const arr = value => Array.isArray(value) ? value : [];
 const txt = value => typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value);
 function el(tag, className, text) { const node=document.createElement(tag); if(className)node.className=className; if(text!=null)node.textContent=txt(text); return node; }
-function badge(status) { const tone=['success','passed','healthy','ready'].includes(status)?'good':['failure','failed','offline'].includes(status)?'bad':['error','degraded','waiting','pending','expired','snapshot_stale'].includes(status)?'warn':status==='cancelled'?'info':''; return el('span','ci-badge '+tone,labels[status]||status||'未知'); }
+function badge(status) { const tone=['success','passed','healthy','ready'].includes(status)?'good':['failure','failed','offline'].includes(status)?'bad':['error','evidence_pending','degraded','waiting','pending','expired','snapshot_stale'].includes(status)?'warn':status==='cancelled'?'info':''; return el('span','ci-badge '+tone,labels[status]||status||'未知'); }
+function evidencePending(run) {
+  return run.local_conclusion==='error' && arr(run.evidence_delivery?.omitted).some(item=>item.required===true) &&
+    [...arr(run.checks),...['pr_info','architecture','intent'].map(kind=>run.ai_review?.[kind]).filter(Boolean)]
+      .every(item=>['passed','not_selected','not_applicable'].includes(item.status));
+}
 function date(value) { const d=new Date(typeof value==='number'?value*1000:value); return value!=null&&!Number.isNaN(d.valueOf())?d.toLocaleString('zh-CN',{hour12:false}):'尚无时间记录'; }
 function link(label, url) { try { const target=new URL(url); if(target.protocol!=='https:')return null; const a=el('a','',label); a.href=target.href; a.target='_blank'; a.rel='noopener noreferrer'; return a; } catch { return null; } }
 function empty(container, message) { container.append(el('div','ci-empty',message)); }
@@ -33,7 +38,7 @@ function renderList() {
   if(!runs.length)empty(root,arr(model.data.runs).length?'没有符合筛选条件的任务。':'尚未发布 Local CI 结果。');
   for(const run of runs) {
     const button=el('button','ci-task'); button.type='button'; button.setAttribute('aria-pressed',String(model.selected===key(run)));
-    button.append(el('strong','',title(run)),badge(run.conclusion),el('small','',displaySha(run).slice(0,12)+(run.is_current?' · 当前结果':' · 历史记录')),el('small','',date(run.completed_at)));
+    button.append(el('strong','',title(run)),badge(run.conclusion==='error'&&evidencePending(run)?'evidence_pending':run.conclusion),el('small','',displaySha(run).slice(0,12)+(run.is_current?' · 当前结果':run.superseded?' · 已失效 / 被替代 · 历史记录':' · 历史记录')),el('small','',date(run.completed_at)));
     button.addEventListener('click',()=>{model.selected=key(run);renderList();}); root.append(button);
   }
   renderDetail(runs.find(run=>key(run)===model.selected));
@@ -103,10 +108,12 @@ function renderBlockers(parent, run) {
 function renderDetail(run) {
   const root=$('taskDetail'); root.replaceChildren();
   if(!run) { empty(root,'选择一个任务以查看检查范围、审查结论和执行证据。尚无数据时不会显示通过状态。'); return; }
-  const head=el('div','ci-detail-head'); const heading=el('div'); heading.append(el('p','eyebrow','验证与审查'),el('h2','',title(run))); head.append(heading,badge(run.conclusion));root.append(head);
+  const pendingEvidence=evidencePending(run);
+  const head=el('div','ci-detail-head'); const heading=el('div'); heading.append(el('p','eyebrow','验证与审查'),el('h2','',title(run))); head.append(heading,badge(run.conclusion==='error'&&pendingEvidence?'evidence_pending':run.conclusion));root.append(head);
   const identity=el('div','ci-identity'); identity.append(el('code','',displaySha(run)),el('span','',date(run.completed_at))); root.append(identity);
-  facts(root,[['本地验证',labels[run.local_conclusion]||run.local_conclusion],['环境',run.environment.profile||'未记录']]);
-  if(run.evidence_delivery?.status==='incomplete')root.append(el('p','ci-notice',run.local_conclusion==='passed'?'执行通过，证据发布不完整。':'证据发布不完整，不改变执行结论。'));
+  facts(root,[['本地验证',pendingEvidence?'证据待确认':labels[run.local_conclusion]||run.local_conclusion],['环境',run.environment.profile||'未记录']]);
+  if(run.superseded)root.append(el('p','ci-notice','任务已失效或被新任务替代；以下保留该次执行记录，不作为当前提交的合入依据。'));
+  if(run.evidence_delivery?.status==='incomplete')root.append(el('p','ci-notice',pendingEvidence?'必传检查证据未完整发布，整体结论待确认；已执行检查结果保持原状态。':run.local_conclusion==='passed'?'执行通过，证据发布不完整。':'证据发布不完整，已执行检查结果保持原状态。'));
   if(run.receiver_message)root.append(el('p','ci-notice',run.receiver_message));
   const links=el('div','ci-links'); for(const [label,url] of [['查看完整结果',run.result_url],['查看执行产物',run.artifacts_url]]) { const a=link(label,url); if(a)links.append(a); }root.append(links);
   const metrics=el('div','ci-metrics'); const checks=arr(run.checks); const values=[[checks.filter(c=>c.required).length,'最低必检项'],[checks.filter(c=>c.status==='passed').length,'已通过检查'],[checks.filter(c=>['skipped','not_selected','not_applicable'].includes(c.status)).length,'未选择 / 未执行 / 不适用'],[arr(run.artifacts).filter(artifact=>!artifact.omitted).length,'所选证据文件']];

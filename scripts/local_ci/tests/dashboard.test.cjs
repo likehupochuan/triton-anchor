@@ -186,6 +186,19 @@ test('old pass cannot override a newer pending or cancelled task', () => {
   assert.equal(data.runs[1].conclusion,'cancelled');
 });
 
+test('superseded tasks preserve execution results without becoming current or passing unexecuted tasks', () => {
+  const data = normalize({schema:'triton-anchor-dashboard',tasks:[
+    {task:task('d','2026-09-12'),status:'pending'},
+    {task:task('c','2026-09-11'),status:'superseded',historical:true,result:null},
+    {task:task('b','2026-09-10'),status:'superseded',historical:true,result:{status:'pass'}},
+    {task:task('a','2026-09-09'),status:'cancelled',historical:true,result:{status:'pass'}},
+  ]});
+  assert.deepEqual(data.runs.map(run=>run.is_current),[true,false,false,false]);
+  assert.deepEqual(data.runs.map(run=>run.conclusion),['waiting','superseded','success','cancelled']);
+  assert.deepEqual(data.runs.map(run=>run.superseded),[false,true,true,false]);
+  assert.equal(data.runs[3].local_conclusion,'passed');
+});
+
 test('omitted files and unsafe URLs are not clickable', () => {
   const artifacts = [{path:'missing',omitted:'Too large'},{path:'safe'},{path:'unsafe'}];
   const data = normalize({schema:'triton-anchor-dashboard',tasks:[{task:task('a','2026-09-10'),
@@ -468,6 +481,20 @@ test('blockers render one concise section without duplicate reviews or expandabl
   const riskText=flatten(document.getElementById('taskDetail')).map(node=>node.textContent);
   assert.ok(riskText.includes('非阻塞发现 · 风险：中'));
   assert.ok(riskText.includes('非阻塞发现 · 风险：未标注'));
+  context.run=errorRun({status:'infra_error',checks:[{tool_id:'frontend_smoke',status:'pass'}],
+    reviews:[{kind:'architecture',status:'pass'}],
+    evidence_delivery:{status:'incomplete',omitted:[{path:'smoke.log',required:true}]},
+    blocking_reasons:['必传检查证据未完整发布，整体结论待确认：smoke.log']});
+  assert.equal(blockerGroups(context.run)[0].id,'publication');
+  vm.runInNewContext('renderDetail(run);',context);
+  const evidenceText=flatten(document.getElementById('taskDetail')).map(node=>node.textContent);
+  assert.ok(evidenceText.includes('证据待确认'));
+  assert.ok(evidenceText.some(text=>text.includes('已执行检查结果保持原状态')));
+  for(const status of ['error','failed']) {
+    context.run.checks[0].status=status;
+    vm.runInNewContext('renderDetail(run);',context);
+    assert.ok(!flatten(document.getElementById('taskDetail')).some(node=>node.textContent==='证据待确认'));
+  }
 });
 
 test('profile errors and unknown execution summaries are not lost behind missing reviews', () => {

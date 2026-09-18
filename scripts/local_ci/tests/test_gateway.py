@@ -707,6 +707,29 @@ README only
         )
         self.assertEqual(before, (len(self.gh.statuses), len(self.gh.comments)))
 
+    def test_inactive_dashboard_result_distinguishes_supersession_from_cancellation(self):
+        control = self.store(g.CONTROL_BRANCH)
+        g.enqueue(self.task, self.gh, control, self.source)
+        results = self.store(g.RESULTS_BRANCH)
+        result = self.result()
+        results.put({f"runs/{self.task['task_id']}/{result['run_id']}/result.json": result})
+        before = (len(self.gh.statuses), len(self.gh.comments))
+        with patch.object(self.gh, "owns_task", return_value=False):
+            for reason, expected in ((None, "superseded"), ("superseded", "superseded"),
+                                     ("manual cancellation", "cancelled")):
+                with self.subTest(reason=reason):
+                    if reason:
+                        control.put({f"cancel/{self.task['task_id']}.json": {
+                            "task_id": self.task["task_id"], "reason": reason,
+                        }})
+                    self.assertEqual(g.collect_results(
+                        self.gh, control, results, self.root / "dashboard"), [])
+                    row = json.loads((self.root / "dashboard/tasks.json").read_text())["tasks"][0]
+                    self.assertEqual(row["status"], expected)
+                    self.assertTrue(row["historical"])
+                    self.assertEqual(row["result"]["status"], "pass")
+                    self.assertEqual(before, (len(self.gh.statuses), len(self.gh.comments)))
+
     def test_failed_dashboard_is_rebuilt_without_repeating_completed_writeback(self):
         control = self.store(g.CONTROL_BRANCH)
         g.enqueue(self.task, self.gh, control, self.source)
@@ -958,6 +981,17 @@ README only
             self.assertEqual([call.args[1:4] for call in check.call_args_list], [("basic", "completed", "failure")])
         self.assertEqual(self.gh.statuses, [])
 
+        # Finish pending statuses left by the short-lived early-summary version.
+        pending = {"state": "pending", "target_url": "https://github.com/run#local-ci-task=" + self.task["task_id"]}
+        for outcomes in (
+            {"prepare": "success", "basic": "failure", "enqueue": "skipped"},
+            {**dict.fromkeys(("prepare", *g.CHECK_NAMES, "card"), "success"),
+             "approval": "failure", "enqueue": "skipped"},
+        ):
+            with patch.object(self.gh, "latest_summary", return_value=pending):
+                g.finalize_preflight(self.gh, self.task, outcomes)
+            self.assertEqual(self.gh.statuses[-1], (self.task["task_id"], "error"))
+
     def test_stage_completion_advances_only_after_success_without_summary_or_comments(self):
         outcomes = {"success": "success", "failure": "failure",
                     "cancelled": "cancelled", "skipped": "action_required"}
@@ -1093,6 +1127,12 @@ README only
         rendered = g.result_comment(result)
         self.assertIn("执行通过，证据发布不完整", rendered)
         self.assertNotIn("环境或执行异常", rendered)
+        result["status"] = "infra_error"
+        result["evidence_delivery"]["omitted"][0]["required"] = True
+        rendered = g.result_comment(result)
+        self.assertIn("整体结论待确认", rendered)
+        self.assertIn("CI 流程验证 | 通过", rendered)
+        self.assertNotIn("环境或执行异常", rendered)
 
     def test_dashboard_history_restores_modern_and_legacy_data_without_gate_writes(self):
         from types import SimpleNamespace
@@ -1168,7 +1208,7 @@ README only
         feed = json.loads((self.root / "dashboard/tasks.json").read_bytes())
         self.assertEqual(len(feed["tasks"]), 2)
 
-    def test_pr_checks_and_summary_are_published_on_head_sha(self):
+    def test_pr_checks_and_summary_are_published_on_tested_sha(self):
         client = g.GitHub(g.REPOSITORY, token="fixture")
         snapshots = {self.head: [
             {"context": g.SUMMARY_CONTEXT, "state": "pending", "creator": {"login": "github-actions[bot]"}},
@@ -1188,14 +1228,49 @@ README only
         with patch.object(client, "request", side_effect=request):
             client.status(self.task, "success", "Local CI: pass", "https://gitee.com/report")
             client.check(self.task, "basic", "in_progress", None, "", "Running", run_id="123")
-            self.assertEqual(writes[0][0], f"statuses/{self.head}")
+            self.assertEqual(writes[0][0], f"statuses/{self.tested}")
             self.assertEqual(writes[0][1]["state"], "success")
             self.assertEqual(writes[1][0], "check-runs")
-            self.assertEqual(writes[1][1]["head_sha"], self.head)
-            self.assertNotIn(self.tested, json.dumps(writes))
+            self.assertEqual(writes[1][1]["head_sha"], self.tested)
+            self.assertNotIn(self.head, json.dumps(writes))
             self.assertNotIn("sophgo", json.dumps(writes))
             client.status(self.task, "success", "Local CI: pass", "https://gitee.com/other-report")
             self.assertEqual(len(writes), 2)
+
+    def test_legacy_result_ownership_and_checks_survive_name_and_commit_migration(self):
+        client = g.GitHub(g.REPOSITORY, token="fixture")
+        names = {key: g.CHECK_ALIASES[key][0] for key in (*g.CHECK_NAMES, "dispatch")}
+        checks = [github_check({"name": name, "status": "completed", "conclusion": "success",
+                               "external_id": f"triton-anchor-local-ci:{key}:{self.task['task_id']}"}, index)
+                  for index, (key, name) in enumerate(names.items(), 1)]
+        summaries = {
+            self.head: [{"context": "local-ci/summary", "state": "success", "target_url": "https://github.com/run#local-ci-task=older"}],
+            self.tested: [{"context": "local-ci/summary", "state": "success", "target_url": "https://github.com/run#local-ci-task=" + self.task["task_id"]}],
+        }
+
+        def request(path, method="GET", data=None):
+            sha = path.split("/")[1]
+            if "/statuses?" in path:
+                return summaries[sha]
+            if "/check-runs?" in path:
+                return {"check_runs": [row for row in checks if sha == self.head
+                                      and f"check_name={g.quote(row['name'], safe='')}&" in path]}
+            raise AssertionError(path)
+
+        with patch.object(client, "request", side_effect=request), patch.dict(g.os.environ, {"GITHUB_RUN_ID": ""}):
+            self.assertEqual(client.latest_summary(self.task), summaries[self.tested][0])
+            self.assertTrue(client.owns_task(self.task))
+            with patch.object(client, "check", return_value=True) as publish:
+                client.restore_preflight(self.task)
+            self.assertEqual([call.args[1] for call in publish.call_args_list], list(names))
+            # The compatible records must not let an old receiver claim a newer task.
+            checks[0].update(id=99, external_id="triton-anchor-local-ci:basic:new-task",
+                             output={"summary": "<!-- local-ci-workflow:999 -->"})
+            self.assertFalse(client.owns_task(self.task))
+            with patch.object(g, "is_current", return_value=True), \
+                    patch.dict(g.os.environ, {"GITHUB_RUN_ID": "998"}), \
+                    self.assertRaisesRegex(ValueError, "newer workflow"):
+                g.begin_checks(client, self.task)
 
     def test_reopen_closes_pending_tested_sha_check_and_retired_status(self):
         client = g.GitHub(g.REPOSITORY, token="fixture")
@@ -1248,7 +1323,7 @@ README only
             with self.assertRaisesRegex(ValueError, "PR changed"):
                 client.approval_context(self.task)
 
-    def test_result_comment_preserves_reported_blockers_and_important_limitations(self):
+    def test_result_comment_puts_blockers_and_code_links_in_findings(self):
         result = self.result()
         result["status"] = "fail"
         result["checks"][0].update(status="skipped", summary="执行被中断")
@@ -1256,11 +1331,30 @@ README only
             "最低必检未通过：control_plane — 执行被中断",
             "性能结果不可比：两次测量使用的 LLVM 版本不同",
         ]
-        result["findings"] = [{"summary": "架构契约遭到破坏", "blocking": True}]
+        result["findings"] = [
+            {"summary": "架构契约遭到破坏", "blocking": True,
+             "code_evidence": [{"path": "src/file.py", "line": 17}]},
+            {"summary": "可以改进错误提示", "blocking": False, "severity": "low",
+             "evidence": ["src/file.py:23", "../secret", "https://evil.invalid"]},
+        ]
+        result["blocking_reasons"].append(result["findings"][0]["summary"])
         rendered = g.result_comment(result)
+        findings = rendered.split("### 需要关注的发现", 1)[1].split("### 查看审查详情", 1)[0]
         limitations = rendered.split("### 限制说明", 1)[1]
         for reason in [*result["blocking_reasons"], result["findings"][0]["summary"]]:
-            self.assertIn(g.feedback_text(reason), limitations)
+            self.assertIn(g.feedback_text(reason), findings)
+            self.assertNotIn(g.feedback_text(reason), limitations)
+        self.assertEqual(findings.count("架构契约遭到破坏"), 1)
+        for line in (17, 23):
+            self.assertIn(f"/blob/{self.tested}/src/file.py#L{line}", findings)
+        self.assertNotIn("secret", findings)
+        self.assertNotIn("evil.invalid", findings)
+        self.assertIn("报告未列出编译器构建或运行检查", limitations)
+
+    def test_result_comment_hides_empty_limitations(self):
+        result = self.result()
+        result["checks"].append({"tool_id": "frontend_smoke", "status": "pass"})
+        self.assertNotIn("### 限制说明", g.result_comment(result))
 
     def test_review_evidence_links_only_safe_paths_on_the_frozen_revision(self):
         self.assertEqual(g.feedback_evidence({"kind": "architecture", "evidence": [
@@ -1279,7 +1373,7 @@ README only
                 patch.object(g, "load_task", return_value=self.task), patch.object(g, "output"), \
                 patch.dict(g.os.environ, {"GITHUB_STEP_SUMMARY": ""}):
             g.begin_checks(self.gh, self.task)
-            self.assertEqual(events[:2], [("basic", "queued"), ("summary", "pending")])
+            self.assertEqual(events, [("basic", "queued")])
             self.assertEqual(check.call_args.kwargs, {"restart": True})
             for stage, visible in (("basic", ["basic", "api"]),
                                    ("api", ["basic", "api", "security"]),

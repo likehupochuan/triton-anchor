@@ -49,7 +49,7 @@
       if (/Trusted profile and exact LLVM revision are required|LLVM.{0,30}(?:mismatch|not found|missing)|dependency version mismatch|配置.{0,12}(?:缺失|错误|不匹配)|容器.{0,12}(?:启动失败|不可用)/i.test(text)) return 'environment';
       if (/connection (?:refused|reset|timed out)|could not resolve (?:host|hostname)|(?:temporary failure in|failed) name resolution|NameResolutionError|network is unreachable|failed to (?:connect|establish a new connection)|SSL certificate problem|certificate verify failed|TLS handshake(?::| has)? (?:failed|failure|error|timeout)|网络(?:连接)?(?:失败|异常|不可达|超时)|连接(?:被拒绝|重置|超时)|域名解析失败|DNS(?: (?:lookup|resolution|query))?(?: has| is|:)? (?:failed|failure|error|timed out)|DNS.{0,10}(?:失败|异常|超时)|无法连接/i.test(text)) return 'network';
       if (/worker preparation(?: failed|:|$)|worker revision differs from installed control|environment (?:registry|operation|subprocess).{0,45}(?:unreadable|incomplete|failed|could not|invalid)|rootless Docker.{0,40}(?:required|failed|invalid)|cannot connect to the docker daemon|no space left on device|out of memory|\bOOM(?:Killed)?\b|permission denied|no module named|ModuleNotFoundError|shared librar(?:y|ies).{0,40}(?:not found|cannot open)|服务器环境.{0,15}(?:异常|失败|不匹配)|环境准备.{0,15}(?:失败|未完成)|依赖.{0,15}(?:缺失|不匹配)|内存不足|磁盘空间不足|权限不足/i.test(text)) return 'environment';
-      if (/证据文件不存在|result.{0,30}(?:invalid|mismatch|changed|unreadable)|结果.{0,20}(?:校验|发布|上传|读取).{0,25}(?:失败|异常|错误|未完成|无法|不存在)|tested tracked source changed during execution/i.test(text)) return 'publication';
+      if (/证据文件不存在|必传检查证据未完整发布|result.{0,30}(?:invalid|mismatch|changed|unreadable)|结果.{0,20}(?:校验|发布|上传|读取).{0,25}(?:失败|异常|错误|未完成|无法|不存在)|tested tracked source changed during execution/i.test(text)) return 'publication';
       if (/timed? ?out|timeout|time budget exhausted|cancelled|canceled|超时|已取消|执行中断/i.test(text)) return 'execution';
       const check = context.check || checks.find(item => text.startsWith(item.id + ':') || text.startsWith(item.id + '：') ||
         text.startsWith('最低必检未通过：' + item.id));
@@ -118,7 +118,8 @@
       const checks = array(result.checks).map(check => ({...check,
         id: check.tool_id, status: status(check.status), required: required.has(check.tool_id),
         reason: check.summary || ''}));
-      const local = item.status || result.status || 'pending';
+      const superseded = item.status === 'superseded';
+      const local = superseded ? result.status || 'superseded' : item.status || result.status || 'pending';
       const conclusion = local === 'pass' ? 'success' : local === 'fail' ? 'failure' : status(local);
       const reviews = Object.fromEntries(array(result.reviews).map(review => [review.kind, review]));
       const evidence = checks.flatMap(check => array(check.evidence).map(path => ({
@@ -131,7 +132,7 @@
         ? result.evidence_delivery : {status:'complete',omitted:[]};
       return {...task, task_id: task.task_id || result.task?.task_id || '', run_id: result.run_id || 'pending',
         completed_at: result.completed_at || Math.max(0,...checks.map(c => timestamp(c.finished_at))) / 1000 || task.captured_at,
-        is_current: !item.historical && latest.get(subject(task)) === task.task_id, historical:!!item.historical, conclusion, local_conclusion: status(result.status || local),
+        is_current: !item.historical && latest.get(subject(task)) === task.task_id, historical:!!item.historical, superseded, conclusion, local_conclusion: status(result.status || local),
         artifacts, checks, evidence, performance,
         policy: {...(result.policy || {}), docs_only: result.policy?.impact?.level === 'non_executable',
                  manual_full: task.full, changed_paths: array(result.policy?.changes).map(c => c.path)},
