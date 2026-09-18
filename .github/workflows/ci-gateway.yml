@@ -56,7 +56,7 @@ jobs:
     if: >-
       !cancelled() &&
       (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
-      (inputs.mode == 'publish' || needs.receive.outputs.state == 'ready')
+      (inputs.mode == 'publish' || needs.receive.outputs.state == 'ready' || needs.receive.outputs.state == 'obsolete')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
@@ -83,7 +83,8 @@ jobs:
       - name: Collect dashboard data
         id: collect
         env:
-          RECEIVER_TASK_ID: ${{ inputs.mode == 'receive' && inputs.task_id || '' }}
+          # Obsolete tasks only refresh the dashboard; they cannot publish checks or comments.
+          RECEIVER_TASK_ID: ${{ inputs.mode == 'receive' && needs.receive.outputs.state == 'ready' && inputs.task_id || '' }}
         run: python3 scripts/ci/gateway.py collect
       - name: Check whether dashboard content changed
         id: dashboard
@@ -119,12 +120,13 @@ jobs:
             const content = data => JSON.stringify({schema: data?.schema, tasks: data?.tasks, site_digest: data?.site_digest});
             core.setOutput('changed', content(previous) !== content(next));
       - uses: actions/upload-pages-artifact@v3
+        if: steps.dashboard.outputs.changed == 'true'
         with: {path: _site}
       - name: Surface incomplete receiver operations
-        if: inputs.mode == 'receive' && steps.collect.outputs.receiver_errors != '0'
+        if: inputs.mode == 'receive' && needs.receive.outputs.state == 'ready' && steps.collect.outputs.receiver_errors != '0'
         run: exit 1
       - name: Retry incomplete publication within the receiver round limit
-        if: failure() && inputs.mode == 'receive' && inputs.receiver_round != '3'
+        if: failure() && inputs.mode == 'receive' && needs.receive.outputs.state == 'ready' && inputs.receiver_round != '3'
         uses: actions/github-script@v7
         env:
           TASK_ID: ${{ inputs.task_id }}
@@ -144,7 +146,7 @@ jobs:
   deploy-dashboard:
     name: Deploy dashboard (independent of test results)
     needs: publish
-    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.publish.outputs.dashboard_changed == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:

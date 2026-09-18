@@ -1,6 +1,6 @@
 name: CI Request
 run-name: >-
-  ${{ github.event_name == 'pull_request_target' && format('PR #{0}', github.event.pull_request.number) || format('Branch {0}', github.ref_name || inputs.source_branch) }} | request
+  ${{ github.event_name == 'pull_request_target' && format('PR #{0}', github.event.pull_request.number) || format('Branch {0}', inputs.source_branch || github.ref_name) }} | request
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, edited, closed, converted_to_draft, labeled, unlabeled]
@@ -13,12 +13,14 @@ on:
 permissions: {}
 concurrency:
   group: >-
-    local-ci-request-${{ github.event_name == 'pull_request_target' && format('pr-{0}', github.event.pull_request.number) || format('branch-{0}', github.ref_name || inputs.source_branch) }}
+    local-ci-request-${{ github.event_name == 'pull_request_target' && format('pr-{0}', github.event.pull_request.number) || format('branch-{0}', inputs.source_branch || github.ref_name) }}
   cancel-in-progress: true
 jobs:
   route:
     name: Route CI request
-    if: github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor'
+    if: >-
+      (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
+      !github.event.deleted
     runs-on: ubuntu-latest
     permissions: {contents: read, pull-requests: read, actions: write}
     steps:
@@ -34,7 +36,7 @@ jobs:
             const manual = context.eventName === 'workflow_dispatch';
             const push = context.eventName === 'push';
             const shaPattern = /^[0-9a-f]{40}$/i;
-            let branch = pull?.base.ref || (push ? context.ref_name : '');
+            let branch = pull?.base.ref || (push ? context.ref.replace(/^refs\/heads\//, '') : '');
             let requestedSha = pull?.head.sha || (push ? context.sha : '');
             let action = context.payload.action || (push ? 'push' : '');
             if (manual) {
