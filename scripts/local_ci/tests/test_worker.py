@@ -11,17 +11,18 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_ci.policy import minimum_checks
 from agent_ci.protocol import TASK_SCHEMA, atomic_json, metadata_digest, task_id
 from agent_ci.worker import Worker, scan_once, trigger_control_update
 from agent_ci.state import Journal, local_run_dir
 
 
-def manifest():
+def manifest(event_kind="pull_request"):
     value = {
         "schema": TASK_SCHEMA,
         "repository": "likehupochuan/triton-anchor",
-        "event_kind": "pull_request",
-        "pr_number": 7,
+        "event_kind": event_kind,
+        "pr_number": 7 if event_kind == "pull_request" else 0,
         "target_branch": "main",
         "tested_sha": "a" * 40,
         "base_sha": "b" * 40,
@@ -38,7 +39,7 @@ def manifest():
     }
     value["metadata_digest"] = metadata_digest(value)
     value["task_id"] = task_id(value)
-    prefix = f"ci/pr-7/{value['task_id']}"
+    prefix = f"ci/pr-7/{value['task_id']}" if value["pr_number"] else f"ci/branch/{value['task_id']}"
     value.update(
         task_ref=prefix + "/tested",
         base_task_ref=prefix + "/base",
@@ -88,10 +89,11 @@ def test_idle_relay_failure_persists_until_success_and_old_codex_state_is_hidden
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
+@pytest.mark.parametrize("event_kind", ["pull_request", "push", "manual"])
 def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure(
-    tmp_path, monkeypatch, cancelled
+    tmp_path, monkeypatch, cancelled, event_kind
 ):
-    task = manifest()
+    task = manifest(event_kind)
     events = []
     calls = 0
     uploads = 0
@@ -149,7 +151,7 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
             return tmp_path
 
         def write_context(self, policy, changes):
-            pass
+            assert ("pr_info" in policy["required_reviews"]) == bool(task["pr_number"])
 
     class Driver:
         def redact(self, text):
@@ -165,7 +167,11 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
                     "summary": "Behavior verified",
                     "checks": [],
                     "reviews": [
-                        {"kind": kind, "status": "pass", "summary": "Verified"}
+                        {
+                            "kind": kind,
+                            "status": "not_applicable" if kind == "pr_info" and not task["pr_number"] else "pass",
+                            "summary": "Verified",
+                        }
                         for kind in ("pr_info", "architecture")
                     ],
                 },
@@ -179,7 +185,7 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
     )
     monkeypatch.setattr(
         "agent_ci.worker.minimum_checks",
-        lambda *args, **kwargs: {"required_checks": []},
+        lambda *args, **kwargs: {**minimum_checks(*args, **kwargs), "required_checks": []},
     )
     worker = Worker(
         {"state_dir": str(tmp_path), "simulation": True, "retry_delay_seconds": 0},
@@ -202,7 +208,8 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
     worker.journal = Journal(tmp_path)
     assert worker.journal.register(task)["run_id"] == row["run_id"]
     directory = worker.journal.run_dir(task["task_id"])
-    assert directory == tmp_path / "runs/pr/branch-main/pr-7" / task["head_sha"] / row["run_id"]
+    prefix = "runs/pr/branch-main/pr-7" if task["pr_number"] else "runs/push/branch-main"
+    assert directory == tmp_path / prefix / task["head_sha"] / row["run_id"]
     # Simulate a pre-upgrade run: reload and retry its saved upload in place.
     legacy = tmp_path / "runs" / task["task_id"]
     directory.parent.rename(legacy)
@@ -380,48 +387,6 @@ def test_scan_releases_control_lock_before_trigger(tmp_path):
         scan_once(FixtureWorker(), control_lock, trigger=trigger)
 
     assert events == ["scan", "trigger-after-unlock"]
-
-
-def test_oldest_waiting_task_deterministically_requests_control_update(tmp_path):
-    newer = revised_manifest(
-        "1" * 40,
-        "2026-09-12T00:00:00Z",
-    )
-    older = revised_manifest(
-        "2" * 40,
-        "2026-09-11T00:00:00Z",
-    )
-
-    class Relay:
-        def refresh(self):
-            pass
-
-        def tasks(self):
-            return [newer, older]
-
-        def validity(self, task):
-            return True, ""
-
-    class Manager:
-        def generations(self):
-            return {}
-
-        def collect_retired(self):
-            pass
-
-        def current_control_revision(self):
-            return "f" * 40
-
-    worker = Worker(
-        {"state_dir": str(tmp_path), "simulation": True},
-        relay=Relay(),
-        manager=Manager(),
-        driver=object(),
-        control_request_selector=lambda config, current, requests, **kwargs: min(
-            requests, key=lambda row: (row["captured_at"], row["task_id"])
-        ),
-    )
-    assert worker.scan()["revision"] == older["worker_revision_sha"]
 
 
 def test_cancelled_and_published_tasks_do_not_block_newer_control_update(tmp_path):

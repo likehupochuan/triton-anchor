@@ -141,7 +141,8 @@ def seal_result(
             failed |= check["status"] == "fail"
             incomplete |= check["status"] != "fail"
     reviewed = {review["kind"]: review for review in reviews}
-    for kind in ("pr_info", "architecture"):
+    required_reviews = ("pr_info", "architecture") if task["event_kind"] == "pull_request" else ("architecture",)
+    for kind in required_reviews:
         review = reviewed.get(kind, {})
         if review.get("status") != "pass":
             reasons.append(

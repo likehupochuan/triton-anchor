@@ -261,6 +261,7 @@ class Worker:
                 changes,
                 backend_enabled=generation["backend_enabled"],
                 full=task["full"],
+                event_kind=task["event_kind"],
             )
             environment = {
                 key: generation[key]

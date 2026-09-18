@@ -179,7 +179,8 @@ def ordered(checks: set[str]) -> list[str]:
 
 
 def minimum_checks(
-    changes: list[dict], *, backend_enabled: bool, full: bool = False
+    changes: list[dict], *, backend_enabled: bool, full: bool = False,
+    event_kind: str = "pull_request",
 ) -> dict:
     if not changes:
         raise ContractError(
@@ -286,7 +287,7 @@ def minimum_checks(
         "recommended_parameters": {} if full else recommended_parameters,
         "not_applicable": ordered((set(TOOLS) if full else recommended) & unavailable),
         "capabilities": [t for t in CHECK_ORDER if t not in unavailable],
-        "required_reviews": ["pr_info", "architecture"],
+        "required_reviews": (["pr_info"] if event_kind == "pull_request" else []) + ["architecture"],
         "reason": (
             "Path categories only suggest checks. Codex must inspect the actual diff, choose relevant "
             "validation and record its reasoning and evidence in change_validation. Ordinary comments "

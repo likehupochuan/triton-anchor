@@ -424,8 +424,9 @@ def test_active_task_defers_requested_update_without_losing_revision(tmp_path):
     assert config_path.read_bytes() == before
 
 
-def test_request_file_supplies_exact_revision_and_is_removed_after_success(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("completed", [False, True])
+def test_request_file_is_consumed_only_after_exact_revision_update(
+    tmp_path, monkeypatch, completed
 ):
     request_path = tmp_path / "state/control-update/request.json"
     request_path.parent.mkdir(parents=True)
@@ -441,82 +442,23 @@ def test_request_file_supplies_exact_revision_and_is_removed_after_success(
     config_path.write_text(
         json.dumps({"state_dir": str(tmp_path / "state")})
     )
-    calls = []
     monkeypatch.setattr(control_update.os, "geteuid", lambda: 1001)
 
     def update(config, **kwargs):
-        calls.append(
-            {
-                "apply": kwargs["apply"],
-                "expected_revision": kwargs["expected_revision"],
-                "config_path": kwargs["config_path"],
-            }
-        )
-        request_path.write_text(json.dumps({**request, "requested_at": 2}))
-        request_path.chmod(0o600)
-        kwargs["on_success"]()
-        return {"state": "updated", "revision": kwargs["expected_revision"]}
+        assert kwargs["apply"] and kwargs["expected_revision"] == request["revision"]
+        assert kwargs["config_path"] == config_path
+        if completed:
+            request_path.write_text(json.dumps({**request, "requested_at": 2}))
+            request_path.chmod(0o600)
+            kwargs["on_success"]()
+        return {"state": "updated" if completed else "deferred-active-task",
+                "revision": kwargs["expected_revision"]}
 
-    monkeypatch.setattr(
-        control_update,
-        "update_control",
-        update,
-    )
-    assert (
-        control_update.main(
-            [
-                "--config",
-                str(config_path),
-                "--request-file",
-                str(request_path),
-                "--apply",
-            ]
-        )
-        == 0
-    )
-    assert calls == [{
-        "apply": True, "expected_revision": "a" * 40, "config_path": config_path,
-    }]
-    assert not request_path.exists()
-
-
-def test_deferred_request_file_remains_for_the_next_worker_scan(tmp_path, monkeypatch):
-    request_path = tmp_path / "state/control-update/request.json"
-    request_path.parent.mkdir(parents=True)
-    request_path.write_text(
-        json.dumps(
-            {
-                "schema": REQUEST_SCHEMA,
-                "revision": "a" * 40,
-                "task_id": "b" * 64,
-            }
-        )
-    )
-    request_path.chmod(0o600)
-    config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps({"state_dir": str(tmp_path / "state")}))
-    monkeypatch.setattr(control_update.os, "geteuid", lambda: 1001)
-    monkeypatch.setattr(
-        control_update,
-        "update_control",
-        lambda config, **kwargs: {
-            "state": "deferred-active-task",
-            "revision": kwargs["expected_revision"],
-        },
-    )
-    assert (
-        control_update.main(
-            [
-                "--config",
-                str(config_path),
-                "--request-file",
-                str(request_path),
-                "--apply",
-            ]
-        )
-        == 0
-    )
-    assert request_path.exists()
+    monkeypatch.setattr(control_update, "update_control", update)
+    assert control_update.main([
+        "--config", str(config_path), "--request-file", str(request_path), "--apply",
+    ]) == 0
+    assert request_path.exists() is not completed
 
 
 def test_request_file_rejects_symlink_at_configured_path(tmp_path, monkeypatch):

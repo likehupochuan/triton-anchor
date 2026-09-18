@@ -2,7 +2,6 @@
 from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -177,26 +176,6 @@ def test_health_publishes_only_current_codex_status_and_original_upload_age(tmp_
     snapshot = public_snapshot(health.collect(config, now=1900, manager=manager))
     assert snapshot["active_task"]["codex_status"] is None
     assert public_snapshot({})["poller"]["last_poll_status"] == "unknown"
-
-
-def test_health_defaults_do_not_monitor_removed_control_update_timer(tmp_path):
-    manager = SimpleNamespace(health=lambda: {"images": [], "attempts": []})
-    shown = []
-
-    def show_service(argv, **kwargs):
-        shown.append(argv[3])
-        return SimpleNamespace(
-            returncode=0,
-            stdout="LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n",
-        )
-
-    with patch.object(health.subprocess, "run", side_effect=show_service):
-        snapshot = health.collect(
-            {"state_dir": str(tmp_path)}, now=1, manager=manager
-        )
-    assert "triton-anchor-local-ci-control-update.timer" not in shown
-    assert "triton-anchor-local-ci-control-update.service" in shown
-    assert snapshot["control_update"]["state"] == "idle"
 
 
 def test_health_reports_failed_pending_control_update(tmp_path):

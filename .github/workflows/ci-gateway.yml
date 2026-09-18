@@ -41,7 +41,8 @@ jobs:
           GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
         run: python3 scripts/ci/gateway.py cancel
   prepare:
-    name: Prepare exact task
+    name: >-
+      Prepare exact task / ${{ inputs.pr_number != '' && inputs.pr_number != '0' && format('PR #{0}', inputs.pr_number) || format('Branch {0}', inputs.source_branch || github.ref_name) }}
     needs: cancel-obsolete
     if: ${{ inputs.action != 'closed' && inputs.action != 'converted_to_draft' }}
     runs-on: ubuntu-latest
@@ -82,14 +83,14 @@ jobs:
     name: Basic CI
     needs: prepare
     permissions: {contents: read}
-    uses: ./.github/workflows/local-ci-basic-checks.yml
+    uses: ./.github/workflows/basic-checks.yml
     with:
       tested_sha: ${{ needs.prepare.outputs.tested_sha }}
   api:
     name: API compatibility
     needs: [prepare, basic]
     permissions: {contents: read}
-    uses: ./.github/workflows/local-ci-api-compatibility.yml
+    uses: ./.github/workflows/api-compatibility.yml
     with:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
       tested_sha: ${{ needs.prepare.outputs.tested_sha }}
@@ -99,7 +100,7 @@ jobs:
     name: Security gate
     needs: [prepare, api]
     permissions: {contents: read, security-events: write}
-    uses: ./.github/workflows/local-ci-security.yml
+    uses: ./.github/workflows/security.yml
     with:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
       tested_sha: ${{ needs.prepare.outputs.tested_sha }}
@@ -109,7 +110,7 @@ jobs:
     needs: [prepare, basic]
     if: ${{ always() && needs.prepare.outputs.task_id != '' }}
     permissions: {contents: read, pull-requests: read, checks: write, statuses: read, actions: read}
-    uses: ./.github/workflows/local-ci-preflight-result.yml
+    uses: ./.github/workflows/preflight-result.yml
     with:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
       worker_revision_sha: ${{ inputs.worker_revision_sha }}
@@ -120,7 +121,7 @@ jobs:
     needs: [prepare, api]
     if: ${{ always() && needs.prepare.outputs.task_id != '' }}
     permissions: {contents: read, pull-requests: read, checks: write, statuses: read, actions: read}
-    uses: ./.github/workflows/local-ci-preflight-result.yml
+    uses: ./.github/workflows/preflight-result.yml
     with:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
       worker_revision_sha: ${{ inputs.worker_revision_sha }}
@@ -133,7 +134,7 @@ jobs:
     needs: [prepare, security, basic-result, api-result]
     if: ${{ always() && needs.prepare.outputs.task_id != '' }}
     permissions: {contents: read, pull-requests: write, checks: write, statuses: read, actions: read}
-    uses: ./.github/workflows/local-ci-preflight-result.yml
+    uses: ./.github/workflows/preflight-result.yml
     with:
       task_digest: ${{ needs.prepare.outputs.task_digest }}
       worker_revision_sha: ${{ inputs.worker_revision_sha }}

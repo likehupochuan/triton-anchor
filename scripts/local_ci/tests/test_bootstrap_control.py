@@ -59,9 +59,12 @@ def fixture_config(tmp_path, source):
     return config, config_path, credentials_path
 
 
-def test_bootstrap_clones_exact_revision_and_invokes_pinned_installer(tmp_path):
+@pytest.mark.parametrize("existing", [False, True])
+def test_bootstrap_uses_exact_revision_and_invokes_pinned_installer(tmp_path, existing):
     source, revision = fixture_source(tmp_path)
     config, config_path, credentials_path = fixture_config(tmp_path, source)
+    if existing:
+        subprocess.run(["git", "clone", "-q", str(source), config["control_root"]], check=True)
     installed = []
 
     result = bootstrap_control(
@@ -75,7 +78,7 @@ def test_bootstrap_clones_exact_revision_and_invokes_pinned_installer(tmp_path):
     )
 
     control = tmp_path / "control"
-    assert result["applied"] and result["cloned"]
+    assert result["applied"] and result["cloned"] is not existing
     assert git(control, "rev-parse", "HEAD") == revision
     assert git(control, "config", "--get", "remote.origin.url") == str(source)
     assert len(installed) == 1
@@ -131,25 +134,3 @@ def test_existing_unrelated_directory_is_preserved(tmp_path):
         )
 
     assert evidence.read_text() == "keep\n"
-
-
-def test_existing_matching_checkout_is_reused(tmp_path):
-    source, revision = fixture_source(tmp_path)
-    config, config_path, credentials_path = fixture_config(tmp_path, source)
-    subprocess.run(
-        ["git", "clone", "-q", str(source), config["control_root"]], check=True
-    )
-    installed = []
-
-    result = bootstrap_control(
-        config,
-        config_path,
-        credentials_path,
-        revision,
-        apply=True,
-        allow_local=True,
-        installer=lambda *arguments: installed.append(arguments),
-    )
-
-    assert not result["cloned"]
-    assert len(installed) == 1

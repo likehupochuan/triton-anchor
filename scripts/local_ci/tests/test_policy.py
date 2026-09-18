@@ -6,11 +6,12 @@ from tools.basic_tools import runner
 
 
 class PolicyTests(unittest.TestCase):
-    def classify(self, *paths, backend=True, full=False, **extra):
+    def classify(self, *paths, backend=True, full=False, event_kind="pull_request", **extra):
         return policy.minimum_checks(
             [{"path": path, "status": "M", **extra} for path in paths],
             backend_enabled=backend,
             full=full,
+            event_kind=event_kind,
         )
 
     def test_paths_do_not_force_builds_or_full_without_diff_analysis(self):
@@ -20,10 +21,16 @@ class PolicyTests(unittest.TestCase):
                 selected = self.classify(path)
                 self.assertEqual(selected["required_checks"], ["change_validation"])
                 self.assertEqual(selected["required_parameters"], {})
-                self.assertEqual(selected["required_reviews"], ["pr_info", "architecture"])
         unknown = self.classify("unknown.cfg")
         self.assertEqual(unknown["impact"]["level"], "needs_analysis")
         self.assertNotIn("flaggems", unknown["recommended_checks"])
+
+    def test_only_pr_tasks_require_pr_info_review(self):
+        for event_kind in ("pull_request", "push", "manual"):
+            selected = self.classify("README.md", event_kind=event_kind)
+            expected = ["pr_info", "architecture"] if event_kind == "pull_request" else ["architecture"]
+            self.assertEqual(selected["required_reviews"], expected)
+            self.assertEqual(selected["required_checks"], ["change_validation"])
 
     def test_python_checks_are_hints_without_build_or_backend_expansion(self):
         selected = self.classify("python/triton_anchor/__init__.py")

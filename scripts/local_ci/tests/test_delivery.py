@@ -17,12 +17,12 @@ from agent_ci.protocol import (
 from agent_ci.relay import GitRelay
 
 
-def task():
+def task(event_kind="pull_request"):
     value = {
         "schema": TASK_SCHEMA,
         "repository": "likehupochuan/triton-anchor",
-        "event_kind": "pull_request",
-        "pr_number": 7,
+        "event_kind": event_kind,
+        "pr_number": 7 if event_kind == "pull_request" else 0,
         "target_branch": "main",
         "tested_sha": "a" * 40,
         "base_sha": "b" * 40,
@@ -39,7 +39,7 @@ def task():
     }
     value["metadata_digest"] = metadata_digest(value)
     value["task_id"] = task_id(value)
-    prefix = f"ci/pr-7/{value['task_id']}"
+    prefix = f"ci/pr-7/{value['task_id']}" if value["pr_number"] else f"ci/branch/{value['task_id']}"
     value.update(
         task_ref=prefix + "/tested", base_task_ref=prefix + "/base",
         head_task_ref=prefix + "/head",
@@ -65,23 +65,27 @@ def answer():
     }
 
 
-def seal(tmp_path, value):
+def seal(tmp_path, value, event_kind="pull_request"):
     return seal_result(
-        task(), "20260911-run", value, {"required_checks": ["frontend_tests"]},
+        task(event_kind), "20260911-run", value, {"required_checks": ["frontend_tests"]},
         {"profile": "test"}, tmp_path / "run", tmp_path / "sealed",
     )
 
 
 @pytest.mark.parametrize("missing", ["check", "architecture", "pr_info"])
-def test_incomplete_minimum_or_review_cannot_claim_pass(tmp_path, missing):
+@pytest.mark.parametrize("event_kind", ["pull_request", "push", "manual"])
+def test_incomplete_minimum_or_review_cannot_claim_pass(tmp_path, missing, event_kind):
     value = answer()
     if missing == "check":
         value["checks"] = []
+    elif missing == "pr_info" and event_kind != "pull_request":
+        value["reviews"][0]["status"] = "not_applicable"
     else:
         value["reviews"] = [row for row in value["reviews"] if row["kind"] != missing]
-    result = seal(tmp_path, value)
-    assert result["status"] == "infra_error"
-    assert result["blocking_reasons"]
+    result = seal(tmp_path, value, event_kind)
+    required = missing != "pr_info" or event_kind == "pull_request"
+    assert result["status"] == ("infra_error" if required else "pass")
+    assert bool(result["blocking_reasons"]) == required
 
 
 @pytest.mark.parametrize("location", ["top", "review", "both"])
