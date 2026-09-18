@@ -31,6 +31,11 @@
     'docker.service': 'Rootless Docker',
   };
   const serviceStates = {active: '运行中', inactive: '未运行', failed: '失败', activating: '启动中'};
+  const controlUpdateStates = {
+    failed: '控制代码更新执行失败；具体原因请查看更新服务日志',
+    invalid: '控制代码更新请求无效；具体原因请查看 Worker 日志',
+    blocked: '控制代码更新请求受阻（尚未执行更新）；具体原因请查看 Worker 日志',
+  };
   const rows = value => Array.isArray(value) ? value : [];
   const age = (value, now) => (now - Date.parse(value)) / 1000;
   const fresh = (value, now) => age(value, now) >= -60 && age(value, now) <= source.staleSeconds;
@@ -84,8 +89,8 @@
         if (service.active_state === 'failed' || (persistent && service.available && service.active_state === 'inactive'))
           add('service_' + service.name, '服务异常', (serviceNames[service.name] || service.name) + '：' + serviceStates[service.active_state]);
       }
-      if (['failed', 'invalid', 'blocked'].includes(worker.control_update?.state))
-        add('control_update', '控制更新异常', '控制代码更新失败、请求无效或被阻止，请查看更新服务日志');
+      const controlUpdate = controlUpdateStates[worker.control_update?.state];
+      if (controlUpdate) add('control_update', '控制更新异常', controlUpdate);
     }
     const watchdogFresh = !!watchdog && !watchdogError && fresh(watchdog.updated_at, now);
     if (watchdogError || !watchdog) add('watchdog_read', '监测数据异常', watchdogError || '尚未取得 watchdog 记录', 'warn');
@@ -96,17 +101,27 @@
     if (current && watchdogFresh && watchdog.source_state === 'readable' && Date.parse(observed?.collected_at) >= Date.parse(worker.collected_at)) {
       for (const row of Object.values(watchdog.active || {})) if (row.worker_id === source.worker) incident(row.code);
     }
-    const history = rows(watchdog?.history).filter(row => row.key?.startsWith(source.worker + ':')).slice(-5).reverse();
+    const history = rows(watchdog?.history).filter(row => row.key?.startsWith(source.worker + ':')
+      && age(row.at, now) >= 0 && age(row.at, now) <= 7 * 24 * 60 * 60).slice(-5).reverse();
     return {current, cards, issues, history,
       title: !worker || workerError ? '健康数据不可用' : !current ? '心跳快照已过期' : issues.length ? '发现异常或待确认项' : '已上报状态正常',
       tone: issues.some(row => row.tone === 'bad') ? 'bad' : issues.length ? 'warn' : 'good'};
   }
 
+  async function readGitee(url, message) {
+    const response = await fetch(url, {credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(15000)});
+    if (!response.ok) {
+      const limited = response.status === 429 || (response.status === 403 && /Rate Limit Exceeded/i.test(await response.text()));
+      const error = new Error(limited ? 'Gitee 访问被限流，暂停请求至少 15 分钟后自动重试' : message + '（HTTP ' + response.status + '）');
+      error.rateLimited = limited;
+      throw error;
+    }
+    return response.json();
+  }
+
   async function readSnapshot(filename, branch, schema) {
     const url = 'https://gitee.com/api/v5/repos/' + source.repository + '/contents/' + filename + '?ref=' + encodeURIComponent(branch);
-    const response = await fetch(url, {credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(15000)});
-    if (!response.ok) throw new Error(response.status === 429 ? 'Gitee 匿名访问被限流，请稍后刷新' : 'Gitee 健康数据读取失败（HTTP ' + response.status + '）');
-    const envelope = await response.json();
+    const envelope = await readGitee(url, 'Gitee 健康数据读取失败');
     const value = envelope.encoding === 'base64'
       ? JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(envelope.content.replace(/\s/g, '')), char => char.charCodeAt(0))))
       : envelope;
@@ -116,10 +131,8 @@
   }
 
   async function readAlerts() {
-    const response = await fetch('https://gitee.com/api/v5/repos/' + source.repository + '/issues?state=all&sort=updated&direction=desc&per_page=50',
-      {credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(15000)});
-    if (!response.ok) throw new Error('Gitee 告警列表读取失败（HTTP ' + response.status + '）');
-    const values = await response.json();
+    const values = await readGitee('https://gitee.com/api/v5/repos/' + source.repository + '/issues?state=all&sort=updated&direction=desc&per_page=50',
+      'Gitee 告警列表读取失败');
     if (!Array.isArray(values)) throw new Error('Gitee 告警列表格式不正确');
     return values.filter(row => typeof row.body === 'string' && row.body.includes('<!-- local-ci-alert:' + source.worker + ' -->')
       && /^[A-Za-z0-9]+$/.test(String(row.number))).slice(0, 10).map(row => ({
@@ -137,9 +150,12 @@
     const content = node('div'); content.setAttribute('aria-live', 'polite');
     root.append(heading, content);
     let worker = null, watchdog = null, workerError = '', watchdogError = '', loading = false, renderedState = '';
-    let alerts = [], alertsError = '';
+    let alerts = [], alertsError = '', retryAt = 0;
 
     function render() {
+      const cooling = Date.now() < retryAt;
+      refresh.disabled = loading || cooling;
+      refresh.textContent = loading ? '读取中…' : cooling ? '限流中，暂停刷新' : '刷新健康状态';
       if (loading && !worker) { renderedState = ''; content.replaceChildren(node('p', 'health-muted', '正在读取健康数据…')); return; }
       const model = assess(worker, watchdog, {workerError, watchdogError});
       const viewState = JSON.stringify([model, worker?.collected_at, watchdog?.updated_at, alerts, alertsError]);
@@ -216,25 +232,27 @@
       alertSection.append(node('p', 'health-muted', '显示最近更新的告警。Issue 关闭不等于服务已确认恢复，当前状态以上方健康快照为准。'));
       content.append(alertSection);
       const records = node('section', 'health-section');
-      records.append(node('h3', '', '服务器 watchdog 记录'));
+      records.append(node('h3', '', '服务器 watchdog 记录（近 7 天）'));
       const history = node('ul', 'health-history');
       for (const row of model.history) {
         const code = row.key.slice(source.worker.length + 1);
         history.append(node('li', '', date(row.at) + ' · ' + (row.transition === 'recovered' ? '已恢复' : '发现异常') + ' · ' + (incidents[code]?.[1] || code)));
       }
-      records.append(model.history.length ? history : node('p', 'health-muted', '暂无已读取的异常历史。'));
+      records.append(model.history.length ? history : node('p', 'health-muted', '近 7 天暂无已读取的异常记录。'));
       content.append(records, node('p', 'health-muted', '心跳超过 20 分钟未更新时标记过期；健康数据不可读不等于服务器宕机。Cloudflare 启用后独立记录告警，本页不触发检测或通知。'));
     }
 
     async function refreshHealth() {
-      if (loading) return;
-      loading = true; refresh.disabled = true; refresh.textContent = '读取中…';
+      if (loading || Date.now() < retryAt) return;
+      loading = true;
       render();
       const results = await Promise.allSettled([
         readSnapshot('worker-health.json', 'snapshot/' + source.worker, 'triton-anchor-worker-health'),
         readSnapshot('watchdog.json', 'watchdog', 'triton-anchor-local-ci-watchdog'),
         readAlerts(),
       ]);
+      if (results.some(result => result.status === 'rejected' && result.reason?.rateLimited))
+        retryAt = Date.now() + 15 * 60 * 1000;
       const error = result => result.status === 'fulfilled' ? '' : result.reason instanceof TypeError || ['TimeoutError', 'AbortError'].includes(result.reason?.name)
         ? '浏览器未能读取 Gitee（可能是网络、跨域限制或请求超时），当前状态无法确认'
         : result.reason?.message || '健康数据读取失败';
@@ -243,7 +261,7 @@
       if (!watchdogError) watchdog = results[1].value;
       alertsError = error(results[2]);
       if (!alertsError) alerts = results[2].value;
-      loading = false; refresh.disabled = false; refresh.textContent = '刷新健康状态'; render();
+      loading = false; render();
     }
     refresh.addEventListener('click', refreshHealth);
     refreshHealth();

@@ -24,7 +24,9 @@ const LABELS = Object.freeze({
   codex_failed: 'Codex执行失败（原因需查看服务器日志）',
   delivery_pending: '结果等待上传超过20分钟',
   environment_unavailable: '环境不可用',
-  control_update_failed: '控制代码更新失败或受阻',
+  control_update_failed: '控制代码更新执行失败',
+  control_update_invalid: '控制代码更新请求无效',
+  control_update_blocked: '控制代码更新请求受阻（尚未执行更新）；具体原因请查看 Worker 日志',
   service_failed: '服务器侧维护服务失败',
   disk_space_low: '服务器可用磁盘不足5GiB',
 });
@@ -57,8 +59,10 @@ function faults(snapshot, previous, now) {
   const environment = snapshot.environments || {};
   check('environment_unavailable', environment.unavailable === true, typeof environment.unavailable === 'boolean');
   const update = snapshot.control_update?.state;
-  check('control_update_failed', ['failed', 'invalid', 'blocked'].includes(update),
-    ['idle', 'pending', 'updating', 'failed', 'invalid', 'blocked'].includes(update));
+  const updateKnown = ['idle', 'pending', 'updating', 'failed', 'invalid', 'blocked'].includes(update);
+  for (const state of ['failed', 'invalid', 'blocked']) {
+    check(`control_update_${state}`, update === state, updateKnown);
+  }
   const services = snapshot.services;
   check('service_failed', Array.isArray(services) && services.some(row => row.active_state === 'failed'
     || (row.name?.endsWith('.timer') && row.active_state === 'inactive')),

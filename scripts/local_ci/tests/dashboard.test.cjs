@@ -49,6 +49,22 @@ test('health separates service, relay and Codex evidence without treating idle o
   }
 });
 
+test('health distinguishes update execution failure from invalid or blocked requests', () => {
+  const worker=healthyWorker();
+  const expected={failed:'控制代码更新执行失败',invalid:'控制代码更新请求无效',blocked:'控制代码更新请求受阻（尚未执行更新）'};
+  for (const [state,text] of Object.entries(expected)) {
+    worker.control_update={state};
+    const issue=assessHealth(worker,healthWatchdog(worker),{now:healthNow}).issues.find(row=>row.code==='control_update');
+    assert.ok(issue.text.startsWith(text));
+    assert.equal(issue.tone,'bad');
+    if (state==='blocked') assert.ok(issue.text.includes('Worker 日志'));
+  }
+  for (const state of ['idle','pending','updating']) {
+    worker.control_update={state};
+    assert.equal(assessHealth(worker,healthWatchdog(worker),{now:healthNow}).issues.length,0);
+  }
+});
+
 test('older or unreadable watchdog observations cannot override a recovered Worker', () => {
   const worker=healthyWorker(), old={...worker,collected_at:new Date(healthNow-300000).toISOString()};
   const watchdog=healthWatchdog(old);

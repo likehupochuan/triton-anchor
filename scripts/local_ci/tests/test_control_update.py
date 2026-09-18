@@ -237,8 +237,11 @@ def test_oldest_forward_request_skips_stale_revision_without_blocking_newer(tmp_
     assert git(control, "rev-parse", "HEAD") == current
     assert selected["revision"] == newer
 
+    assert oldest_forward_request(config, current, requests[:1], allow_local=True) is None
+
+    unknown = {**requests[1], "revision": "f" * 40}
     with pytest.raises(ValueError, match="no usable forward"):
-        oldest_forward_request(config, current, requests[:1], allow_local=True)
+        oldest_forward_request(config, current, [requests[0], unknown], allow_local=True)
 
 
 def test_task_requested_revision_can_precede_remote_branch_tip(tmp_path):

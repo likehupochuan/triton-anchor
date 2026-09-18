@@ -107,6 +107,35 @@ test('one Issue per incident, unchanged faults are quiet, changed faults update,
   assert.equal(h.issues.length, 2);
 });
 
+test('control update faults are distinct, unknown status preserves them, and idle confirms recovery', async () => {
+  const h = fixture();
+  const labels = {
+    failed: '控制代码更新执行失败',
+    invalid: '控制代码更新请求无效',
+    blocked: '控制代码更新请求受阻（尚未执行更新）；具体原因请查看 Worker 日志',
+  };
+  for (const [state, label] of Object.entries(labels)) {
+    h.health.control_update = { state };
+    await h.run();
+    assert.deepEqual(JSON.parse(h.stored).codes, [`control_update_${state}`]);
+    assert.equal(h.issues.length, 1);
+    assert.equal(h.issues[0].state, 'open');
+    assert.ok(h.issues[0].body.includes(`- ${label}`));
+    const writes = h.writes.length;
+    for (const unknown of [null, {}, { state: 'unknown' }]) {
+      h.health.control_update = unknown;
+      h.advance();
+      await h.run();
+      assert.deepEqual(JSON.parse(h.stored).codes, [`control_update_${state}`]);
+      assert.equal(h.writes.length, writes);
+    }
+  }
+  h.health.control_update = { state: 'idle' };
+  await h.run();
+  assert.equal(h.issues[0].state, 'closed');
+  assert.deepEqual(JSON.parse(h.stored).codes, []);
+});
+
 test('two read failures trigger an observation alert; unreadable or stale data never clears service faults', async () => {
   const h = fixture();
   h.readFailure = true;

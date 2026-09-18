@@ -144,8 +144,8 @@ def oldest_forward_request(
     requests: list[dict],
     *,
     allow_local: bool = False,
-) -> dict:
-    """Select the oldest requested descendant using the trusted control history."""
+) -> dict | None:
+    """Select the oldest requested descendant, or skip requests for older revisions."""
     if not isinstance(current_revision, str) or not SHA_RE.fullmatch(current_revision):
         raise ValueError("Current control revision must be an exact commit")
     if not requests:
@@ -180,6 +180,19 @@ def oldest_forward_request(
     head = _git(root, ["rev-parse", "HEAD^{commit}"], environment).stdout.strip()
     if head != current_revision:
         raise ValueError("Worker control revision changed during request selection")
+    # Older requests need neither a downgrade nor another fetch of the control mirror.
+    grouped = {
+        revision: rows
+        for revision, rows in grouped.items()
+        if _git(
+            root,
+            ["merge-base", "--is-ancestor", revision, current_revision],
+            environment,
+            check=False,
+        ).returncode != 0
+    }
+    if not grouped:
+        return None
     _git(
         root,
         [

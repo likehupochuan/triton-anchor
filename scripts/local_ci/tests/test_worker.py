@@ -548,7 +548,7 @@ def test_restarted_worker_clears_already_satisfied_request(tmp_path):
     assert not (tmp_path / "control-update/request.json").exists()
 
 
-def test_control_history_fetch_failure_is_reported_as_blocked(tmp_path):
+def test_control_selection_clears_blocked_when_only_old_tasks_remain(tmp_path):
     task = manifest()
 
     class Relay:
@@ -584,6 +584,15 @@ def test_control_history_fetch_failure_is_reported_as_blocked(tmp_path):
     assert worker.scan() is None
     heartbeat = json.loads((tmp_path / "health/worker.json").read_text())
     assert heartbeat["control_update"] == "blocked"
+
+    worker.control_request_selector = lambda *args, **kwargs: None
+    for _ in range(2):
+        assert worker.scan() is None
+        heartbeat = json.loads((tmp_path / "health/worker.json").read_text())
+        assert "control_update" not in heartbeat
+        assert "error" not in heartbeat
+    assert worker.journal.tasks() == []
+    assert not (tmp_path / "control-update/request.json").exists()
 
 
 def test_worker_exits_on_sigterm_while_control_update_holds_lock(tmp_path):

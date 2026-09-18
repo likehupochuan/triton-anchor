@@ -517,6 +517,9 @@ class Worker:
                     error=str(exc),
                 )
                 return None
+            if request is None:
+                self.heartbeat()
+                return None
             self.heartbeat(
                 control_revision=current_revision,
                 requested_control_revision=request["revision"],
