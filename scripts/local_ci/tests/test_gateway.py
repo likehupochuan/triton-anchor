@@ -995,12 +995,12 @@ class GatewayBehaviorTests(unittest.TestCase):
             g.finalize_preflight(client, task, {"prepare": "success", "basic": "failure"})
             self.assertEqual(client.writes, [])
 
-    def test_native_control_owner_ignores_other_subjects_on_the_same_control_sha(self):
+    def test_native_control_push_publishes_stages_without_losing_task_ownership(self):
         task = {**self.task, "pr_number": 0, "event_kind": "push",
                 "target_branch": "local-ci-unified", "tested_sha": self.head,
                 "worker_revision_sha": self.head}
-        client = g.GitHub(g.REPOSITORY, token="fixture")
-        rows = []
+        client = RecordingGitHub(self.gh)
+        rows = client.check_rows[self.head]
 
         def add_prepare(run_id, subject):
             rows.append({"id": run_id, "name": "Prepare exact task / " + subject,
@@ -1010,33 +1010,44 @@ class GatewayBehaviorTests(unittest.TestCase):
         add_prepare(100, "Branch local-ci-unified")
         add_prepare(200, "PR #62")
         add_prepare(300, "Branch main")
-        # A PR may use the control commit as its head. Its display copy is not
-        # the owner of this commit's independent branch task.
+        # A legacy PR display copy on the control commit must not claim this push.
         rows.append(github_check({"name": g.CHECK_NAMES["basic"],
                     "external_id": f"{g.HEAD_CHECK_PREFIX}basic:pr-task",
                     "output": {"summary": "<!-- local-ci-workflow:350 -->"}}, 350))
+        request = client.request
 
-        def request(path, method="GET", data=None):
-            self.assertEqual(method, "GET")
-            if "/check-runs?" in path:
-                return {"check_runs": [row for row in rows
-                        if f"check_name={g.quote(row['name'], safe='')}&" in path]}
-            if "/statuses?" in path:
-                return []
+        def api(path, method="GET", data=None):
+            if path == "branches/local-ci-unified":
+                return {"commit": {"sha": self.head}}
             if path.startswith("actions/runs/"):
                 return {"event": "workflow_dispatch", "head_branch": "local-ci-unified",
                         "head_sha": self.head, "path": ".github/workflows/ci-gateway.yml"}
-            raise AssertionError(path)
+            return request(path, method, data)
 
-        with patch.object(client, "request", side_effect=request), \
-                patch.dict(g.os.environ, {"GITHUB_RUN_ID": "100"}):
+        with patch.object(client, "request", side_effect=api), \
+                patch.dict(g.os.environ, {"GITHUB_RUN_ID": "100", "GITHUB_RUN_ATTEMPT": "1"}):
             self.assertTrue(client.owns_task(task, workflow=True))
             self.assertEqual(client.task_start({**task, "event_kind": "manual"}), {})
+            g.begin_checks(client, task)
+            self.assertEqual(set(client.commit_statuses(self.head)), {g.CHECK_NAMES["basic"]})
+            for stage in g.CHECK_NAMES:
+                self.assertTrue(g.sync_preflight(client, task, {stage: "success"}))
+            statuses = client.commit_statuses(self.head)
+            self.assertEqual(set(statuses), set(g.CHECK_NAMES.values()))
+            self.assertTrue(all(row["state"] == "success" for row in statuses.values()))
+            self.assertTrue(all(path == f"statuses/{self.head}" for path, method, _ in client.writes if method == "POST"))
+
+            client.check(task, "dispatch", "completed", "success", "Dispatched", "Dispatched")
+            client.status(task, "success", "Local CI: pass")
+            before = len(client.writes)
+            g.begin_checks(client, task)
+            self.assertEqual(len(client.writes), before)  # A duplicate prepare keeps the finished verdict.
             add_prepare(400, "Branch local-ci-unified")
             self.assertFalse(client.owns_task(task, workflow=True))
-            with patch.object(g, "is_current", return_value=True), \
-                    self.assertRaisesRegex(ValueError, "A newer workflow owns this task"):
+            self.assertFalse(g.sync_preflight(client, task, {"basic": "failure"}))
+            with self.assertRaisesRegex(ValueError, "A newer workflow owns this task"):
                 g.begin_checks(client, task)
+            self.assertEqual(len(client.writes), before)
 
     def test_pr_information_failure_has_friendly_actionable_feedback(self):
         errors = ["请补充影响范围", "请说明已完成的验证"]

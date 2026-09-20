@@ -109,7 +109,7 @@ current/cancel 指针和去重规则。同一 SHA 的不同任务用独立 `run_
 
 GitHub 自定义阶段（Basic、API、Security、Approve、Dispatch）和最终 Summary 使用 Commit Status；
 PR 仅写入 `head_sha`，实际测试仍针对任务冻结的合并提交 `tested_sha`。各阶段按依赖逐步出现，
-Summary 在所需审批通过且投递成功后才出现；控制分支自身 push 的 Basic/API/Security 保留原生检查。
+Summary 在所需审批通过且投递成功后才出现；控制分支自身 push 同样回写 Basic/API/Security 三项状态。
 状态绑定任务与工作流运行，旧运行不能覆盖当前任务。原生 Actions 的日志、耗时及审批入口不变。
 历史 Check Run 和旧名称仅用于兼容读取及待定状态收尾，已有记录不会自动消失。
 同一 head 的目标分支基线变化后，需要重新派发；要求合并前检查通过时，还应启用严格的分支保护，

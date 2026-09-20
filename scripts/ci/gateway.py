@@ -377,8 +377,6 @@ class GitHub:
             conclusion and conclusion not in CHECK_CONCLUSIONS
         ):
             raise ValueError("Invalid CI stage conclusion")
-        if key in CHECK_NAMES and has_native_preflight(task):
-            return False
         if not is_current(self, task):
             return False
         current_run = os.getenv("GITHUB_RUN_ID", "") if run_id is None else run_id
@@ -1502,7 +1500,7 @@ def begin_checks(gh: GitHub, task: dict) -> None:
     # can briefly return the previous output immediately after that write.
     if not claimed and not gh.owns_task(task, workflow=True):
         raise ValueError("A newer workflow owns this task")
-    if not claimed and not has_native_preflight(task):
+    if not claimed:
         return
     gh.retire_open_checks(task, superseded=True)
     gh.reset_existing_summary(task)
