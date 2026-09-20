@@ -153,6 +153,60 @@ class FakeGitHub:
         return True
 
 
+class RecordingGitHub(g.GitHub):
+    """Exercise real publication/ownership logic against in-memory API records."""
+
+    def __init__(self, fixture):
+        super().__init__(g.REPOSITORY, token="fixture")
+        self.fixture = fixture
+        self.status_rows = {fixture.head: [], fixture.tested: []}
+        self.check_rows = {fixture.head: [], fixture.tested: []}
+        self.writes = []
+        self.fail_next_status = False
+        self.serial = 0
+
+    def seed_status(self, sha, context, state, task_id, run_id="12345", attempt="1", **fields):
+        self.serial += 1
+        row = {
+            "id": self.serial, "context": context, "state": state,
+            "description": state,
+            "creator": {"login": "github-actions[bot]"},
+            "target_url": f"https://github.com/{g.REPOSITORY}/actions/runs/{run_id}"
+                          f"#local-ci-task={task_id}&local-ci-workflow={run_id}&local-ci-attempt={attempt}",
+            **fields,
+        }
+        self.status_rows.setdefault(sha, []).insert(0, row)
+        return row
+
+    def request(self, path, method="GET", data=None):
+        if method == "GET":
+            if "/statuses?" in path:
+                return copy.deepcopy(self.status_rows.get(path.split("/")[1], []))
+            if "/check-runs?" in path:
+                rows = self.check_rows.get(path.split("/")[1], [])
+                if "check_name=" in path:
+                    rows = [row for row in rows
+                            if f"check_name={g.quote(row['name'], safe='')}&" in path]
+                return {"check_runs": copy.deepcopy(rows)}
+            return self.fixture.request(path)
+        if path.startswith("statuses/"):
+            if self.fail_next_status:
+                self.fail_next_status = False
+                raise RuntimeError("Status publication temporarily unavailable")
+            self.writes.append((path, method, copy.deepcopy(data)))
+            return self.seed_status(path.split("/")[1], data["context"], data["state"], "", **{
+                key: value for key, value in data.items() if key not in {"context", "state"}
+            })
+        if method == "PATCH" and path.startswith("check-runs/"):
+            self.writes.append((path, method, copy.deepcopy(data)))
+            for rows in self.check_rows.values():
+                for row in rows:
+                    if row["id"] == int(path.rsplit("/", 1)[1]):
+                        row.update(data)
+                        return row
+        raise AssertionError((path, method))
+
+
 class GatewayBehaviorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -438,7 +492,7 @@ class GatewayBehaviorTests(unittest.TestCase):
             "base_task_ref": "ci/base/pr-8/docs-topic",
             "head_task_ref": "ci/head/pr-8/docs-topic",
         }
-        legacy["task_id"] = g.digest({key: legacy[key] for key in g.IDENTITY_FIELDS})
+        legacy["task_id"] = g.compute_task_id(legacy)
         control.put(
             {
                 f"tasks/{legacy['task_id']}.json": legacy,
@@ -531,7 +585,7 @@ class GatewayBehaviorTests(unittest.TestCase):
         gh = FakeGitHub(self.base, self.tested, self.tested)
         task = g.prepare_task(gh, self.base, branch="main")
         other = {**task, "target_branch": "other"}
-        other["task_id"] = g.digest({key: other[key] for key in g.IDENTITY_FIELDS})
+        other["task_id"] = g.compute_task_id(other)
         for field, suffix in (("task_ref", "tested"), ("base_task_ref", "base"), ("head_task_ref", "head")):
             other[field] = f"ci/branch/{other['task_id']}/{suffix}"
         g.validate_task(other)
@@ -925,44 +979,21 @@ class GatewayBehaviorTests(unittest.TestCase):
                         self.assertEqual(check.call_args.args[1:4], (successor, "in_progress", None))
         self.assertEqual(self.gh.writes, [])
 
-    def test_push_checks_use_tested_commit_and_cannot_overwrite_a_new_owner(self):
+    def test_push_statuses_use_tested_commit_and_cannot_overwrite_a_new_owner(self):
         task = {**self.task, "pr_number": 0, "tested_sha": self.head, "event_kind": "push"}
-        gh = g.GitHub(g.REPOSITORY, token="fixture")
-        runs = [github_check({"name": g.CHECK_NAMES["basic"], "status": "queued",
-                              "external_id": f"triton-anchor-local-ci:basic:{task['task_id']}",
-                              "output": {"summary": "<!-- local-ci-workflow:1234 -->"}}, 1)]
-        writes = []
-
-        def request(path, method="GET", data=None):
-            if method != "GET":
-                writes.append((path, method, data))
-                return {}
-            if path.startswith(f"commits/{task['head_sha']}/check-runs?"):
-                return {"check_runs": runs}
-            if "/statuses?" in path:
-                return []
-            return self.gh.request(path)
-
-        with patch.object(gh, "request", side_effect=request), patch.dict(g.os.environ, {
-            "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": g.REPOSITORY,
-            "GITHUB_RUN_ID": "1234",
-        }):
-            self.assertTrue(g.sync_preflight(gh, task, {"basic": "success"}))
-            self.assertEqual(len(writes), 2)
-            self.assertEqual(writes[0][:2], ("check-runs/1", "PATCH"))
-            path, method, payload = writes[1]
-            self.assertEqual((path, method), ("check-runs", "POST"))
-            self.assertEqual(payload["head_sha"], task["head_sha"])
-            self.assertEqual(payload["details_url"], f"https://github.com/{g.REPOSITORY}/actions/runs/1234")
-            self.assertEqual(writes[0][2]["conclusion"], "success")
-            runs.append({
-                **writes[0][2], "id": 12, "app": {"slug": "github-actions"},
-                "external_id": "triton-anchor-local-ci:basic:newer-task",
-            })
-            writes.clear()
-            self.assertFalse(g.sync_preflight(gh, task, {"basic": "failure"}))
-            g.finalize_preflight(gh, task, {"prepare": "success", "basic": "failure"})
-            self.assertEqual(writes, [])
+        client = RecordingGitHub(self.gh)
+        client.seed_status(self.head, g.CHECK_NAMES["basic"], "pending", task["task_id"], "1234")
+        with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "1234", "GITHUB_RUN_ATTEMPT": "1"}):
+            self.assertTrue(g.sync_preflight(client, task, {"basic": "success"}))
+            self.assertEqual([(path, row["context"], row["state"]) for path, _, row in client.writes], [
+                (f"statuses/{self.head}", g.CHECK_NAMES["basic"], "success"),
+                (f"statuses/{self.head}", g.CHECK_NAMES["api"], "pending"),
+            ])
+            client.seed_status(self.head, g.CHECK_NAMES["basic"], "pending", "newer-task", "2345")
+            client.writes.clear()
+            self.assertFalse(g.sync_preflight(client, task, {"basic": "failure"}))
+            g.finalize_preflight(client, task, {"prepare": "success", "basic": "failure"})
+            self.assertEqual(client.writes, [])
 
     def test_native_control_owner_ignores_other_subjects_on_the_same_control_sha(self):
         task = {**self.task, "pr_number": 0, "event_kind": "push",
@@ -990,6 +1021,8 @@ class GatewayBehaviorTests(unittest.TestCase):
             if "/check-runs?" in path:
                 return {"check_runs": [row for row in rows
                         if f"check_name={g.quote(row['name'], safe='')}&" in path]}
+            if "/statuses?" in path:
+                return []
             if path.startswith("actions/runs/"):
                 return {"event": "workflow_dispatch", "head_branch": "local-ci-unified",
                         "head_sha": self.head, "path": ".github/workflows/ci-gateway.yml"}
@@ -1110,70 +1143,40 @@ class GatewayBehaviorTests(unittest.TestCase):
         feed = json.loads((self.root / "dashboard/tasks.json").read_bytes())
         self.assertEqual(len(feed["tasks"]), 2)
 
-    def test_pr_checks_and_summary_repair_both_shas_after_partial_publication(self):
-        client = g.GitHub(g.REPOSITORY, token="fixture")
-        snapshots = {self.head: [
-            {"context": g.SUMMARY_CONTEXT, "state": "pending", "creator": {"login": "github-actions[bot]"}},
-            {"context": "local-ci/summary", "state": "failure", "creator": {"login": "github-actions[bot]"}},
-            {"context": "local-ci/sophgo-cmodel", "state": "error", "creator": {"login": "github-actions[bot]"}},
-            {"context": "external/build", "state": "failure", "creator": {"login": "another-bot"}},
-        ], self.tested: []}
-        writes, checks = [], []
-        fail_head = {"status": True, "check": True}
-
-        def request(path, method="GET", data=None):
-            if method == "GET":
-                if path == "pulls/7":
-                    return self.gh.request(path)
-                if "/check-runs?" in path:
-                    return {"check_runs": [row for row in checks if row["head_sha"] == path.split("/")[1]
-                                          and f"check_name={g.quote(row['name'], safe='')}&" in path]}
-                return snapshots[path.split("/")[1]]
-            kind = "status" if path == f"statuses/{self.head}" else (
-                "check" if path == "check-runs" and data["head_sha"] == self.head else "")
-            if kind and fail_head[kind]:
-                fail_head[kind] = False
-                raise RuntimeError("Head publication temporarily unavailable")
-            writes.append((path, data))
-            if path.startswith("statuses/"):
-                snapshots[path.split("/")[1]].insert(0, {**data, "creator": {"login": "github-actions[bot]"}})
-            elif path == "check-runs":
-                row = github_check(data, len(checks) + 1)
-                checks.append(row)
-                return row
-            elif path.startswith("check-runs/"):
-                row = next(row for row in checks if row["id"] == int(path.rsplit("/", 1)[1]))
-                row.update(data)
-                return row
-            return {}
-
-        with patch.object(client, "request", side_effect=request):
-            with self.assertRaisesRegex(RuntimeError, "Head publication"):
-                client.status(self.task, "success", "Local CI: pass", "https://gitee.com/report")
-            self.assertFalse(client.status_matches(self.task, "success", "Local CI: pass"))
+    def test_pr_stage_statuses_and_summary_use_only_head_and_retry_idempotently(self):
+        client = RecordingGitHub(self.gh)
+        client.seed_status(self.head, "local-ci/summary", "success", "older-task")
+        with patch.dict(g.os.environ, {
+            "GITHUB_RUN_ID": "12345", "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": g.REPOSITORY,
+        }):
+            g.begin_checks(client, self.task)
+            self.assertEqual([row["context"] for _, _, row in client.writes], [g.CHECK_NAMES["basic"]])
+            client.fail_next_status = True
+            with self.assertRaisesRegex(RuntimeError, "Status publication"):
+                g.sync_preflight(client, self.task, {"basic": "success"})
+            g.sync_preflight(client, self.task, {"basic": "success"})
+            for key in ("api", "security"):
+                g.sync_preflight(client, self.task, {key: "success"})
+            client.check(self.task, "approve", "in_progress", None, "Awaiting approval", "Awaiting approval", g.workflow_url())
+            approval = client.status_rows[self.head][0]
+            self.assertEqual(approval["state"], "pending")
+            self.assertTrue(approval["target_url"].startswith(g.workflow_url() + "#"))
+            self.assertNotIn(g.SUMMARY_CONTEXT, [row["context"] for _, _, row in client.writes])
+            for key in ("approve", "dispatch"):
+                client.check(self.task, key, "completed", "success", "Passed", "Passed", g.workflow_url())
+            client.status(self.task, "pending", "Waiting for worker", "https://gitee.com/report")
             client.status(self.task, "success", "Local CI: pass", "https://gitee.com/report")
             self.assertTrue(client.status_matches(self.task, "success", "Local CI: pass"))
-            self.assertEqual(writes[0][0], f"statuses/{self.tested}")
-            self.assertCountEqual([(path, row["context"]) for path, row in writes], [
-                (f"statuses/{self.tested}", g.SUMMARY_CONTEXT),
-                (f"statuses/{self.head}", g.SUMMARY_CONTEXT),
-                (f"statuses/{self.head}", "local-ci/summary"),
-            ])
-            with self.assertRaisesRegex(RuntimeError, "Head publication"):
-                client.check(self.task, "basic", "in_progress", None, "", "Running", run_id="123")
-            client.check(self.task, "basic", "in_progress", None, "", "Running", run_id="123")
-            self.assertEqual([row["head_sha"] for row in checks], [self.tested, self.head])
-            self.assertTrue(all(row["status"] == "in_progress" for row in checks))
-            self.assertNotIn("sophgo", json.dumps(writes))
-            self.assertNotIn("external/build", json.dumps(writes))
-            for key in ("api", "security", "approve", "dispatch"):
-                client.check(self.task, key, "completed", "success", "Passed", "Passed", run_id="123")
-                self.assertEqual({row["head_sha"] for row in checks if row["name"] == g.ALL_CHECK_NAMES[key]},
-                                 {self.tested, self.head})
-            previous = len(writes)
-            client.status(self.task, "success", "Local CI: pass", "https://gitee.com/other-report")
-            client.check(self.task, "basic", "in_progress", None, "", "Running", run_id="123")
-            self.assertEqual(len(writes), previous)
+            before = len(client.writes)
+            client.status(self.task, "success", "Local CI: pass", "https://gitee.com/report")
+            client.check(self.task, "dispatch", "completed", "success", "Passed", "Passed", g.workflow_url())
+            self.assertEqual(len(client.writes), before)
+        self.assertEqual({path for path, _, _ in client.writes}, {f"statuses/{self.head}"})
+        self.assertEqual({method for _, method, _ in client.writes}, {"POST"})
+        self.assertEqual({row["context"] for _, _, row in client.writes}, {*g.ALL_CHECK_NAMES.values(), g.SUMMARY_CONTEXT})
+        self.assertEqual(client.check_rows[self.head], [])
+        self.assertEqual(client.status_rows[self.tested], [])
 
     def test_legacy_result_ownership_and_checks_survive_name_and_commit_migration(self):
         client = g.GitHub(g.REPOSITORY, token="fixture")
@@ -1200,7 +1203,7 @@ class GatewayBehaviorTests(unittest.TestCase):
             self.assertTrue(client.owns_task(self.task))
             with patch.object(client, "check", return_value=True) as publish:
                 client.restore_preflight(self.task)
-            self.assertEqual([call.args[1] for call in publish.call_args_list], list(names))
+            publish.assert_not_called()  # Legacy evidence is validated without creating display copies.
             # The compatible records must not let an old receiver claim a newer task.
             checks[0].update(id=99, external_id="triton-anchor-local-ci:basic:new-task",
                              output={"summary": "<!-- local-ci-workflow:999 -->"})
@@ -1210,42 +1213,23 @@ class GatewayBehaviorTests(unittest.TestCase):
                     self.assertRaisesRegex(ValueError, "newer workflow"):
                 g.begin_checks(client, self.task)
 
-    def test_reopen_closes_pending_tested_sha_check_and_retired_status(self):
-        client = g.GitHub(g.REPOSITORY, token="fixture")
-        snapshots = {
-            self.head: [{"context": "local-ci/sophgo-cmodel", "state": "pending",
-                         "creator": {"login": "github-actions[bot]"},
-                         "target_url": "https://github.com/example/run/1"}],
-            self.tested: [],
-        }
-        writes = []
-
-        def request(path, method="GET", data=None):
-            if method == "GET":
-                if path == "pulls/7":
-                    return self.gh.request(path)
-                if "/check-runs?" in path:
-                    if path.startswith(f"commits/{self.tested}/") and f"check_name={g.quote(g.CHECK_NAMES['basic'])}&" in path:
-                        return {"check_runs": [{
-                            "id": 42, "name": g.CHECK_NAMES["basic"], "status": "queued",
-                            "app": {"slug": "github-actions"},
-                            "external_id": f"triton-anchor-local-ci:basic:{self.task['task_id']}",
-                        }]}
-                    return {"check_runs": []}
-                if "/statuses?" in path:
-                    return snapshots[path.split("/")[1]]
-                raise AssertionError(path)
-            writes.append((path, data))
-            if path.startswith("statuses/"):
-                snapshots[path.split("/")[1]].insert(0, {**data, "creator": {"login": "github-actions[bot]"}})
-            return {}
-
-        with patch.object(client, "request", side_effect=request):
-            client.retire_open_checks(self.task)
-        self.assertEqual([path for path, _ in writes], ["check-runs/42", f"statuses/{self.head}"])
-        self.assertEqual(writes[0][1]["conclusion"], "cancelled")
-        self.assertEqual(writes[1][1]["context"], "local-ci/sophgo-cmodel")
-        self.assertEqual(writes[1][1]["state"], "error")
+    def test_reopen_closes_pending_legacy_checks_without_reopening_old_summary(self):
+        client = RecordingGitHub(self.gh)
+        client.check_rows[self.tested] = [github_check({
+            "name": g.CHECK_NAMES["basic"], "status": "queued",
+            "external_id": f"triton-anchor-local-ci:basic:{self.task['task_id']}",
+        }, 42)]
+        client.seed_status(self.head, "local-ci/summary", "pending", self.task["task_id"])
+        client.seed_status(self.head, "external/build", "pending", "external")
+        with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "12345", "GITHUB_RUN_ATTEMPT": "1"}):
+            g.begin_checks(client, self.task)
+        by_context = {row["context"]: row for _, _, row in client.writes if "context" in row}
+        self.assertEqual(by_context[g.CHECK_NAMES["basic"]]["state"], "pending")
+        self.assertEqual(by_context["local-ci/summary"]["state"], "error")
+        self.assertNotIn(g.SUMMARY_CONTEXT, by_context)
+        self.assertNotIn("external/build", by_context)
+        self.assertEqual(client.check_rows[self.tested][0]["conclusion"], "cancelled")
+        self.assertFalse(any(path == "check-runs" for path, _, _ in client.writes))
 
     def test_approval_context_is_frozen_and_displays_contributor_claims_safely(self):
         client = g.GitHub(g.REPOSITORY, token="fixture")
@@ -1339,28 +1323,14 @@ class GatewayBehaviorTests(unittest.TestCase):
         with patch.object(self.gh, "latest_dispatch", return_value={"status": "completed", "conclusion": "success"}):
             self.assertTrue(g.current_task(self.gh, control, self.task))
             self.assertEqual(len(g.collect_results(self.gh, control, results, self.root / "dashboard")), 1)
-        client = g.GitHub(g.REPOSITORY, token="fixture")
-        url = f"https://github.com/{g.REPOSITORY}/runs/"
-        start = {"id": 20, "details_url": url + "20", "started_at": "2026-09-17T00:10:00Z",
-                 "output": {"summary": "<!-- local-ci-workflow:200 -->"}}
-        dispatch = {"id": 10, "name": g.ALL_CHECK_NAMES["dispatch"], "status": "completed", "conclusion": "success",
-                    "external_id": f"triton-anchor-local-ci:dispatch:{self.task['task_id']}",
-                    "details_url": url + "10", "app": {"slug": "github-actions"}}
-        for completed_at, run_id, current in (
-            ("2026-09-17T00:09:00Z", "200", False),
-            ("2026-09-17T00:11:00Z", "200", True),
-            ("2026-09-17T00:11:00Z", "100", False),
-            ("2026-09-17T00:11:00Z", "", False),
-        ):
-            row = {**dispatch, "completed_at": completed_at,
-                   "output": {"summary": f"<!-- local-ci-workflow:{run_id} -->"}}
-            with self.subTest(completed_at=completed_at, run=run_id), \
-                    patch.dict(g.os.environ, {"GITHUB_RUN_ID": "999"}), \
-                    patch.object(client, "task_start", return_value=start), \
-                    patch.object(client, "check_runs", return_value=[row]), \
-                    patch.object(self.gh, "latest_dispatch", side_effect=client.latest_dispatch):
-                self.assertEqual(client.latest_dispatch(self.task), row if current else {"status": "not_started"})
-                self.assertEqual(g.current_task(self.gh, control, self.task), current)
+        client = RecordingGitHub(self.gh)
+        with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "200", "GITHUB_RUN_ATTEMPT": "2"}):
+            client.seed_status(self.head, g.CHECK_NAMES["basic"], "pending", self.task["task_id"], "200", "2")
+            for run_id, attempt, current in (("100", "1", False), ("200", "1", False), ("200", "2", True)):
+                with self.subTest(run=run_id, attempt=attempt):
+                    client.seed_status(self.head, g.ALL_CHECK_NAMES["dispatch"], "success", self.task["task_id"], run_id, attempt)
+                    with patch.object(self.gh, "latest_dispatch", side_effect=client.latest_dispatch):
+                        self.assertEqual(g.current_task(self.gh, control, self.task), current)
 
     def test_prepare_exception_comments_without_writing_summary_on_head(self):
         writes = []
@@ -1394,61 +1364,90 @@ class GatewayBehaviorTests(unittest.TestCase):
         self.assertEqual([path for path, _ in writes], ["issues/7/comments"])
         self.assertIn("Invalid trusted worker revision", writes[0][1]["body"])
 
-    def test_new_preflight_blocks_old_result_before_new_gitee_enqueue(self):
+    def test_same_head_new_run_and_attempt_invalidate_old_stages_and_block_old_results(self):
         result = self.result()
         control, results = self.publish_result(result)
-        gh = g.GitHub(g.REPOSITORY, token="fixture")
-        newer = {"id": 12, "name": g.CHECK_NAMES["basic"], "status": "queued",
-                 "external_id": "triton-anchor-local-ci:basic:new-task",
-                 "app": {"slug": "github-actions"}}
-        before = len(self.gh.statuses)
-        with (
-            patch.object(gh, "request", side_effect=lambda path:
-                         [] if "/statuses?" in path else {"check_runs": [newer]}),
-            patch.object(self.gh, "owns_task", side_effect=gh.owns_task),
-        ):
+        client = RecordingGitHub(self.gh)
+        for context in (g.CHECK_NAMES["basic"], g.CHECK_NAMES["api"], g.ALL_CHECK_NAMES["dispatch"], g.SUMMARY_CONTEXT):
+            client.seed_status(self.head, context, "success", self.task["task_id"], "100")
+        with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "200", "GITHUB_RUN_ATTEMPT": "1"}):
+            g.begin_checks(client, self.task)
+            latest = client.commit_statuses(self.head)
+            self.assertEqual(latest[g.CHECK_NAMES["basic"]]["state"], "pending")
+            for key in ("api", "dispatch"):
+                self.assertEqual(latest[g.ALL_CHECK_NAMES[key]]["state"], "error")
+            self.assertEqual(latest[g.SUMMARY_CONTEXT]["state"], "error")
+            self.assertNotIn(g.CHECK_NAMES["security"], latest)
+        before = len(client.writes)
+        with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "100", "GITHUB_RUN_ATTEMPT": "1"}):
+            self.assertFalse(g.sync_preflight(client, self.task, {"basic": "failure"}))
+            with self.assertRaisesRegex(ValueError, "newer workflow"):
+                g.begin_checks(client, self.task)
+        with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "200", "GITHUB_RUN_ATTEMPT": "2"}):
+            g.begin_checks(client, self.task)
+        self.assertGreater(len(client.writes), before)
+        before = len(client.writes)
+        with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "200", "GITHUB_RUN_ATTEMPT": "1"}):
+            self.assertFalse(g.sync_preflight(client, self.task, {"basic": "success"}))
+            with self.assertRaisesRegex(ValueError, "newer workflow"):
+                g.begin_checks(client, self.task)
+        self.assertEqual(len(client.writes), before)
+        # A different task can reuse the same head before it reaches Gitee.
+        client.seed_status(self.head, g.CHECK_NAMES["basic"], "pending", "new-task", "300")
+        with patch.object(self.gh, "owns_task", side_effect=client.owns_task):
+            before = len(self.gh.statuses)
             self.assertEqual(g.collect_results(self.gh, control, results, self.root / "dashboard"), [])
-        self.assertEqual(len(self.gh.statuses), before)
+            self.assertEqual(len(self.gh.statuses), before)
 
-    def test_old_merge_finalize_and_receiver_cannot_change_new_head_checks(self):
+        # Re-run failed jobs retains the successful Basic job from attempt 1.
+        for outcome in ("cancelled", "success"):
+            with self.subTest(rerun=outcome):
+                client = RecordingGitHub(self.gh)
+                client.seed_status(self.head, g.CHECK_NAMES["basic"], "success", self.task["task_id"], "400", "1")
+                client.seed_status(self.head, g.CHECK_NAMES["api"], "failure", self.task["task_id"], "400", "1")
+                with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "400", "GITHUB_RUN_ATTEMPT": "2"}):
+                    self.assertTrue(client.check(self.task, "api", "in_progress", None, "Retrying API", "Retrying API"))
+                before = len(client.writes)
+                with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "400", "GITHUB_RUN_ATTEMPT": "1"}):
+                    self.assertFalse(g.sync_preflight(client, self.task, {"api": "success"}))
+                    g.finalize_preflight(client, self.task, {"prepare": "success", "basic": "success", "api": "failure"})
+                self.assertEqual(len(client.writes), before)
+                with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "400", "GITHUB_RUN_ATTEMPT": "2"}):
+                    if outcome == "cancelled":
+                        g.finalize_preflight(client, self.task, {
+                            "prepare": "success", "basic": "success", "api": "cancelled", "security": "skipped", "enqueue": "skipped",
+                        })
+                        latest = client.commit_statuses(self.head)
+                        self.assertEqual(latest[g.CHECK_NAMES["api"]]["state"], "error")
+                        self.assertNotIn(g.CHECK_NAMES["security"], latest)
+                        self.assertNotIn(g.SUMMARY_CONTEXT, latest)
+                    else:
+                        for key in ("api", "security"):
+                            self.assertTrue(g.sync_preflight(client, self.task, {key: "success"}))
+                        for key in ("approve", "dispatch"):
+                            self.assertTrue(client.check(self.task, key, "completed", "success", "Passed", "Passed"))
+                        dispatch = client.latest_dispatch(self.task)
+                        self.assertEqual((dispatch["status"], dispatch["conclusion"]), ("completed", "success"))
+                        client.restore_preflight(self.task)
+
+    def test_old_merge_finalize_and_receiver_cannot_change_new_head_statuses(self):
         control = self.store(g.CONTROL_BRANCH)
         g.enqueue(self.task, self.gh, control, self.source)
-        client = g.GitHub(g.REPOSITORY, token="fixture")
-        rows = {
-            self.tested: github_check({"name": g.CHECK_NAMES["basic"], "status": "in_progress",
-                "external_id": f"triton-anchor-local-ci:basic:{self.task['task_id']}",
-                "output": {"summary": "<!-- local-ci-workflow:100 -->"}}, 10),
-            self.head: github_check({"name": g.CHECK_NAMES["basic"], "status": "in_progress",
-                "external_id": "triton-anchor-local-ci:basic:new-task",
-                "output": {"summary": "<!-- local-ci-workflow:200 -->"}}, 20),
-        }
+        client = RecordingGitHub(self.gh)
+        client.check_rows[self.tested] = [github_check({
+            "name": g.CHECK_NAMES["basic"], "status": "in_progress",
+            "external_id": f"triton-anchor-local-ci:basic:{self.task['task_id']}",
+            "output": {"summary": "<!-- local-ci-workflow:100 -->"},
+        }, 10)]
+        for context in (g.CHECK_NAMES["basic"], g.SUMMARY_CONTEXT):
+            client.seed_status(self.head, context, "pending", "new-task", "200")
         self.gh.pull["base"]["sha"] = "e" * 40
         self.gh.pull["merge_commit_sha"] = "d" * 40
-        writes = []
-
-        def request(path, method="GET", data=None):
-            if method != "GET":
-                writes.append((path, data))
-                return {}
-            if path == "pulls/7":
-                return self.gh.request(path)
-            sha = path.split("/")[1]
-            if "/statuses?" in path:
-                return [{"context": name, "state": "pending", "creator": {"login": "github-actions[bot]"},
-                         "target_url": "https://github.com/run#local-ci-task=new-task"}
-                        for name in (g.SUMMARY_CONTEXT, "local-ci/summary")] if sha == self.head else []
-            if "/check-runs?" in path:
-                row = rows.get(sha)
-                return {"check_runs": [row] if row and f"check_name={g.quote(row['name'], safe='')}&" in path else []}
-            raise AssertionError(path)
-
-        with patch.object(client, "request", side_effect=request), \
-                patch.dict(g.os.environ, {"GITHUB_RUN_ID": "100"}):
-            self.assertTrue(client.owns_task(self.task, workflow=True))
+        with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "100", "GITHUB_RUN_ATTEMPT": "1"}):
+            self.assertFalse(client.owns_task(self.task, workflow=True))
             g.finalize_preflight(client, self.task, {"prepare": "success", "basic": "failure"})
             self.assertEqual(g.receive_result(client, str(self.remote), self.task["task_id"]), "obsolete")
-        self.assertNotIn("check-runs/20", [path for path, _ in writes])
-        self.assertNotIn(f"statuses/{self.head}", [path for path, _ in writes])
+        self.assertNotIn(f"statuses/{self.head}", [path for path, _, _ in client.writes])
 
     def test_rejected_approval_notifies_contributor_with_commit_and_review(self):
         stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
@@ -1469,31 +1468,30 @@ class GatewayBehaviorTests(unittest.TestCase):
         self.assertIn(f"PR 提交：`{self.head}`", comment)
         self.assertIn("审核批注：\n\n> Please remove ＠generated files before retrying.", comment)
 
-    def test_closed_pr_finishes_pending_checks_without_dispatched_task(self):
-        gh = g.GitHub(g.REPOSITORY, token="fixture")
-        writes = []
-        pending = {"name": "local-ci/basic", "status": "queued", "id": 12,
-                   "external_id": "triton-anchor-ci-v4:basic:old",
-                   "app": {"slug": "github-actions"}}
-        completed = {**pending, "id": 13, "status": "completed"}
-
-        def request(path, method="GET", data=None):
-            if method != "GET":
-                writes.append((path, data))
-                return {}
-            if path == "pulls/7":
-                return {**self.gh.pull, "state": "closed"}
-            if "/statuses?" in path:
-                return [{"context": g.SUMMARY_CONTEXT, "state": "pending"}]
-            if "/check-runs?" in path:
-                return {"check_runs": [pending, completed]}
-            raise AssertionError(path)
-
-        with patch.object(gh, "request", side_effect=request):
-            self.assertTrue(gh.finish_inactive_pr(7))
-        self.assertEqual([path for path, _ in writes], [f"statuses/{self.tested}", "check-runs/12", f"statuses/{self.head}"])
-        self.assertEqual(writes[0][1]["state"], "error")
-        self.assertEqual(writes[1][1]["conclusion"], "cancelled")
+    def test_closed_pr_finishes_pending_statuses_and_legacy_checks_without_dispatch(self):
+        client = RecordingGitHub(self.gh)
+        self.gh.pull["state"] = "closed"
+        for sha in (self.head, self.tested):
+            client.seed_status(sha, g.SUMMARY_CONTEXT, "pending", self.task["task_id"])
+        client.seed_status(self.head, g.CHECK_NAMES["basic"], "pending", self.task["task_id"])
+        client.seed_status(self.head, g.CHECK_NAMES["api"], "success", self.task["task_id"])
+        client.seed_status(self.head, "external/build", "pending", "external")
+        client.check_rows[self.tested] = [github_check({
+            "name": "local-ci/basic", "status": "queued",
+            "external_id": "triton-anchor-ci-v4:basic:old",
+        }, 12)]
+        self.assertTrue(client.finish_inactive_pr(7))
+        self.assertEqual({(path, row.get("context")) for path, _, row in client.writes}, {
+            (f"statuses/{self.head}", g.SUMMARY_CONTEXT),
+            (f"statuses/{self.tested}", g.SUMMARY_CONTEXT),
+            (f"statuses/{self.head}", g.CHECK_NAMES["basic"]),
+            ("check-runs/12", None),
+        })
+        self.assertTrue(all(row["state"] == "error" for _, _, row in client.writes if "state" in row))
+        self.assertEqual(client.check_rows[self.tested][0]["conclusion"], "cancelled")
+        before = len(client.writes)
+        client.finish_inactive_pr(7)
+        self.assertEqual(len(client.writes), before)
 
     def test_optimistic_control_writes_preserve_other_writer(self):
         first, second = self.store(g.CONTROL_BRANCH), self.store(g.CONTROL_BRANCH)
