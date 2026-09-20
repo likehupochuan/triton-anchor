@@ -18,6 +18,8 @@ from .protocol import (
     within,
 )
 
+MAX_REQUIRED_FILES = 32
+MAX_OPTIONAL_FILES = 8
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_TOTAL_BYTES = 10 * 1024 * 1024
 MAX_RESULT_BYTES = 2 * 1024 * 1024
@@ -188,6 +190,7 @@ def seal_result(
     omitted_evidence = []
     seen = set()
     total = 0
+    uploaded = {True: 0, False: 0}
     for entry in chosen:
         if not isinstance(entry, (str, dict)):
             raise ContractError("Artifact selection needs a relative path")
@@ -196,11 +199,16 @@ def seal_result(
             continue
         seen.add(path)
         incoming = within(source, path)
+        required_file = path in required_paths
+        limit = MAX_REQUIRED_FILES if required_file else MAX_OPTIONAL_FILES
         row = {
             "path": path,
             "label": path if isinstance(entry, str) else str(entry.get("label", path)),
         }
-        if not incoming.is_file():
+        if uploaded[required_file] >= limit:
+            category = "必传证据" if required_file else "选传附件"
+            row["omitted"] = f"超过 {limit} 份{category}上限，保留在 CI 主机"
+        elif not incoming.is_file():
             row["omitted"] = "文件未生成，未上传"
         elif incoming.stat().st_size > MAX_FILE_BYTES:
             row["omitted"] = "文件超过 2 MiB，保留在 CI 主机"
@@ -218,6 +226,7 @@ def seal_result(
                 target.write_bytes(data)
                 row["size"] = len(data)
                 total += len(data)
+                uploaded[required_file] += 1
         if row.get("omitted"):
             omitted_evidence.append({
                 "path": path,

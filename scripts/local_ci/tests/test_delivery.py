@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_ci.delivery import MAX_FILE_BYTES, seal_result
+from agent_ci.delivery import MAX_FILE_BYTES, MAX_OPTIONAL_FILES, MAX_REQUIRED_FILES, seal_result
 from agent_ci.protocol import (
     ContractError,
     TASK_SCHEMA,
@@ -132,20 +132,29 @@ def test_required_evidence_must_publish_while_optional_files_use_remaining_budge
     assert result["artifacts"][1]["omitted"]
 
 
-def test_required_evidence_is_not_limited_by_selected_file_count(tmp_path):
+@pytest.mark.parametrize("required_overflow", [False, True])
+def test_evidence_count_limits_are_separate_and_deduplicated(tmp_path, required_overflow):
     value = answer()
-    names = [f"required-{index}.txt" for index in range(21)]
-    value["checks"][0]["evidence"] = names
+    required = [f"required-{index}.txt" for index in range(MAX_REQUIRED_FILES + required_overflow)]
+    optional = [f"optional-{index}.txt" for index in range(MAX_OPTIONAL_FILES + 1)]
+    value["checks"][0]["evidence"] = required + required[:1]
+    value["artifacts"] = ["missing-optional.txt"] + required[:1] + optional + optional[:1]
     artifacts = tmp_path / "run/artifacts"
     artifacts.mkdir(parents=True)
-    for name in names:
-        (artifacts / name).write_text("required evidence\n")
+    for name in required + optional:
+        (artifacts / name).write_text("evidence\n")
 
     result = seal(tmp_path, value)
 
-    assert result["status"] == "pass"
-    assert [row["path"] for row in result["artifacts"]] == names
-    assert all("omitted" not in row for row in result["artifacts"])
+    assert result["status"] == ("infra_error" if required_overflow else "pass")
+    assert result["checks"][0]["status"] == "pass"
+    assert [row["path"] for row in result["artifacts"] if not row.get("omitted")] == (
+        required[:MAX_REQUIRED_FILES] + optional[:MAX_OPTIONAL_FILES]
+    )
+    assert len(result["artifacts"]) == len(required) + len(optional) + 1
+    omitted = result["evidence_delivery"]["omitted"]
+    assert any(row["required"] for row in omitted) == required_overflow
+    assert (tmp_path / "sealed/result.json").is_file()
 
 
 def test_published_result_json_is_readable_without_changing_its_data(tmp_path):

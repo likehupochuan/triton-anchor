@@ -171,12 +171,14 @@ findings 每项提供 `severity`、`summary`、`blocking` 和可选 `evidence`�
 检查的 `details` 可直接保留基础工具结果中的业务数据，供页面展示算子、后端与性能。
 
 checks.evidence 和 artifacts 是相对 `/task/artifacts` 的实际文件路径；reviews.evidence
-也可包含代码引用。发布到 Gitee 时，`result.json` 与 checks.evidence 引用的检查证据是必传文件；
-artifacts 仅列任务按价值选择的补充摘要、失败日志片段、定向用例或性能数据。必传证据优先占用预算，
+也可包含代码引用。发布到 Gitee 时，必传清单为 `result.json`、`change_validation` 的验证报告
+及各检查通过 checks.evidence 声明的最小必要证据；报告沿用任务实际文件名，不要求新增固定路径。
+artifacts 仅按重要性排序选择必要的补充摘要、失败日志片段、定向用例或性能数据。必传证据优先占用预算，
 缺失或无法上传时保留检查的实际执行状态，但整体通过结论改为待确认（infra_error）；
 选传文件超限时可留在 CI 主机并在 evidence_delivery 中注明，不改变整体结论。
-不上传 wheel、构建目录、完整会话或凭据。不限制文件数量，每文件不超过 2 MiB、总计 10 MiB；
-过大的输出先整理摘要。
+不上传 wheel、构建目录、完整日志/会话或凭据。必传证据最多 32 份、选传附件最多 8 份，
+路径去重且只有成功上传的文件占用各自名额；`result.json` 单独必传，不占附件名额。
+每文件不超过 2 MiB、附件总计 10 MiB，`result.json` 单独不超过 2 MiB；过大的输出先整理摘要。
 
 control_plane 的文档空白 warnings 仅为非阻塞格式提示，不因此将检查或整体结果标为失败；
 语法、冲突标记和回归失败仍按实际检查结果处理。

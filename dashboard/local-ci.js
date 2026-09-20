@@ -87,7 +87,7 @@ function renderBlockers(parent, run) {
   {
     const selected=groups;
     const box=el('section','ci-blockers');
-    box.append(el('h3','','整体阻塞结论'));
+    box.append(el('h3','','阻塞原因'));
     const list=el('ul'),visible=[];
     for(const group of selected){
       // Show one root cause per category. Check rows and generic incomplete
