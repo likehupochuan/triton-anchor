@@ -130,6 +130,34 @@
       ],
       "devices": []
     },
+    "triton_v3.2": {
+      "name": "triton-3.2",
+      "triton_version": "3.2",
+      "llvm_hash": "86b69c31642e98f8357df62c09d118ad1da4e16a",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "local_image_tag": "jiwang-ci/slim-foundation:torch2.8-tpu0.17",
+      "llvm": {
+        "mode": "mount",
+        "commit": "86b69c31642e98f8357df62c09d118ad1da4e16a"
+      },
+      "env": {
+        "PYTHON_BIN": "/opt/venv/bin/python",
+        "PYTHON_VENV_ACTIVATE": "/opt/venv/bin/activate",
+        "SEED_PYTHON": "/opt/venv/bin/python",
+        "MAX_JOBS": "12",
+        "CMAKE_BUILD_PARALLEL_LEVEL": "8"
+      },
+      "mounts": [
+        {
+          "source": "/home/jiwang_ci/local_ci/workspace/dependencies/llvm-86b69c31642e98f8357df62c09d118ad1da4e16a",
+          "target": "/opt/local-ci/runtime/deps/llvm-86b69c31642e98f8357df62c09d118ad1da4e16a",
+          "read_only": true,
+          "sha256": "3abc0cd997347e0cab2bf87d2cf9bb31d540807f823fdb5612de4656bb915808"
+        }
+      ],
+      "devices": []
+    },
     "triton_v3.3": {
       "name": "triton-3.3",
       "triton_version": "3.3",
@@ -158,6 +186,62 @@
       ],
       "devices": []
     },
+    "triton_v3.4": {
+      "name": "triton-3.4",
+      "triton_version": "3.4",
+      "llvm_hash": "8957e64a20fc7f4277565c6cfe3e555c119783ce",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "local_image_tag": "jiwang-ci/slim-foundation:torch2.8-tpu0.17",
+      "llvm": {
+        "mode": "mount",
+        "commit": "8957e64a20fc7f4277565c6cfe3e555c119783ce"
+      },
+      "env": {
+        "PYTHON_BIN": "/opt/venv/bin/python",
+        "PYTHON_VENV_ACTIVATE": "/opt/venv/bin/activate",
+        "SEED_PYTHON": "/opt/venv/bin/python",
+        "MAX_JOBS": "12",
+        "CMAKE_BUILD_PARALLEL_LEVEL": "8"
+      },
+      "mounts": [
+        {
+          "source": "/home/jiwang_ci/local_ci/workspace/dependencies/llvm-8957e64a20fc7f4277565c6cfe3e555c119783ce",
+          "target": "/opt/local-ci/runtime/deps/llvm-8957e64a20fc7f4277565c6cfe3e555c119783ce",
+          "read_only": true,
+          "sha256": "dfa1701fb27ca7834ec640158aa1bd5d05bddfae50c6f8e43b7f69b515a48957"
+        }
+      ],
+      "devices": []
+    },
+    "triton_v3.5": {
+      "name": "triton-3.5",
+      "triton_version": "3.5",
+      "llvm_hash": "7d5de3033187c8a3bb4d2e322f5462cdaf49808f",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "local_image_tag": "jiwang-ci/slim-foundation:torch2.8-tpu0.17",
+      "llvm": {
+        "mode": "mount",
+        "commit": "7d5de3033187c8a3bb4d2e322f5462cdaf49808f"
+      },
+      "env": {
+        "PYTHON_BIN": "/opt/venv/bin/python",
+        "PYTHON_VENV_ACTIVATE": "/opt/venv/bin/activate",
+        "SEED_PYTHON": "/opt/venv/bin/python",
+        "MAX_JOBS": "12",
+        "CMAKE_BUILD_PARALLEL_LEVEL": "8"
+      },
+      "mounts": [
+        {
+          "source": "/home/jiwang_ci/local_ci/workspace/dependencies/llvm-7d5de3033187c8a3bb4d2e322f5462cdaf49808f",
+          "target": "/opt/local-ci/runtime/deps/llvm-7d5de3033187c8a3bb4d2e322f5462cdaf49808f",
+          "read_only": true,
+          "sha256": "b40f5e456fa4a2fc7920cd137c05c9ab834c26460850f68e0fcc22c7080fcddd"
+        }
+      ],
+      "devices": []
+    },
     "triton_v3.6": {
       "name": "triton-3.6",
       "triton_version": "3.6",
@@ -182,6 +266,34 @@
           "target": "/opt/local-ci/runtime/deps/llvm-a992f29451b9e140424f35ac5e20177db4afbdc0",
           "read_only": true,
           "sha256": "67af697c9ecdc8ee156de961b4a75e226286a7d2cdae9b47b8e434b21d197eb9"
+        }
+      ],
+      "devices": []
+    },
+    "triton_v3.8": {
+      "name": "triton-3.8",
+      "triton_version": "3.8",
+      "llvm_hash": "941a04e69ee8fe4c7a162b2f1e215aa8df867534",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "local_image_tag": "jiwang-ci/slim-foundation:torch2.8-tpu0.17",
+      "llvm": {
+        "mode": "mount",
+        "commit": "941a04e69ee8fe4c7a162b2f1e215aa8df867534"
+      },
+      "env": {
+        "PYTHON_BIN": "/opt/venv/bin/python",
+        "PYTHON_VENV_ACTIVATE": "/opt/venv/bin/activate",
+        "SEED_PYTHON": "/opt/venv/bin/python",
+        "MAX_JOBS": "12",
+        "CMAKE_BUILD_PARALLEL_LEVEL": "8"
+      },
+      "mounts": [
+        {
+          "source": "/home/jiwang_ci/local_ci/workspace/dependencies/llvm-941a04e69ee8fe4c7a162b2f1e215aa8df867534",
+          "target": "/opt/local-ci/runtime/deps/llvm-941a04e69ee8fe4c7a162b2f1e215aa8df867534",
+          "read_only": true,
+          "sha256": "f1e485a31e6a7bb2dec7e5d596556de3dbb3c950e2aa4172263a4975ae803dd1"
         }
       ],
       "devices": []

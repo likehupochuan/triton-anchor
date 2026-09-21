@@ -243,21 +243,64 @@ def test_shared_image_rejects_different_profile_images_and_legacy_layers():
             validate_shared_profile(profile)
 
 
-def test_profile_resolution_uses_source_version_and_llvm_without_branch_routing():
+def test_deployment_profiles_match_source_versions_and_capabilities():
+    settings = json.loads((LOCAL / "prepare/config.example.json").read_text())
+    profiles = settings["profiles"]
+    expected = [
+        ("3.0.0", "10dc3a8e916d73291269e5e2b82dd22681489aa1", None),
+        ("3.1.0", "10dc3a8e916d73291269e5e2b82dd22681489aa1", None),
+        ("3.2.0", "86b69c31642e98f8357df62c09d118ad1da4e16a",
+         "3abc0cd997347e0cab2bf87d2cf9bb31d540807f823fdb5612de4656bb915808"),
+        ("3.3.0", "a66376b0dc3b2ea8a84fda26faca287980986f78", None),
+        ("3.4.0", "8957e64a20fc7f4277565c6cfe3e555c119783ce",
+         "dfa1701fb27ca7834ec640158aa1bd5d05bddfae50c6f8e43b7f69b515a48957"),
+        ("3.5.1", "7d5de3033187c8a3bb4d2e322f5462cdaf49808f",
+         "b40f5e456fa4a2fc7920cd137c05c9ab834c26460850f68e0fcc22c7080fcddd"),
+        ("3.6.0", "a992f29451b9e140424f35ac5e20177db4afbdc0", None),
+        ("3.8.0", "941a04e69ee8fe4c7a162b2f1e215aa8df867534",
+         "f1e485a31e6a7bb2dec7e5d596556de3dbb3c950e2aa4172263a4975ae803dd1"),
+    ]
+    assert "branch_profiles" not in settings
+    assert list(profiles) == ["triton_v" + version.rsplit(".", 1)[0]
+                              for version, _, _ in expected]
+    assert shared_image(settings) == settings["image"]
+    frontend = profiles["triton_v3.3"]
+    for source_version, revision, digest in expected:
+        version = source_version.rsplit(".", 1)[0]
+        key = "triton_v" + version
+        profile = profiles[key]
+        assert resolve_task_profile(settings, revision, source_version) == key
+        assert profile["name"] == "triton-" + version
+        assert profile["triton_version"] == version
+        assert profile["llvm_hash"] == revision
+        assert profile["llvm"] == {"mode": "mount", "commit": revision}
+        assert profile["backend_enabled"] is (version == "3.0")
+        if version != "3.0":
+            assert profile["devices"] == []
+            assert profile["env"] == frontend["env"]
+            assert profile["local_image_tag"] == frontend["local_image_tag"]
+            assert profile["workspace_container"] == frontend["workspace_container"]
+            mount, = profile["mounts"]
+            assert mount["source"] == settings["dependency_root"] + "/llvm-" + revision
+            assert mount["target"] == "/opt/local-ci/runtime/deps/llvm-" + revision
+            assert mount["read_only"] is True
+            if digest is not None:
+                assert mount["sha256"] == digest
+    assert profiles["triton_v3.1"]["mounts"] == profiles["triton_v3.0"]["mounts"][:1]
+
+
+def test_profile_resolution_handles_revisions_and_errors_without_branch_routing():
     settings = {
         "profiles": {
             "triton_v3.0": {"triton_version": "3.0", "llvm_hash": "a" * 40, "llvm": {"revisions": {"c" * 40: {}}}},
-            "triton_v3.1": {"triton_version": "3.1", "llvm_hash": "a" * 40},
-            "triton_v3.3": {"triton_version": "3.3", "llvm_hash": "b" * 40},
         },
         "branch_profiles": {"CI_dev": "triton_v3.0"},
     }
-    assert resolve_task_profile(settings, "a" * 40, "3.0.0") == "triton_v3.0"
-    assert resolve_task_profile(settings, "a" * 40, "3.1.0") == "triton_v3.1"
     assert resolve_task_profile(settings, "c" * 40, "3.0.1") == "triton_v3.0"
-    assert resolve_task_profile(settings, "b" * 40, "3.3.1") == "triton_v3.3"
     with pytest.raises(EnvironmentError, match="No configured profile supports LLVM"):
         resolve_task_profile(settings, "b" * 40, "3.0.0")
+    with pytest.raises(EnvironmentError, match="No configured profile supports LLVM"):
+        resolve_task_profile(settings, "a" * 40, "3.1.0")
     settings["profiles"]["alternate"] = {"triton_version": "3.0", "llvm_hash": "a" * 40}
     with pytest.raises(EnvironmentError, match="Multiple profiles"):
         resolve_task_profile(settings, "a" * 40, "3.0.0")

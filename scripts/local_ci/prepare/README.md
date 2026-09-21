@@ -58,7 +58,7 @@ python3 scripts/local_ci/prepare/control_update.py \
 
 只读依赖的目录、权限和摘要配置见 [DEPENDENCY_MOUNTS.md](DEPENDENCY_MOUNTS.md)。`profiles/slim/` 提供共享基础镜像配方，FlagGems 从固定服务器目录导入，各任务的 venv 和构建输出独立。后端测试默认路径为 `tests`；多个路径可显式设置 profile 的 `tools.backend_test_paths` 数组。
 
-完整版本清单、尚待登记的服务器 LLVM 目录与摘要、配置补齐和跨版本验收步骤见 [VARIANT_LLVM_DEPLOYMENT.md](VARIANT_LLVM_DEPLOYMENT.md)。本次代码修改不代表服务器已部署，也不代表各版本真实构建已经通过。
+新增 LLVM profile 的部署命令、每步目的、完成标志和跨版本验收操作见 [VARIANT_LLVM_DEPLOYMENT.md](VARIANT_LLVM_DEPLOYMENT.md)。仓库已配置 3.0–3.6 和 3.8；配置补齐不代表服务器已部署，也不代表各版本真实构建已经通过。
 
 健康采集、异常观察和本地保留策略见 [maintenance/README.md](../maintenance/README.md)。
 
