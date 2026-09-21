@@ -38,8 +38,8 @@ PR 关闭、转草稿、目标变化或新增提交时结束失效任务的待�
 
 审批卡同时写入 PR 与工作流摘要，展示前置结论、贡献者与来源、冻结 SHA、
 改动数量和按路径归类的范围、diff 链接及审批入口。
-PR 正文提供概述、影响范围和验证情况，可参考控制分支的
-[PR 模板](../../.github/PULL_REQUEST_TEMPLATE.md)；push/manual 不要求这些字段。
+PR 正文提供概述、影响范围和验证情况，创建 PR 时自动使用默认分支上的
+[PR 模板](https://github.com/likehupochuan/triton-anchor/blob/main/.github/PULL_REQUEST_TEMPLATE.md)；push/manual 不要求这些字段。
 
 只有 environment 明确记录人工拒绝，才向仍匹配的 PR 通知审批未通过；
 审批校验错误或取消按对应状态处理。任务取消仅更新状态和 Gitee 停止标记。
