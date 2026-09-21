@@ -425,12 +425,19 @@ test('failed close is re-evaluated against unreadable, old or newly faulty snaps
 test('task identity and new terminal evidence resolve recovery; stable event IDs deduplicate timeline', async () => {
   const h = fixture();
   const task = {task_id: 'task-a', run_id: 'run-1', stage: 'running', codex_status: 'connection_error',
-    recovery: {state: 'retry_wait', failure_code: 'connection_error', action: 'resume'}};
+    recovery: {state: 'retry_wait', failure_code: 'connection_error', action: 'resume'},
+    budget: {codex_attempts_used: 2, codex_attempts_limit: 10,
+      codex_deadline_at: new Date(h.now + 3600000).toISOString()}};
   h.health.tasks = [task]; h.health.active_task = task;
   h.health.events = [{id: 'event-a', at: h.health.collected_at, kind: 'recovery', task_id: 'task-a', run_id: 'run-1',
     detail: {state: 'retry_wait', action: 'resume', failure_code: 'connection_error', attempt: 2}}];
   await h.run();
-  assert.match(h.issues[0].body, /第 2 次/);
+  assert.equal(h.issues.length, 0, 'an in-budget retry is not an incident');
+  task.budget.codex_attempts_used = 10;
+  h.advance(); h.health.events[0] = {...h.health.events[0], id: 'event-limit', at: h.health.collected_at,
+    detail: {...h.health.events[0].detail, attempt: 10}};
+  await h.run();
+  assert.match(h.issues[0].body, /第 10 次/);
   h.advance(); await h.run();
   assert.equal(h.writes.length, 1, 'same source event is not appended or patched again');
   h.health.tasks = [{...task, task_id: 'task-b', codex_status: 'running', recovery: {state: 'normal'}}];

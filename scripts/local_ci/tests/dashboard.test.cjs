@@ -1,7 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { normalize, business, blockerGroups, environmentProfile } = require('../../../dashboard/data.js');
-const { assess: assessHealth, readSnapshot, readAlerts, readHealth, monitorReading, source: healthSource, taskFacts, historyEvents, eventText } = require('../../../dashboard/health.js');
+const { assess: assessHealth, readSnapshot, readAlerts, readHealth, monitorReading, source: healthSource, taskFacts,
+  historyEvents, eventText } = require('../../../dashboard/health.js');
 const task = (id, date) => ({task_id:id, repository:'example/repo',pr_number:7,target_branch:'main',head_sha:('f'+id).repeat(20),tested_sha:id.repeat(40),captured_at:date});
 
 const healthNow = Date.parse('2026-09-17T10:00:00Z');
@@ -70,8 +71,11 @@ test('recovery facts separate phase, budget and progress; long silence only warn
   const model=assessHealth(worker,[],{now:healthNow}),facts=Object.fromEntries(taskFacts(current));
   assert.equal(facts['执行阶段'],'执行中');assert.equal(facts['恢复状态'],'等待重试');
   assert.equal(facts['Codex 尝试'],'3 / 10');assert.equal(facts['恢复动作'],'复用原 session');
-  assert.deepEqual(model.issues.map(row=>row.code),['task_no_progress','task_stalled','task_recovering']);
+  assert.deepEqual(model.issues.map(row=>row.code),['task_no_progress','task_stalled']);
+  assert.equal(model.cards[3].text,'自动重连中 · 3 / 10');
   assert.ok(model.issues.every(row=>row.tone==='warn'));
+  current.recovery={state:'exhausted',failure_code:'recovery_exhausted',action:'publish_infra_error'};
+  assert.ok(assessHealth(worker,[],{now:healthNow}).issues.some(row=>row.code==='task_recovery_exhausted'));
 });
 
 test('health reader anonymously decodes the Gitee file API and rejects a different worker', async t => {

@@ -48,6 +48,18 @@
   const age = (value, now) => (now - Date.parse(value)) / 1000;
   const fresh = (value, now) => age(value, now) >= -60 && age(value, now) <= source.staleSeconds;
   const date = value => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('zh-CN', {hour12: false, timeZone:'Asia/Shanghai'}) : '未上报';
+  const connectionFailures = new Set(['connection', 'connection_error']);
+  const connectionRecovery = task => task?.stage === 'running'
+    && ['retry_wait', 'recovering'].includes(task.recovery?.state)
+    && connectionFailures.has(task.recovery?.failure_code);
+  function automaticConnectionRetry(task, now = Date.now()) {
+    if (!connectionRecovery(task)) return false;
+    const budget = task.budget || {}, used = budget.codex_attempts_used, limit = budget.codex_attempts_limit;
+    if (!Number.isInteger(used) || !Number.isInteger(limit) || used > limit
+      || used === limit && task.recovery.state !== 'recovering') return false;
+    return ['codex_deadline_at', 'recovery_deadline_at'].every(key =>
+      !Number.isFinite(Date.parse(budget[key])) || Date.parse(budget[key]) > now);
+  }
 
   function assess(worker, events = [], {now = Date.now(), workerError = ''} = {}) {
     const issues = [], seen = new Set();
@@ -65,6 +77,7 @@
       {name: '服务器 → Gitee', text: '状态未知', tone: 'muted'},
       {name: 'Codex', text: '状态未知', tone: 'muted'},
     ];
+    const automaticRecovery = current && automaticConnectionRetry(active, now);
     if (current) {
       // The five-minute collector already measures the three-minute Worker heartbeat.
       const workerOk = poller.alive === true && poller.heartbeat_stale === false && age(poller.heartbeat_at, Date.parse(worker.collected_at)) <= 180;
@@ -79,8 +92,12 @@
       if (pollStatus === 'error') incident('relay_poll_failed');
       const codex = codexStates[active?.codex_status];
       const codexIdle = !active ? '空闲' : active.stage === 'preparing' ? '准备任务环境' : ['sealing', 'publish_pending', 'published'].includes(active.stage) ? '任务已结束' : '连接状态未上报';
-      cards[3] = {name: 'Codex', text: codex?.[0] || codexIdle, tone: codex?.[1] || 'muted'};
-      if (codex && ['bad', 'warn'].includes(codex[1]) && active.codex_status !== 'retrying')
+      const attempts = active?.budget;
+      cards[3] = automaticRecovery
+        ? {name: 'Codex', text: '自动重连中 · ' + attempts.codex_attempts_used + ' / ' + attempts.codex_attempts_limit, tone: 'info'}
+        : {name: 'Codex', text: codex?.[0] || codexIdle, tone: codex?.[1] || 'muted'};
+      const exhaustedConnection = active?.codex_status === 'connection_error' && active.recovery?.state === 'exhausted';
+      if (!automaticRecovery && !exhaustedConnection && codex && ['bad', 'warn'].includes(codex[1]) && active.codex_status !== 'retrying')
         add('codex_' + active.codex_status, 'Codex 异常', codex[0], codex[1]);
       else if (active?.codex_alive === false && active.codex_status === 'running')
         add('codex_process', 'Codex 异常', 'Codex 进程已退出，等待 Worker 处理');
@@ -97,7 +114,8 @@
           add('task_no_progress', ...incidents.task_no_progress, 'warn');
         if (task.stage === 'running' && age(task.last_progress_at, now) > (worker.thresholds?.progress_stalled_seconds || 3600))
           add('task_stalled', ...incidents.task_stalled, 'warn');
-        if (['recovering', 'retry_wait', 'waiting_dependency'].includes(task.recovery?.state))
+        if (['recovering', 'retry_wait', 'waiting_dependency'].includes(task.recovery?.state)
+          && !automaticConnectionRetry(task, now) && task.codex_status !== 'connection_error')
           add('task_recovering', ...incidents.task_recovering, 'warn');
         if (task.recovery?.state === 'exhausted') incident('task_recovery_exhausted');
       }
@@ -115,8 +133,9 @@
     }
     const history = historyEvents([...rows(worker?.events), ...rows(events)], now);
     return {current, cards, issues, history,
-      title: !worker || workerError ? '健康数据不可用' : !current ? '心跳快照已过期' : issues.length ? '发现异常或待确认项' : '服务器已上报状态正常',
-      tone: issues.some(row => row.tone === 'bad') ? 'bad' : issues.length ? 'warn' : 'good'};
+      title: !worker || workerError ? '健康数据不可用' : !current ? '心跳快照已过期' : issues.length ? '发现异常或待确认项'
+        : automaticRecovery ? '服务器正常，Codex 正在自动重连' : '服务器已上报状态正常',
+      tone: issues.some(row => row.tone === 'bad') ? 'bad' : issues.length ? 'warn' : automaticRecovery ? 'info' : 'good'};
   }
 
   async function readGitee(url, message) {
@@ -312,6 +331,14 @@
     }
     return groups.reverse().sort((a,b) => Date.parse(b.events.at(-1).at) - Date.parse(a.events.at(-1).at));
   }
+  function hideConnectionHistory(group, worker, now = Date.now()) {
+    if (!connectionFailures.has(group.reason)) return false;
+    if (group.events.some(row => row.detail?.state === 'recovered'
+      || ['success', 'recovered'].includes(row.detail?.outcome))) return true;
+    const latest = group.events.at(-1), task = [...rows(worker?.tasks), ...rows(worker?.recent_tasks), worker?.active_task]
+      .find(row => row && row.task_id === latest.task_id && row.run_id === latest.run_id);
+    return !!task && (automaticConnectionRetry(task, now) || ['recovered', 'exhausted'].includes(task.recovery?.state));
+  }
 
   function mount(root) {
     const node = (tag, className, text) => { const item = document.createElement(tag); if (className) item.className = className; if (text) item.textContent = text; return item; };
@@ -490,10 +517,11 @@
       content.append(alertSection);
       const records = node('section', 'health-section');
       records.append(node('h3', '', '异常与恢复记录（近 7 天）'));
-      records.append(node('p', 'health-muted', '记录服务器恢复过程和 Cloudflare 外部监测事件；以下为事件发生时的状态，当前任务状态以上方“任务执行与恢复”为准。'));
+      records.append(node('p', 'health-muted', '记录需要关注的恢复结果和 Cloudflare 外部监测事件；预算内的 Codex 自动重连只在上方“任务执行与恢复”展示。'));
       if (monitor.error) records.append(node('p', 'health-muted', monitor.error + '；服务器上报的记录仍会展示。'));
       const history = node('ul', 'health-history');
-      const groups = groupHistory(model.history.map(row => taskIdentity(row, worker)));
+      const groups = groupHistory(model.history.map(row => taskIdentity(row, worker)))
+        .filter(group => !hideConnectionHistory(group, worker));
       for (const group of groups.slice(0, showAllEvents ? 100 : 20)) {
         const item = node('li'), latest = group.events.at(-1);
         if (group.events.length === 1 && !latest.task_id) item.append(eventLine(latest));
@@ -547,7 +575,8 @@
     setInterval(() => { if (!document.hidden) render(); }, 60000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
   }
-  if (typeof module !== 'undefined') module.exports = {assess, readSnapshot, readAlerts, readHealth, monitorReading, source, taskFacts, historyEvents, eventText};
+  if (typeof module !== 'undefined') module.exports = {assess, readSnapshot, readAlerts, readHealth, monitorReading, source,
+    taskFacts, historyEvents, eventText};
   if (typeof document !== 'undefined') {
     const root = document.getElementById('serverHealth');
     if (root) mount(root);
