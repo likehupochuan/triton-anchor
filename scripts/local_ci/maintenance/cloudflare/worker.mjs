@@ -12,6 +12,8 @@ const API = 'https://gitee.com/api/v5';
 const KEY = `local-ci-alert:${CONFIG.worker}`;
 const CACHE_KEY = `local-ci-health-cache:${CONFIG.worker}`;
 const MARKER = `<!-- ${KEY} -->`;
+const ISSUE_SEARCH_PAGE_SIZE = 100;
+const ISSUE_SEARCH_MAX_PAGES = 3;
 const LABELS = Object.freeze({
   source_unreadable: '连续两次无法读取健康数据（不能据此判断服务器宕机）',
   snapshot_stale: '健康快照已超过20分钟未更新（当前服务状态未知）',
@@ -183,15 +185,22 @@ async function issueRequest(fetcher, token, path, method = 'GET', body) {
 }
 
 async function findOpenIssue(fetcher, token) {
-  for (let page = 1; ; page++) {
-    const rows = await issueRequest(fetcher, token,
-      `/repos/${CONFIG.owner}/${CONFIG.repository}/issues?state=all&sort=updated&direction=desc&per_page=100&page=${page}`);
-    if (!Array.isArray(rows)) throw new Error('Invalid Issue list');
-    const found = rows.find(row => ['open', 'progressing'].includes(row.state)
-      && typeof row.body === 'string' && row.body.includes(MARKER));
-    if (found) return found;
-    if (rows.length < 100) return null;
+  let incomplete = false;
+  for (const state of ['open', 'progressing']) {
+    for (let page = 1; page <= ISSUE_SEARCH_MAX_PAGES; page++) {
+      const rows = await issueRequest(fetcher, token,
+        `/repos/${CONFIG.owner}/${CONFIG.repository}/issues?state=${state}&sort=updated&direction=desc&per_page=${ISSUE_SEARCH_PAGE_SIZE}&page=${page}`);
+      if (!Array.isArray(rows)) throw new Error('Invalid Issue list');
+      const found = rows.find(row => ['open', 'progressing'].includes(row.state)
+        && typeof row.body === 'string' && row.body.includes(MARKER));
+      if (found) return found;
+      if (rows.length < ISSUE_SEARCH_PAGE_SIZE) break;
+      if (page === ISSUE_SEARCH_MAX_PAGES) incomplete = true;
+    }
   }
+  // A truncated search cannot prove absence after a lost Issue creation response.
+  if (incomplete) throw new Error('Active Issue search reached pagination limit; refusing duplicate creation');
+  return null;
 }
 
 const EVENT_LABELS = {

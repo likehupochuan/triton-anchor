@@ -200,7 +200,9 @@
     defer_wait_dependency:'等待依赖', wait_credentials:'等待凭据更新', wait_runtime:'等待 Docker 恢复',
     publish_infra_error:'发布基础设施失败结果', continue_sealing:'继续封存结果', published:'结果已发布',
     wait_dependency:'等待依赖', retry_sealing:'重新封存', retry_publish:'重传已封存结果', none:'无需恢复', no_retry:'不重试'};
-  const failureNames = {connection_error:'Codex 连接中断', auth_error:'Codex 认证失败', rate_limited:'Codex 限流',
+  const failureNames = {connection:'Codex 连接中断', authentication:'Codex 认证失败', rate_limit:'Codex 限流',
+    connection_error:'Codex 连接中断', auth_error:'Codex 认证失败', rate_limited:'Codex 限流',
+    cli_failed:'Codex 执行异常（未分类）', result_missing:'未生成有效执行报告', recovery_exhausted:'恢复预算耗尽', sealing_failed:'结果封存失败', disk_budget:'磁盘空间不足',
     configuration_invalid:'任务配置无效', delivery_failed:'结果上传失败', container_oom:'任务容器内存不足（OOM）', timeout:'执行超时', session_invalid:'session 无效', container_failed:'任务容器异常', runtime_unavailable:'Docker 不可用',
     budget_exhausted:'恢复预算耗尽', publication_failed:'结果上传失败', interrupted:'执行中断', no_progress:'长时间无进展'};
   const describe = (value, labels) => value ? labels[value] || value : '未上报';
@@ -216,7 +218,7 @@
       ['session 切换', attempts(budget.session_switches, budget.session_switches_limit)],
       ['最近有效进展', date(task.last_progress_at)], ['下次重试', date(recovery.next_retry_at)],
       ['执行截止时间', date(budget.codex_deadline_at)], ['恢复截止时间', date(budget.recovery_deadline_at)],
-      ['最近恢复', date(recovery.last_recovery_at)], ['恢复结果', describe(recovery.outcome, {success:'成功', failed:'失败', pending:'进行中'})],
+      ['最近恢复', date(recovery.last_recovery_at)], ['恢复结果', describe(recovery.outcome, {success:'成功', recovered:'已恢复', failed:'失败', pending:'进行中'})],
     ];
   }
 
@@ -233,12 +235,34 @@
   function eventText(row) {
     const detail = row.detail || {};
     return [...new Set([date(row.at), row.task_id ? '任务 ' + row.task_id.slice(0, 12) : '外部监测',
+      row.run_id && row.run_id !== 'unknown' ? '运行 ' + row.run_id : '',
       row.kind === 'recovered' ? '确认恢复' : row.kind === 'fault' ? '发现异常' : row.kind === 'finished_failed' ? '恢复失败，任务已结束' : '',
       rows(row.codes).map(code => incidents[code]?.[1] || failureNames[code] || code).join('；'),
       detail.phase && describe(detail.phase, stages), detail.state && detail.state !== 'unknown' && describe(detail.state, recoveryStates), detail.failure_code && describe(detail.failure_code, failureNames),
       detail.action && describe(detail.action, recoveryActions), Number.isInteger(detail.attempt) ? '第 ' + detail.attempt + ' 次' : '',
-      detail.outcome && describe(detail.outcome, {success:'恢复成功', failed:'恢复失败', pending:'进行中'}),
+      detail.outcome && describe(detail.outcome, {success:'恢复成功', recovered:'恢复成功', failed:'恢复失败', pending:'进行中'}),
     ].filter(Boolean))].join(' · ');
+  }
+
+  function groupHistory(events) {
+    const groups = [], active = new Map();
+    for (const row of [...events].reverse().sort((a,b) => Date.parse(a.at) - Date.parse(b.at))) {
+      const detail = row.detail || {}, key = row.task_id && row.run_id && row.task_id !== 'unknown' && row.run_id !== 'unknown'
+        && JSON.stringify([row.task_id, row.run_id]);
+      if (!key || row.kind !== 'recovery') {
+        groups.push({events:[row]});
+        if (key && ['published', 'cancelled'].includes(detail.phase)) active.delete(key);
+        continue;
+      }
+      let group = active.get(key);
+      if (!group || (detail.failure_code && group.reason && detail.failure_code !== group.reason) || detail.state === 'normal') {
+        group = {events:[], reason:detail.failure_code || ''}; groups.push(group); active.set(key, group);
+      }
+      group.events.push(row);
+      group.reason ||= detail.failure_code || '';
+      if (['normal', 'recovered', 'exhausted'].includes(detail.state) || ['success', 'recovered', 'failed'].includes(detail.outcome)) active.delete(key);
+    }
+    return groups.reverse().sort((a,b) => Date.parse(b.events.at(-1).at) - Date.parse(a.events.at(-1).at));
   }
 
   function mount(root) {
@@ -262,6 +286,7 @@
       const viewState = JSON.stringify([model, worker, monitor, alerts, alertsError, sourceNotice, cooling, showAllEvents]);
       if (viewState === renderedState) return;
       renderedState = viewState;
+      const expanded = new Set([...content.querySelectorAll('details[open][data-history-key]')].map(item => item.dataset.historyKey));
       content.replaceChildren();
       const summary = node('div', 'health-summary');
       summary.append(node('strong', 'health-badge ' + model.tone, model.title));
@@ -347,26 +372,51 @@
       allAlerts.href = 'https://gitee.com/' + source.repository + '/issues';
       alertSection.append(allAlerts);
       if (alertsError) alertSection.append(node('p', 'health-muted', alertsError + '；以下旧记录不能代表当前告警状态。'));
-      const alertList = node('ul', 'health-history');
+      const alertList = node('ul', 'health-history'), closedList = node('ul', 'health-history');
       for (const alert of alerts) {
+        const closed = ['closed', 'rejected'].includes(alert.state);
         const item = node('li'), link = node('a', '', alert.title);
         link.href = alert.url;
-        item.append(node('span', 'health-badge ' + (['closed', 'rejected'].includes(alert.state) ? 'muted' : 'warn'),
-          ['closed', 'rejected'].includes(alert.state) ? '已关闭' : '待处理'), document.createTextNode(' '), link,
+        item.append(node('span', 'health-badge ' + (closed ? 'muted' : 'warn'),
+          closed ? '已关闭' : '待处理'), document.createTextNode(' '), link,
           node('span', 'health-muted', ' · 更新于 ' + date(alert.updated_at)));
-        alertList.append(item);
+        (closed ? closedList : alertList).append(item);
       }
-      alertSection.append(alerts.length ? alertList : node('p', 'health-muted', alertsError ? '告警记录暂不可用。' : '暂无已记录的告警；这不表示 Cloudflare 监测已经启用。'));
+      alertSection.append(alertList.childElementCount ? alertList : node('p', 'health-muted', alertsError ? '告警记录暂不可用。' : alerts.length ? '已读取的告警中没有未关闭项。' : '暂无已记录的告警；这不表示 Cloudflare 监测已经启用。'));
+      if (closedList.childElementCount) {
+        const archived = node('details'); archived.dataset.historyKey = 'closed-alerts'; archived.open = expanded.has('closed-alerts');
+        archived.append(node('summary', '', '查看已关闭告警（' + closedList.childElementCount + '）'), closedList);
+        alertSection.append(archived);
+      }
       alertSection.append(node('p', 'health-muted', '显示最近更新的告警。Issue 关闭不等于服务已确认恢复，当前状态以上方健康快照为准。'));
       content.append(alertSection);
       const records = node('section', 'health-section');
       records.append(node('h3', '', '异常与恢复记录（近 7 天）'));
       if (monitor.error) records.append(node('p', 'health-muted', monitor.error + '；服务器上报的记录仍会展示。'));
       const history = node('ul', 'health-history');
-      for (const row of model.history.slice(0, showAllEvents ? 100 : 20)) history.append(node('li', '', eventText(row)));
-      records.append(model.history.length ? history : node('p', 'health-muted', '近 7 天暂无已读取的异常与恢复记录；旧快照可能尚未上报这些字段。'));
-      if (model.history.length > 20) {
-        const expand = node('button', 'button secondary', showAllEvents ? '收起记录' : '展开全部 ' + model.history.length + ' 条记录');
+      const groups = groupHistory(model.history);
+      for (const group of groups.slice(0, showAllEvents ? 100 : 20)) {
+        const item = node('li'), latest = group.events.at(-1);
+        if (group.events.length === 1) item.textContent = eventText(latest);
+        else {
+          const details = node('details'), first = group.events[0];
+          details.dataset.historyKey = first.id; details.open = expanded.has(first.id);
+          const switches = new Set(group.events.filter(row => row.detail?.state === 'recovering'
+            && ['new_session', 'new_codex_session'].includes(row.detail.action) && Number.isInteger(row.detail.attempt)).map(row => row.detail.attempt)).size;
+          details.append(node('summary', '', eventText(latest)
+            + (group.reason && !latest.detail?.failure_code ? ' · 本段原因：' + describe(group.reason, failureNames) : '')
+            + (switches ? ' · 已记录新 session 启动 ' + switches + ' 次' : '') + ' · 展开 ' + group.events.length + ' 条过程记录'));
+          details.append(node('p', 'health-muted', '运行：' + latest.run_id + ' · 已记录时间：' + date(first.at) + ' — ' + date(latest.at)));
+          const entries = node('ul', 'health-history');
+          for (const row of [...group.events].reverse()) entries.append(node('li', '', eventText(row)));
+          details.append(entries); item.append(details);
+        }
+        history.append(item);
+      }
+      records.append(groups.length ? history : node('p', 'health-muted', '近 7 天暂无已读取的异常与恢复记录；旧快照可能尚未上报这些字段。'));
+      if (groups.length) records.append(node('p', 'health-muted', '同一运行的连续恢复过程已折叠；仅汇总保留的记录，尝试序号不是本段重试次数。'));
+      if (groups.length > 20) {
+        const expand = node('button', 'button secondary', showAllEvents ? '收起记录' : '展开全部 ' + groups.length + ' 组记录');
         expand.type = 'button'; expand.addEventListener('click', () => { showAllEvents = !showAllEvents; render(); }); records.append(expand);
       }
       content.append(records, node('p', 'health-muted', '健康快照超过 20 分钟未更新时标记过期；不可读不等于服务器宕机。恢复由服务器执行，Cloudflare 独立管理告警，本页只展示数据。'));

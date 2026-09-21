@@ -215,6 +215,9 @@ class Worker:
                     budget.get("codex_deadline_at") or float("inf"),
                 )
         previous = record.get("recovery", {})
+        ongoing_states = {"retry_wait", "waiting_dependency", "recovering"}
+        if not failure_code and state in ongoing_states and previous.get("state") in ongoing_states:
+            failure_code = previous.get("failure_code", "")
         recovery = {
             "state": state, "failure_code": failure_code, "action": action,
             "next_retry_at": now + delay if delay is not None else None,
