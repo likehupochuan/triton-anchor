@@ -1,33 +1,71 @@
 # Read-only Host Toolchains
 
-LLVM, PPL, backend sources and FlagGems are kept in versioned directories owned
-by the CI account. Environment probes and task containers mount these directories
-read-only at fixed paths under `/opt/local-ci/runtime/deps`. All profiles use the
-same immutable runtime image; frozen frontend sources and writable build output
-remain in task storage. Management recovery mounts only task/session
-volumes so missing toolchains do not prevent evidence export or cleanup.
+LLVM, PPL, backend sources and FlagGems live in versioned directories owned by
+the CI account. Profiles share one immutable runtime image and mount their
+dependencies read-only under `/opt/local-ci/runtime/deps`. Frozen sources,
+venvs, build output and caches remain in task storage.
 
-Configure a dedicated absolute `dependency_root` outside control, state and
-credential directories. Each mount source must be a directory strictly beneath
-that root. Directories/files must belong to the CI account, be readable by mapped
-container UIDs, and have no group/other write permission. Links must be relative,
-resolve inside the same version directory, and have existing targets.
+## Source Identity and Profiles
 
-Example profile fragment (replace paths, commits and digests with actual values):
+The gateway and server read LLVM metadata from the frozen source's
+`triton/cmake/` directory. Recognized names are `llvm-hash` and `llvm-info`,
+with no extension, `.txt` or `.json`. Plain text contains a full 40-character SHA;
+JSON provides `llvm_hash`. All recognized files present must agree.
+`amd-llvm-info.json` and `llvm-build-info.json` describe other build inputs and
+do not select the task LLVM. Triton 3.8 uses `llvm-info.json`.
+
+Each variant resolves a unique profile by **Triton major.minor and full LLVM SHA**.
+The deployment configuration contains:
+
+| Triton profile | LLVM SHA | Backend |
+| --- | --- | --- |
+| 3.0 | `10dc3a8e916d73291269e5e2b82dd22681489aa1` | Enabled |
+| 3.1 | `10dc3a8e916d73291269e5e2b82dd22681489aa1` | Disabled |
+| 3.2 | `86b69c31642e98f8357df62c09d118ad1da4e16a` | Disabled |
+| 3.3 | `a66376b0dc3b2ea8a84fda26faca287980986f78` | Disabled |
+| 3.4 | `8957e64a20fc7f4277565c6cfe3e555c119783ce` | Disabled |
+| 3.5 | `7d5de3033187c8a3bb4d2e322f5462cdaf49808f` | Disabled |
+| 3.6 | `a992f29451b9e140424f35ac5e20177db4afbdc0` | Disabled |
+| 3.8 | `941a04e69ee8fe4c7a162b2f1e215aa8df867534` | Disabled |
+
+The runtime selects profiles from the frozen source declarations.
+Triton 3.5.1 selects profile 3.5. Triton 3.0 and 3.1 share a read-only LLVM
+installation but keep distinct capabilities. Only 3.0 uses backend, PPL,
+FlagGems, backend-src and deploy-tools mounts. Frontend profiles have
+`backend_enabled=false`, `devices=[]`, common frontend environment variables
+and one LLVM mount. Paths and directory digests are maintained in
+[config.example.json](config.example.json).
+
+## Directory Requirements
+
+Set an absolute `dependency_root` outside control, state and credential directories.
+Each source must be a canonical directory strictly beneath that root.
+Directories and files must belong to the CI account, permit mapped container
+users to read files and traverse directories, and have no group/other write permission.
+Links must be relative, resolve inside the same version directory and have
+existing targets. Sockets and special files are rejected.
+
+Record package provenance or build records proving the full LLVM commit.
+A directory name or `llvm-config --version` alone does not prove that identity.
+Verify `llvm-config --version`, `--host-target`, `--shared-mode`, headers and
+CMake packages, and check ABI compatibility with the shared image.
+
+## Configure a Dependency
+
+Prepare the version directory and finalize its permissions and links, then
+calculate `prepare.artifacts.tree_digest(Path(source))` using trusted control code.
+This is a directory-content digest, not an archive checksum.
+
+Use a matching LLVM recipe and read-only mount:
 
 ```json
 {
-  "llvm": {"mode": "mount", "commit": "<exact LLVM commit>"},
+  "llvm_hash": "<full LLVM commit>",
+  "llvm": {"mode": "mount", "commit": "<full LLVM commit>"},
   "mounts": [
     {
       "source": "/home/jiwang_ci/local_ci/workspace/dependencies/llvm-<commit>",
       "target": "/opt/local-ci/runtime/deps/llvm-<commit>",
-      "read_only": true,
-      "sha256": "<tree_digest of source>"
-    },
-    {
-      "source": "/home/jiwang_ci/local_ci/workspace/dependencies/ppl-<version>",
-      "target": "/opt/local-ci/runtime/deps/ppl",
       "read_only": true,
       "sha256": "<tree_digest of source>"
     }
@@ -35,23 +73,55 @@ Example profile fragment (replace paths, commits and digests with actual values)
 }
 ```
 
-Calculate each checksum using
-`prepare.artifacts.tree_digest(Path(source))` from the trusted control code,
-after finalizing permissions and internal links. This is a directory-content
-digest, not an archive checksum. Environment preparation and deployment preflight
-verify the full contents; task startup verifies the pinned image and read-only
-mount identity. Record vendor package provenance
-separately. Container read-only mounting does not prevent the host owner from
-changing files; never edit a version directory used by a validated release.
-Create a new version directory, update its mount configuration and repeat runtime preflight
-instead. Old version directories must remain available to their active tasks.
+Edit and commit the repository configuration, then follow the
+[deployment procedure](README.md). Environment preparation and deployment preflight call
+`dependency_mounts(..., verify_content=True)` and `validate_mounted_llvm(...)`
+to check content, ownership, permissions and the LLVM recipe.
+Task startup checks the pinned image and read-only mount identity.
 
-Profile `archives`, `repositories` and `prepare_commands` are no longer used.
-Install common Python/system packages when building the shared image; their ABI
-must match all configured toolchains. Environment probes check imports and mounted
-LLVM paths without building or installing frontend/backend Wheels. Formal tasks
-build the selected source in their own writable directories and venvs.
+Read-only container mounts do not prevent host-side modification.
+To change an in-use dependency, prepare a new version directory, update its
+configuration and repeat runtime preflight. Retain directories needed by active
+tasks. Control-code updates reuse unchanged dependencies.
+
+Install common Python/system packages in the shared image; their ABI must match
+all configured toolchains. Probes check imports and mounted LLVM paths.
+Formal tasks build and install frontend/backend wheels in their own directories.
 
 Only fixed read-only directory binds are accepted; recursive nested mounts are
-disabled. This is not a general host-mount mechanism and does not expose host
-credentials, Docker sockets, task roots or the whole home directory.
+disabled. Host credentials, Docker sockets, task roots and home directories are
+not dependency mounts. Management recovery uses task/session volumes so missing
+toolchains do not prevent evidence export or cleanup.
+
+## Validation
+
+Use the runtime preparation and `preflight.py --probe-runtime` commands in
+[README.md](README.md#部署验收) to verify the installed image and container mounts.
+Then use real tasks or applicable existing evidence to validate source builds.
+These checks establish different facts:
+
+| Check | Evidence |
+| --- | --- |
+| Each configured Triton version | Frontend build, install and smoke results for its frozen source |
+| Triton 3.0 backend | Backend smoke/JIT with the configured PPL and FlagGems dependencies |
+| 3.0 → 3.1 | Same LLVM, distinct profiles; backend enabled only for 3.0; separate venvs and output |
+| 3.0 → 3.2 / 3.4 / 3.5.1 / 3.8 | Both contexts match their own source SHA, LLVM, profile, environment and fingerprint; actual builds on both sides |
+| Same version and LLVM | Shared read-only dependencies with isolated writable build state |
+
+Dispatch through the [GitHub gateway](../../ci/README.md#手动派发与接收), preserving
+the GitHub → Gitee → server path. Full acceptance uses `full=true`; ordinary tasks
+select checks based on the actual diff.
+
+For PR tasks, base is the target commit and candidate is the frozen merge/tested
+commit. For branch tasks, base is HEAD's first parent and candidate is HEAD.
+Check source declarations instead of inferring versions from branch names.
+
+Base execution depends on the task's comparison needs. For cross-version acceptance,
+ask the task Agent to run `frontend_build`, `frontend_install` and `frontend_smoke`
+with the respective `base-context.json` and `candidate-context.json`, using the
+[tool entry points](../tools/README.md). Different performance environments produce
+`not_comparable`, not a claimed code regression or a claim of no regression.
+
+Record control SHA, task/run IDs, source SHAs, profile identities, actual commands
+and evidence paths. Reuse valid evidence for unchanged source/environment
+combinations.

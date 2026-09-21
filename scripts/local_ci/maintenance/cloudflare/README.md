@@ -9,7 +9,7 @@
 - 快照分支：`snapshot/jiwang-ci-race-1`
 - 快照文件：`worker-health.json`
 
-Cloudflare 只读取服务器 health 采集发布的 `worker-health.json`，不执行远程恢复，不再读取 `watchdog.json`。旧 watchdog 文件和 Gitee 历史记录保留；服务器升级负责停用旧 watchdog service/timer，health 采集和 systemd 的 Worker 重启继续运行。
+Cloudflare 读取服务器 health 采集发布的 `worker-health.json`，负责告警与缓存；服务器 Worker、执行器和 systemd 负责恢复。
 
 ## 部署
 
@@ -23,7 +23,7 @@ Cloudflare 只读取服务器 health 采集发布的 `worker-health.json`，不�
 4. 最后在 **Settings → Triggers → Cron Triggers** 添加 `*/5 * * * *`。只配置这一条定时器，也不要另部署第二个 Worker 同时维护这些 Issues。
 5. 查看 Worker 的执行记录，确认 scheduled 调用成功。定时配置传播可能需要最多 15 分钟。此项目无需接入 GitHub Actions。
 
-后续更新使用本目录配置部署，保留原 KV 绑定、Secret 和定时器。升级顺序：先部署兼容新旧快照的 Cloudflare，再发布 Dashboard，最后部署服务器控制代码。旧快照缺少恢复字段时显示未上报，不制造异常。现有 KV、Issue 及快照历史保留，首次新快照即可补齐恢复展示。暂停监测时移除该 Cron Trigger，保留 KV 和历史 Issues；已缓存数据会随时间过期。
+更新使用本目录配置部署，保留 KV 绑定、Secret、定时器和已有 Issues。涉及健康展示时，先部署 Cloudflare，再发布 Dashboard，最后部署服务器控制代码。快照缺字段时显示未上报。暂停监测时移除 Cron Trigger，保留 KV 和历史 Issues；缓存数据按原采集时间判断是否过期。
 
 也可使用官方 Wrangler 命令行部署，不依赖浏览器控制扩展。`wrangler login --device --scopes account:read user:read workers_scripts:write workers_kv:write workers_tail:read` 会显示授权地址和一次性代码，由维护者在自己的浏览器确认。凭据由 Wrangler 管理，不复制进仓库。首次部署先不设置 Cron，绑定 KV、配置 Secret 并验证之后再启用定时器；以后只维护同一份部署配置。
 
@@ -35,7 +35,7 @@ Cloudflare 只读取服务器 health 采集发布的 `worker-health.json`，不�
 - 心跳快照超过 20 分钟未更新：报告心跳过期、当前服务状态未知，不能仅凭这一点区分停机、断网和采集停止。
 - 连续两轮读取失败：报告健康数据读取异常。不可读或过期时保留此前未确认恢复的故障，不把缺数据解释成恢复。
 - 新鲜快照中明确的 Worker、Docker、Gitee 访问、Codex 连接/认证/限流/执行异常，以及磁盘、环境、任务容器意外停止/OOM、恢复等待/耗尽、结果上传异常，会列入告警。正常结束的 oneshot 服务、未知字段不会误报故障。任务 30 分钟无进展提示、60 分钟等待复查，Cloudflare 不据此终止任务。
-- Codex 的启动、空闲或未上报状态不证明模型服务恢复；已有 Codex 告警需等后续实际运行或成功状态确认。旧服务器需更新控制代码，才会上报这些字段。
+- Codex 告警以实际运行或成功状态作为恢复依据。
 - Issue 写入失败会在下一轮重试。新建请求响应丢失时先查找本 Worker 的活动告警，避免直接重复创建。KV 是最终一致性存储，本实现用于单 Worker、单定时器，不提供多个实例同时写入时的严格去重。
 - 找回活动告警只查询 `open` 和 `progressing`，每种状态最多 3 页、每页 100 条，总计最多 6 次列表请求；不扫描已关闭历史。分页到上限仍未找回且最后一页满额时，不能确认原 Issue 不存在，因此本轮报错并跳过创建，下一轮重试；可检查活动 Issues 与执行日志处理积压。页面缓存的历史列表仍只取一页，查询失败或达到上限不阻止健康缓存刷新。
 
@@ -59,6 +59,6 @@ Issue 正文用 `<!-- local-ci-alert:jiwang-ci-race-1 -->` 标记归属，不能
 
 本地运行 `node --test scripts/local_ci/maintenance/cloudflare/worker.test.mjs scripts/local_ci/tests/dashboard.test.cjs`，使用内存 KV 和模拟 Gitee API 检查故障、持续去重、恢复及写失败重试，不会向真实仓库写 Issue。
 
-上线验收需确认一次正常 scheduled 调用（新鲜服务状态、无误报）、故障 Issue（显示失败原因及恢复动作）、持续故障不重复写入和新快照恢复关闭。额外验证恢复快照之后返回旧故障/旧健康数据不会倒退状态，以及只读 `/health` 请求不会写入 KV。浏览器核对重试次数、下次重试、截止时间、独立上传等待和历史展开。可以在单独的测试仓库与 Worker 上使用测试快照；不要修改生产心跳来制造故障。仅通过本地测试不代表已部署或通知已经送达。
+上线验收确认正常 scheduled 调用、故障 Issue、持续故障去重和新鲜快照触发的恢复关闭。检查恢复后到达的过期数据不会倒退状态，以及只读 `/health` 请求不会写入 KV。浏览器核对重试次数、下次重试、截止时间、独立上传等待和历史展开。故障测试使用独立测试仓库与 Worker，不修改生产心跳。
 
 参考：[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/)、[KV 写入限制](https://developers.cloudflare.com/kv/api/write-key-value-pairs/)、[Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)、[Gitee API](https://gitee.com/api/v5/swagger)。

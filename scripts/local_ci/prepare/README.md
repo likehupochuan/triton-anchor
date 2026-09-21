@@ -1,72 +1,236 @@
 # 环境准备与部署
 
-`prepare/` 管理 Rootless Docker 环境、每任务容器和服务安装。部署使用固定控制提交、镜像 digest、完整 LLVM revision 和服务器预置依赖。源码及控制更新经 Gitee 到达 CI 主机。
+`prepare/` 管理共享镜像、只读依赖、Rootless Docker 任务容器及用户服务。
+部署使用固定控制提交、镜像 digest 和完整 LLVM SHA，源码与控制更新经 Gitee 到达服务器。
 
-`config.example.json` 保留原名，但现在是 `jiwang_ci` 服务器完整非敏感部署配置的唯一维护来源，修改它会影响部署。请在开发仓库修改并提交，经 Gitee 控制更新流程部署；不要直接修改服务器控制 checkout 或运行副本。`/home/jiwang_ci/local_ci/config/local-ci.json` 由部署流程生成，没有本地覆盖 JSON。凭据仍独立保存在 `credentials.env` 与 `codex-source/`，配置中只记录路径或环境变量名；`profiles/config.template.json` 仅供其他部署参考，不参与此服务器配置同步。
+## 配置与环境
 
-`control_repo_url` 指向服务器可访问的、无内嵌凭据的 Gitee `control_anchor` 镜像，`control_branch` 默认 `local-ci-unified`。网关分别从冻结的 base 和 candidate 源码读取 LLVM SHA 与 Triton 版本，服务器对照 Gitee 源码校验，并按每一侧的 LLVM SHA 和 Triton major.minor 唯一选择可信 profile；不再使用分支名或 `branch_profiles` 路由，遗留的非空映射需删除。无匹配或存在多个匹配时明确报告环境配置问题，不借用另一侧环境。3.0 与 3.1 虽使用相同 LLVM，也分别选择 profile，避免把仅支持 3.0 的后端能力带入 3.1。
+`config.example.json` 是 `jiwang_ci` 服务器完整非敏感部署配置的唯一维护来源。
+在开发仓库修改并提交，经 Gitee 部署；运行副本由安装器或控制更新器生成，
+不单独维护覆盖 JSON。`profiles/config.template.json` 仅供其他部署参考。
 
-网关和服务器共用 LLVM 元数据解析：只在被测提交的 `triton/cmake/` 目录识别 `llvm-hash`、`llvm-info`，兼容无扩展名、`.txt` 和 `.json`。纯文本应为完整的 40 位提交 SHA，JSON 读取 `llvm_hash` 字段。多个文件同时存在时必须给出相同 SHA；不读取 `amd-llvm-info.json`、`llvm-build-info.json` 等其他元数据，也不从构建脚本中搜索任意哈希。Triton 3.8 使用 `llvm-info.json`，沿用同一解析逻辑。
+| 内容 | 配置或位置 |
+| --- | --- |
+| 控制来源 | `control_repo_url` 指向 Gitee 控制镜像，`control_branch` 为 `local-ci-unified` |
+| 控制 checkout | `/home/jiwang_ci/local_ci/control_anchor` |
+| 运行配置 | `/home/jiwang_ci/local_ci/config/local-ci.json` |
+| 持久状态 | `/home/jiwang_ci/local_ci/state` |
+| 私有凭据 | `/home/jiwang_ci/local_ci/config/credentials.env` 与 `codex-source/` |
+| 宿主 Python | `/home/jiwang_ci/local_ci/local-ci-control-venv/bin/python` |
 
-新服务器不需要先手工克隆 `control_anchor`。先由受信任的配置管理或制品通道投放本目录中的独立引导脚本、该提交的 `config.example.json` 内容和私有凭据，并取得已经审核的 40 位控制提交 SHA。引导输入是同一仓库配置的分发副本，不单独维护。先预览，再以普通 CI 用户执行：
+安装器读取所在 checkout 的 HEAD 配置，控制更新器读取目标 SHA 的配置，
+均按 JSON 结构完整同步运行副本。`--config` 指定运行副本位置，不是额外配置来源。
+同步时内容相同则跳过写入，有差异先校验再原子替换，保持 CI 用户所有和 600 权限。
+
+base / candidate 按各自冻结源码的 **Triton major.minor + 完整 LLVM SHA** 唯一选择 profile。
+无匹配或多匹配均报告环境配置问题。仓库配置覆盖 3.0–3.6 和 3.8，
+只有 3.0 开启后端；3.1 复用 3.0 LLVM，但使用独立 profile。
+版本表、元数据解析和挂载规则见 [DEPENDENCY_MOUNTS.md](DEPENDENCY_MOUNTS.md)。
+
+所有 profile 使用顶层 `image` 的同一镜像 digest，差异由只读依赖和环境变量提供。
+公共 Python / 系统包在 [共享镜像](profiles/slim/README.md) 中准备。
+构建默认并行度由 `max_jobs` / `MAX_JOBS` 配置，工具的 `jobs` 可按任务资源调整（1–64）。
+
+## 部署前确认
+
+使用普通 CI 用户、user systemd、Rootless Docker 和持久用户会话。
+记录实际控制 SHA、运行配置差异、服务状态与在途任务；保存配置和 unit 备份，
+保留 runs、封存结果、outbox 及恢复预算。
+
+目标必须是经审核、已提交且可从配置的 Gitee 控制分支到达的完整 SHA。
+检查目标配置包含要部署的全部 profile；服务器存在未入库差异时，先查明来源。
+可恢复的未封存任务先完成恢复，封存后待上传的结果可继续补传。
+部署失败时保留证据，检查代码与配置实际停在哪一步。
+
+凭据文件属于 CI 用户、权限为 600，格式为 `KEY=value`，含空格的值使用引号。
+安装器通过 `--credentials-env` 加载；控制更新命令在现有私有凭据环境中执行。
+不要在命令行展开或打印凭据值。
+
+## 新服务器安装
+
+先通过可信配置管理或制品通道投放 `bootstrap_control.py`、目标提交的
+`config.example.json` 分发副本和私有凭据。引导脚本创建固定版本 checkout，
+然后调用该版本的正式安装器，确保代码与配置来自同一提交。
+
+从投放目录预览，核对后对同一命令加 `--apply`：
 
 ```bash
+CONTROL_SHA='<已审核的40位控制SHA>'
 python3 bootstrap_control.py \
   --config /absolute/path/config.json \
   --credentials-env /absolute/path/credentials.env \
-  --expected-revision <APPROVED_40_CHARACTER_SHA>
-
-python3 bootstrap_control.py \
-  --config /absolute/path/config.json \
-  --credentials-env /absolute/path/credentials.env \
-  --expected-revision <APPROVED_40_CHARACTER_SHA> --apply
+  --expected-revision "$CONTROL_SHA"
 ```
 
-引导脚本不会从可变分支下载后直接执行代码：它在写入前核对远端分支尖端，在浅克隆后再次核对固定 SHA，然后只调用该提交内的正式安装器。目标目录已经存在时，仅接受来源一致、无本地修改且恰好位于该 SHA 的 checkout，不覆盖未知目录。安装失败后保留固定 checkout，修复环境后可用同一命令幂等重试。引导脚本本身仍必须通过受信任通道分发，不能用 `curl <可变分支> | python` 代替。
+引导脚本在克隆前后核对固定 SHA。目标目录已存在时，要求来源一致、checkout 干净
+且处于该 SHA；安装失败可在修复问题后用同一命令重试。
 
-安装器读取私有 `KEY=value` 凭据文件，值含空格时使用引号；文件必须属于 CI 用户且权限为 600。Worker 发现新任务要求不同的控制提交时，释放共享控制锁，将任务身份和 SHA 原子写入单一 `control-update/request.json`，再异步启动 `triton-anchor-local-ci-control-update.service`；多个等待版本按 `control_anchor` 的提交祖先顺序选最早的前向版本，落后或不可达版本不会阻塞可用的前向更新。该 oneshot 只允许干净 checkout 快进到任务指定且可从 Gitee 控制分支到达的提交，并在重启 Worker 前同步该目标提交中的配置，复用一次重启加载新代码和新配置；成功后清除仍与本次任务一致的请求。Worker 以进程启动时的提交为准，不会把已经变化的磁盘 HEAD 误认为当前代码；重启后的 Worker 会幂等清理已满足但上次未及删除的请求。没有新任务时不检查控制更新，不定时追随分支最新提交；非快进、本地修改或尚未同步到 Gitee 的提交会安全失败并由后续扫描重试。所有 profile 使用顶层 `image` 指定的同一个镜像 digest，各源码版本的环境差异由只读依赖挂载和环境变量提供，不再构建派生镜像。安装器检查依赖与基础工具是否可用，实测 Rootless Docker 资源限制，然后安装并启动 Worker、control-update oneshot、health、retention 用户服务和定时器；升级时会停用、备份并删除旧的 control-update timer。不再安装同机 watchdog；安装与控制更新使用同一精确清理逻辑停用旧 watchdog service/timer，并刷新 systemd。首次由旧更新器升级到新代码后，须执行新版安装器 --apply 完成 unit 迁移。外部告警由 Cloudflare 读取健康快照完成。已有 unit 文件会备份，可用 `--rollback <备份目录> --apply` 恢复文件；systemd 的 enabled/active 状态需按回滚目标另行恢复。机器需要已有的 Rootless Docker 用户服务和持久用户会话。
-
-已有控制 checkout 时，以 `jiwang_ci` 用户运行下面命令预览安装；加 `--apply` 才写入配置、安装和启动服务。运行配置尚不存在时也由安装器创建，`--config` 指定生成副本的位置：
+已有固定版本 checkout 时，从控制目录运行安装器：
 
 ```bash
-python3 scripts/local_ci/prepare/install.py \
-  --config /home/jiwang_ci/local_ci/config/local-ci.json \
+cd /home/jiwang_ci/local_ci/control_anchor
+CI_PYTHON=/home/jiwang_ci/local_ci/local-ci-control-venv/bin/python
+CI_CONFIG=/home/jiwang_ci/local_ci/config/local-ci.json
+"$CI_PYTHON" scripts/local_ci/prepare/install.py \
+  --config "$CI_CONFIG" \
   --credentials-env /home/jiwang_ci/local_ci/config/credentials.env
 ```
 
-安装和控制更新共用配置同步实现，按 JSON 结构比较，不按时间戳判断；内容相同则跳过写入，有差异时先校验，再通过同目录临时文件原子替换，保持 `jiwang_ci` 所有和 600 权限。`control_root`、`state_dir`、`python_bin`、`runtime` 等宿主部署锚点变化需要重新运行安装器，控制更新不会热切换这些设置。
+预览显示配置差异与计划安装的 units；加 `--apply` 后，安装器获取控制锁，
+准备所有 profile、实测容器、备份并同步 units、写入运行配置，再启动 Worker 和定时器。
+不要在外层持有同一把 `control.lock`。
 
-可显式预览指定目标提交的代码更新及配置差异；加 `--apply` 应用，同 SHA 也可修复配置偏差：
+`--render-dir <目录>` 可保存 unit 文件。`--rollback <备份目录> --apply` 只恢复 unit 文件，
+systemd 的 enabled/active 状态需要另行恢复；它不是代码、配置和任务状态的整体回滚。
+
+## 更新已有服务器
+
+### 更新代码与配置
+
+从现有控制目录执行，`CONTROL_SHA` 替换为实际目标：
 
 ```bash
-python3 scripts/local_ci/prepare/control_update.py \
-  --config /home/jiwang_ci/local_ci/config/local-ci.json \
-  --expected-revision <APPROVED_40_CHARACTER_SHA>
+cd /home/jiwang_ci/local_ci/control_anchor
+CONTROL_SHA='<已提交并同步至Gitee的40位SHA>'
+CI_PYTHON=/home/jiwang_ci/local_ci/local-ci-control-venv/bin/python
+CI_CONFIG=/home/jiwang_ci/local_ci/config/local-ci.json
+
+"$CI_PYTHON" scripts/local_ci/prepare/control_update.py \
+  --config "$CI_CONFIG" --expected-revision "$CONTROL_SHA"
 ```
 
-首次从旧更新器迁移时，先按现有流程到达包含同步功能的新提交，再用新脚本对当前同一 SHA 执行上述命令并加 `--apply`，完成首次同步及 Worker 重启。正式服务仍只读取固定位置的请求文件，不允许无精确 SHA 更新。
+核对输出的 `revision` 与 `config_fields`。更新器检查 Gitee 可达性、快进关系及任务占用；
+通过后应用：
 
-`--render-dir <目录>` 保存安装 units。`preflight.py --config <运行配置> --configuration-only` 可单独检查配置；`--probe-runtime` 实测已准备环境。依赖更新时可运行 `rotate.py --config <运行配置> --profile <名称>`，登记并探测新的依赖环境，不构建镜像。环境准备不再执行完整 Wheel 构建、安装或 smoke；被测源码的验证在正式任务中完成，单独更新控制代码不会触发环境重校验。以上入口均支持 `--help`。
+```bash
+"$CI_PYTHON" scripts/local_ci/prepare/control_update.py \
+  --config "$CI_CONFIG" --expected-revision "$CONTROL_SHA" --apply
+```
 
-从旧配置升级时，将 profile 内的 `image` 合并为顶层一个 digest；LLVM 使用 `mode: mount`，原 `archives` / `repositories` 中的依赖改为预置的只读目录。删除旧 `prepare_commands` 与 `validation_commands`，镜像本身需要的安装步骤放在共享镜像配方中。仓库部署配置列出了实际 LLVM、后端、PPL 和 FlagGems 挂载位置。构建默认使用 12 路并行，`max_jobs` / `MAX_JOBS` 按仓库配置部署；按服务器资源设置，Codex 也可通过工具的 `jobs` 参数调整（1–64）。
+成功返回 `updated` 或 `current`。返回 `deferred-active-task` 表示尚未部署，
+即使退出码为 0，也应等待任务和清理完成后重试。
+相同 SHA 下可用此流程修复配置偏差；它在需要时重启 Worker，让代码与配置一起生效。
 
-每任务一个容器，Codex、构建和测试共用 `identities.task` / `identities.gid` 的非 root 身份。candidate、base 和临时实验是任务内的数据目录。base 与 candidate 分别生成 context，记录各自 LLVM、profile、环境变量、后端能力和 fingerprint；各自的 checkout、venv、build、cache 与 artifacts 独立。相同 LLVM/profile 复用只读依赖，不复用可写构建结果；不同 LLVM 的只读版本目录可同时挂载到同一任务容器。可写挂载只有 `work/<head_sha>/<run_id> → /task` 与当前运行目录的 `artifacts → /task/artifacts`；运行目录按 [本地与 Gitee 共用的命名规则](../README.md) 分层。任务结束后删除临时运行目录及空的 SHA 父目录，保留其他运行和持久化证据；旧 task_id 工作目录按原句柄安全清理。直接将 `control_root`（服务器上的 `control_anchor`）中的 `scripts`、`api_contract` 和 `envsetup.sh` 只读挂载到容器 `/opt/local-ci/control/` 下的对应位置，不再导出 `environments/control-revisions/<SHA>` 快照。LLVM、FlagGems、后端等服务器依赖仍只读挂载；`.git`、凭据、状态、私有日志和已封存结果留在宿主，不能放入上述挂载目录。
+### 同步服务或准备环境
 
-新 PR 任务的 `control_policy=worker` 表示使用服务器已安装的可信控制版本，不因网关记录的控制 SHA 不同而等待升级；结果记录实际 `control_revision`。push/manual 和旧格式固定版本任务仍校验控制 SHA。所有任务均检查进程与磁盘版本一致，并在整个任务期间持有现有 `control.lock`。自动更新拿不到独占锁，或发现本实例尚有任务容器或清理容器未移除时，会延后切换 checkout。挂载前仅将受版本控制的运行文件和目录设为容器可读，兼容服务的 `UMask=0077`。手动更新 `control_anchor` 时，须先停止 Worker、确认任务容器已退出并清理，再更新和启动 Worker。旧任务的快照仍可用于恢复清理，但新任务不再创建快照。
+按改动选择对应操作，避免重复准备：
 
-`runtime.py` 负责镜像及容器生命周期；`container_fs.py` 在容器内准备工作目录、独立 venv 和私有 Codex 会话，结束后清理凭据。任务命令可写自己的源码和构建输出；取消、超时和重启恢复由 Worker 停止对应任务，清理不删除已经保存的结果。
+| 改动 | 操作与目的 |
+| --- | --- |
+| 仅控制代码或普通配置 | 使用控制更新器；相同环境可复用已验证 runtime |
+| systemd units 或宿主部署锚点 | 在空闲维护窗口停止 Worker，运行目标版本安装器预览并 `--apply`，同步服务与配置 |
+| profile、只读依赖或镜像 | 准备对应 runtime 后执行正式预检；安装器已完成这两项时可复用其结果 |
 
-只读依赖的目录、权限和摘要配置见 [DEPENDENCY_MOUNTS.md](DEPENDENCY_MOUNTS.md)。`profiles/slim/` 提供共享基础镜像配方，FlagGems 从固定服务器目录导入，各任务的 venv 和构建输出独立。后端测试默认路径为 `tests`；多个路径可显式设置 profile 的 `tools.backend_test_paths` 数组。
+`control_root`、`state_dir`、`python_bin` 和 `runtime` 属于宿主部署锚点，
+控制更新器不热切换这些设置；变更前按安装器要求安排持久数据和服务。
 
-新增 LLVM profile 的部署命令、每步目的、完成标志和跨版本验收操作见 [VARIANT_LLVM_DEPLOYMENT.md](VARIANT_LLVM_DEPLOYMENT.md)。仓库已配置 3.0–3.6 和 3.8；配置补齐不代表服务器已部署，也不代表各版本真实构建已经通过。
+仅新增 profile 时，在更新后的控制目录准备环境：
 
-健康采集、异常观察和本地保留策略见 [maintenance/README.md](../maintenance/README.md)。
+```bash
+"$CI_PYTHON" - <<'PY'
+import json
+from pathlib import Path
+import sys
+
+config = json.loads(Path('/home/jiwang_ci/local_ci/config/local-ci.json').read_text())
+sys.path.insert(0, str(Path(config['control_root']) / 'scripts/local_ci'))
+from prepare.runtime import EnvironmentManager
+
+manager = EnvironmentManager(config, config['state_dir'])
+for key, profile in config['profiles'].items():
+    runtime = manager.ensure_image(key, profile['llvm_hash'])
+    print(key, runtime['llvm_hash'], runtime['image_id'], runtime['state'])
+PY
+```
+
+每个 profile 应返回 `ready`，共享相同镜像 ID，LLVM SHA 与配置一致。
+`ensure_image` 复用相同环境的验证记录，并校验新环境的依赖和基础导入。依赖更新也可用
+`rotate.py --config <运行配置> --profile <名称>` 登记和探测新环境。
+
+## 部署验收
+
+### 配置与容器
+
+所有 profile 准备完成后，以同一 CI 用户加载私有环境并运行预检：
+
+```bash
+"$CI_PYTHON" - <<'PY'
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path('scripts/local_ci').resolve()))
+from prepare.install import load_environment
+from prepare.preflight import main
+
+load_environment(Path('/home/jiwang_ci/local_ci/config/credentials.env'))
+sys.argv = ['preflight.py', '--config',
+            '/home/jiwang_ci/local_ci/config/local-ci.json', '--probe-runtime']
+raise SystemExit(main())
+PY
+```
+
+预检验证真实挂载、访问权限、Rootless Docker 资源限制、运行账户及凭据配置。
+退出码为 0、`ready: true` 且 `runtime_probe.status: pass` 表示基础运行条件通过。
+`--configuration-only` 用于单独检查配置；`--skip-notifications` 仅用于配置开发，
+正式部署需要校验通知凭据。
+
+### 服务与任务
+
+```bash
+git rev-parse HEAD
+systemctl --user is-active triton-anchor-local-ci.service
+systemctl --user is-active triton-anchor-local-ci-health.timer
+systemctl --user is-active triton-anchor-local-ci-retention.timer
+systemctl --user start triton-anchor-local-ci-health.service
+```
+
+Worker 与两个 timer 应处于 active。health 和 control-update 是 oneshot，
+正常完成后 inactive 属于正常状态。
+核对实际 HEAD、运行配置和目标提交一致，再检查健康采集的时间、Worker 身份及上传结果。
+检查方法见 [运行维护](../maintenance/README.md)。
+
+真实任务沿 GitHub → Gitee → Worker 执行，记录 task_id、run_id、head/tested SHA、
+构建结果及证据路径。相同源码和环境的有效记录可复用。
+各版本 frontend build/install/smoke、3.0 后端及两侧 LLVM 隔离的验证见
+[依赖验收](DEPENDENCY_MOUNTS.md#validation)；任务派发见 [网关文档](../../ci/README.md)。
+
+服务器安装、Cloudflare 部署与 Dashboard 发布各有独立入口。
+外部展示和告警更新见 [维护部署](../maintenance/README.md#部署与验证)。
+验收记录包含控制 SHA、非敏感配置差异、runtime/服务结论与真实任务证据。
+
+## 任务运行边界
+
+每任务一个容器，Codex、构建和测试使用同一个 `identities.task` / `identities.gid`
+非 root 身份。candidate、base 和实验目录属于任务数据，各自 venv、构建、缓存及产物独立。
+
+| 挂载 | 用途 |
+| --- | --- |
+| `control_root` 下的 `scripts`、`api_contract`、`envsetup.sh` | 只读挂载到 `/opt/local-ci/control/` 对应位置 |
+| 版本化 LLVM 和后端依赖 | 只读挂载到 `/opt/local-ci/runtime/deps/` |
+| `work/<head_sha>/<run_id>` | 可写挂载到 `/task` |
+| 当前运行的 `artifacts` | 可写挂载到 `/task/artifacts` |
+
+`.git`、宿主凭据、状态、私有日志和封存结果留在宿主。
+任务结束后清理临时工作目录和私有会话，保留持久化证据与其他运行。
+`runtime.py` 管理镜像和容器；`container_fs.py` 准备工作目录、venv 与 Codex 会话。
+
+PR 任务使用 `control_policy=worker`，由服务器已安装的可信代码执行，结果记录实际
+`environment.control_revision`。push/manual 任务绑定精确控制 SHA。
+需要更新时，Worker 释放共享锁，将任务身份和 SHA 原子写入
+`control-update/request.json`，由 control-update oneshot 处理；
+多个等待版本按提交祖先顺序选择最早的前向版本。
+
+Worker 校验进程与磁盘代码版本一致，并在任务期间持有 `control.lock`。
+更新器取得独占锁且没有未清理任务容器后才切换 checkout；
+恢复中的有效未封存任务保留当前控制版本，只有封存上传等待不阻止升级。
+控制更新由具体任务或显式命令触发，不定时追随分支尖端。
 
 ## 容器内 CI Python
 
-`container_python` 必须指向镜像中专门准备的 CI 虚拟环境（通常为 `/opt/venv/bin/python`），
-不能配置成 `/usr/bin/python3` 或仅 `python3`。未显式配置时使用 Profile 的 `SEED_PYTHON`
-或 `PYTHON_VENV_ACTIVATE` 对应解释器；它用于可信管理操作，并为 candidate/base 各自生成
-可写的任务 venv。Codex 的构建、安装和测试使用相应任务 venv，环境修复不会污染预置环境。
-任务 venv 直接复制预置包（包括 pip），不依赖系统 `ensurepip`；安装依赖使用 `"$PYTHON_BIN" -m pip`。
-宿主机服务的 `python_bin` 与容器解释器独立，仍可使用宿主机 Python。
+`container_python` 指向镜像中的 CI 虚拟环境，通常为 `/opt/venv/bin/python`。
+未显式配置时使用 profile 的 `SEED_PYTHON` 或 `PYTHON_VENV_ACTIVATE` 对应解释器。
+它用于可信管理操作，并为 candidate/base 各自准备可写 venv；任务环境修复不污染预置环境。
+
+任务 venv 复制预置包（包括 pip），安装依赖使用 `"$PYTHON_BIN" -m pip`。
+构建、安装、测试及辅助脚本都使用所选任务的 CI Python，不使用系统 Python。
+宿主服务的 `python_bin` 与容器解释器独立。

@@ -16,7 +16,7 @@ Keep the wheel checksums and build log alongside the foundation recipe. APT
 packages follow the Ubuntu repositories at build time.
 Pin the final image with the top-level `image` digest in the repository's
 `scripts/local_ci/prepare/config.example.json` and load it into the server's
-Rootless Docker daemon. Despite its name, this file is the complete non-sensitive
+Rootless Docker daemon. This file is the complete non-sensitive
 deployment configuration for `jiwang_ci`; edits affect deployment. Commit changes
 in the development checkout and deploy through Gitee. The server's
 `/home/jiwang_ci/local_ci/config/local-ci.json` is generated from that source,
@@ -32,8 +32,7 @@ Use it only to prepare the repository source in a development checkout that can
 access the dependency directory; review and commit the result. Do not point it
 at the server's runtime copy or modify the deployed control checkout. Its backup
 is not a configuration override and is not used by deployment.
-First migrate LLVM, backend and PPL dependencies to read-only mounts and remove
-old profile `archives`, `repositories`, `prepare_commands` and `validation_commands`.
+LLVM, backend and PPL dependencies use versioned read-only mounts.
 Task preparation writes a `.pth` entry in each candidate/base venv for that
 profile's mounted FlagGems `src` directory. Git trusts only the exact read-only
 mount path. Cache/output paths remain task-private. `validate_flaggems.py` is

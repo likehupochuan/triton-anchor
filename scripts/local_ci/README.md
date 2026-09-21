@@ -1,76 +1,92 @@
 # Local CI
 
 AI 驱动 PR 构建、测试与审查。Codex 负责理解意图、选择验证、组织执行及排错；
-Poller 负责准备对应环境、停止失效任务和交付结果。源码和结果都经 Gitee 中转。
+Worker 负责准备环境、维护任务状态、停止失效任务和交付结果。源码和结果经 Gitee 中转。
 
 ## 执行流程
 
 ```mermaid
 flowchart TD
-  A[GitHub：PR 校验 → Basic Checks → API Compatibility → Security] --> B{外部 fork？}
+  A[GitHub：PR 校验 → Basic CI → API Compatibility → Security Gate] --> B{外部 fork？}
   B -- 否 --> C[GitHub → Gitee：冻结被测提交、base/head 与 PR 信息，投递任务]
-  B -- 是 --> R[approval review card → 按需人工审批]
+  B -- 是 --> R[生成审批卡 → 人工审批]
   R --> C
-  C --> D[Local Poller：校验任务，准备 Triton / LLVM / 后端环境]
-  D --> E[Codex：任务信息核对，解析意图与影响范围]
-  E --> F[按需构建与测试，调用基础 tools]
-  E --> G[架构契约与按改动选择的专项审查]
+  C --> D[Worker：校验任务，准备 Triton / LLVM / 后端环境]
+  D --> E[Codex：解析意图与影响范围]
+  E --> F[按需构建与测试]
+  E --> G[架构契约与专项审查]
   F <--> G
-  F --> H[满足最低必检，汇总检查、AI 证据、阻塞项和性能变化]
+  F --> H[汇总检查、证据、阻塞项与性能变化]
   G --> H
-  H --> I[Local CI → Gitee：保存结果与所选重要文件]
-  I --> J[GitHub：校验当前任务，回写 Checks / PR comment / Dashboard]
+  H --> I[Local CI → Gitee：发布结果与重要证据]
+  I --> J[GitHub：校验当前任务，回写状态、PR 评论与 Dashboard]
 ```
 
 构建、测试和审查按依赖与相关度交错执行。路径分类提供选测建议，Codex 阅读实际 diff，
-选择范围、命令与补充用例，并在 `change_validation` 结果中说明影响、选测理由和实际证据。
-普通注释和文档可轻量验证；普通 Python 可按需直接验证源码；真实编译器/后端行为变化
-仍需相关构建与 smoke/JIT。显式 full 要求全部可用工具对应的覆盖。
-Codex 可在任务内修复环境或降低编译并行度重试。
-所有任务都须完成架构审查与实际变更验证；只有 PR 任务要求 PR 信息校验，push/manual 分支任务
-的 `pr_info` 为 `not_applicable`，不要求 PR 模板字段。严重高风险发现阻塞，其余风险与有效性能回退报告给维护者。
-专项审查按 PR 描述和实际 diff 选择方向，标签仅供参考，无标签也会进行相关审查。
-PR 模板是最低信息要求，支持中英文和自定义字段。状态回写与下一检查并行，Basic → API → Security
-仍保持成功依赖；外部 fork 在全部前置检查及回写完成后生成审批卡，同仓库任务直接投递。
+选择范围、命令与补充用例，并在 `change_validation` 中说明影响、选测理由和实际证据。
+文档和普通注释可轻量验证；可独立运行的 Python 可直接验证源码；
+编译器、运行时和后端行为变化需要相关构建与 smoke/JIT。显式 full 要求全部可用工具对应的覆盖。
+
+所有任务都须完成架构审查与实际变更验证。PR 任务另需校验 PR 信息，最低要求为概述、
+范围和验证情况，支持中英文及自定义字段；push/manual 任务的 `pr_info` 为
+`not_applicable`。专项审查按描述和实际 diff 选择，标签仅供参考。
+严重高风险发现阻塞，其余风险与有效性能回退报告给维护者。
+
+验证优先复用已有有效结果。需要 FlagGems 时，非 full 最多选择 6 个不同算子，
+空 impact 使用固定六个代表样本，扩大范围须显式 full。具体执行约定见
+[AI_CI_PROGRAM.md](AI_CI_PROGRAM.md) 和 [工具文档](tools/README.md)。
 
 ## 文件结构
 
 ```text
 scripts/local_ci/
-├── AI_CI_PROGRAM.md          # Codex 的职责、工作方式与结果格式
-├── agent_ci/                # Poller、原生 Codex CLI、任务身份和 Git 发布
-├── prepare/                 # 环境、依赖、任务容器与部署入口
-├── maintenance/             # 健康采集、外部告警与本地保留清理
+├── AI_CI_PROGRAM.md          # Agent 职责、工作方式与结果格式
+├── agent_ci/                # Worker、Codex CLI、任务身份和结果发布
+├── prepare/                 # 环境、依赖、任务容器与部署
+├── maintenance/             # 健康采集、恢复、外部告警与保留清理
 ├── tools/
-│   ├── basic_tools/         # 可复用构建、安装、测试和性能工具
+│   ├── basic_tools/         # 构建、安装、测试和性能工具
 │   ├── ai_review_tools/     # 架构与专项审查说明
-│   └── ai_custom_tools/     # 任务内生成工具的使用约定
-└── tests/                   # 必要的 Local CI 行为回归
+│   └── ai_custom_tools/     # 任务内辅助工具约定
+└── tests/                   # Local CI 行为回归
 ```
 
 GitHub 网关和接收器位于 `scripts/ci/`，页面位于 `dashboard/`。
-[AI_CI_PROGRAM.md](AI_CI_PROGRAM.md) 是唯一 Agent 程序入口；[tools/README.md](tools/README.md)
-说明调用方法。Codex 原生 shell 可直接运行工具、已有测试及定向脚本，无需 MCP、JUnit 或逐命令回执。
-最终以实际结果和必要证据汇总验证范围，不重复执行已有有效验证。先判断是否需要
-FlagGems；非 full 最多 6 个不同算子，空 impact 使用固定六个代表样本，超限须显式 full。
+[AI_CI_PROGRAM.md](AI_CI_PROGRAM.md) 是 Agent 的程序入口。
 
 ## 环境与生命周期
 
-每任务一个 Rootless Docker 容器、一个非 root 用户，Codex 与构建测试共享任务环境。
-只读挂载可信控制代码和服务器依赖，源码、venv、编译输出及缓存写入任务目录。
-candidate/base 分别冻结源码声明的 LLVM SHA 与 Triton 版本，按 LLVM 和 Triton major.minor 选择可信 profile，生成各自的 context、环境变量、后端能力与 fingerprint。相同只读依赖可复用，checkout、venv、build/cache/artifacts 保持隔离；基线源码已提供，是否构建比较由 Codex 决定，一旦执行 base 必须使用 base 自己的环境。性能环境不可比时报告 `not_comparable`。
-后端 wheel 在任务内重新构建。`/tmp` 允许动态库加载，编译缓存优先使用 `/task`。
+### 环境选择
 
-FlagGems 使用服务器 profile 中的固定只读依赖；修改 PR 中的 FlagGems 子模块指针
-不会改变该依赖。其他子模块仍通过 Gitee 固定到对应提交。
-所有 PR 目标分支都可派发；环境选择不依赖分支名，`branch_profiles` 已停用。
-两侧都必须唯一匹配已配置的源码版本与 LLVM 环境，不用 candidate 环境代替 base。
-后端能力仍只对已验证的 Triton 3.0 开启；同 LLVM 的 3.1 只复用 LLVM 安装，不继承 3.0 后端能力。
+网关冻结 base 与 candidate 各自源码声明的 Triton 版本和 LLVM SHA；
+服务器校验源码后，用 **Triton major.minor + 完整 LLVM SHA** 唯一选择可信 profile。
+所有 PR 目标分支都可派发，两侧均需有匹配环境。
 
-Worker 轮询任务有效性，PR 关闭、转 Draft、更换目标或增加提交时停止旧容器。
-Codex 短暂中断优先恢复同一 CLI 会话；Worker 重启先核对已保存报告和封存结果，
-完整有效报告继续封存，无法接续才在原预算内重建隔离环境。已封存结果只重试发布，不重编、不重测。
-Codex 默认最多尝试 10 次（含首次），仍共用任务时间预算；已有配置中的 `codex_attempts` 显式值优先。
+| 内容 | 规则 |
+| --- | --- |
+| 镜像与容器 | 所有 profile 使用同一固定镜像；每任务一个 Rootless Docker 容器、一个非 root 执行用户 |
+| base / candidate | 各自生成 context，记录源码、LLVM、profile、环境变量、后端能力与 fingerprint |
+| 只读依赖 | 相同依赖可复用，不同 LLVM 版本可同时挂载 |
+| 可写数据 | 两侧 checkout、venv、build、cache 和产物目录独立 |
+| 后端能力 | 仅 Triton 3.0 开启；3.1 复用 3.0 LLVM，但使用独立的 frontend profile |
+| 基线比较 | 按实际需要执行 base；执行时使用 base context，性能条件不可比时报告 `not_comparable` |
+
+控制代码和服务器依赖只读挂载，源码及构建输出写入任务目录。后端 wheel 在任务内构建；
+`/tmp` 支持动态库加载，编译缓存优先使用 `/task`。
+FlagGems 使用 profile 中的固定只读目录，PR 中的子模块指针不改变该依赖；
+其他子模块经 Gitee 固定到对应提交。环境细节见 [服务器准备](prepare/README.md)。
+
+### 执行与恢复
+
+Worker 轮询任务有效性。PR 关闭、转 Draft、更换目标或增加提交后，停止已失效的执行。
+Codex 可在任务可写环境中修复依赖、调整命令或降低编译并行度，保存异常与修复记录。
+
+执行中断后优先恢复同一 CLI 会话。Worker 重启先检查已保存报告和封存结果：
+有效报告继续封存，无法接续时才在原预算内重建环境；已封存结果只补传。
+默认最多启动 Codex 10 次（含首次），共享执行截止时间。
+恢复规则和其他预算见 [运行维护](maintenance/README.md)。
+
+### 数据与清理
 
 ```text
 state_dir/
@@ -78,65 +94,54 @@ state_dir/
 │   ├── pr/branch-<目标分支>/pr-<PR号>/<head_sha>/<run_id>/
 │   └── push/branch-<目标分支>/<head_sha>/<run_id>/
 │       ├── task.json, state.json, codex-session.json
-│       ├── logs/            # 本机完整 Codex 日志
+│       ├── logs/            # 本机完整日志
 │       ├── artifacts/       # 计划、工具输出和定向用例
-│       └── sealed/          # 待发布或已发布结果及所选文件；PR 目录内部相同
-└── work/<head_sha>/<run_id>/ # 临时任务目录，结束后清理运行目录及空的 SHA 父目录
+│       └── sealed/          # 封存结果与所选文件；PR 目录内部相同
+└── work/<head_sha>/<run_id>/ # 临时任务目录
 ```
 
-本地运行目录和 Gitee 结果复用同一套事件、目标分支、PR 与源码提交命名。PR 使用
-`runs/pr/branch-<目标分支>/pr-<PR号>/<head_sha>/<run_id>/`，push/manual 使用
-`runs/push/branch-<目标分支>/<head_sha>/<run_id>/`（分支名中的 `/` 会 URL 编码）。
-`head_sha` 使用完整 40 位源码提交号；`task_id` 仍是内部冻结任务摘要，不改变任务协议、
-current/cancel 指针和去重规则。同一 SHA 的不同任务用独立 `run_id` 隔离，接收器按结果内的
-`task_id` 匹配。`health/worker.json` 在顶层显示活动任务的 `head_sha`（空闲时为 null），
-`tasks` 中各项同时保留 `task_id` 和 `head_sha`。
-旧的 `<task_id>` 分组目录及 `runs/<task_id>/<run_id>/` 保持原位，重启后仍能去重、恢复
-和重试上传，不因目录升级重新执行；新运行使用 SHA 目录。清理 work 不删除 runs 中的证据，
-也不删除同一 SHA 下其他运行；清理失败会保留待清理状态而不是报告成功。
-本地私有状态与完整日志不上传。Gitee 每次必传清单为可读格式的 `result.json`、
-`change_validation` 验证报告和各检查通过 `checks.evidence` 声明的最小必要证据，
-报告沿用任务实际文件名。任务通过 `artifacts` 按重要性排序选择必要的摘要、失败片段、
-定向用例或性能数据。必传证据优先占用发布预算，缺失或无法上传时保留检查的实际执行状态，
-但整体通过结论改为待确认（`infra_error`）；选传文件超限不改变整体结论。
-两类文件的省略原因均记录在 `evidence_delivery`，已封存文件从 `sealed/` 与结果一起提交。
-结果提交标题参考 `CI_dev_forPR`，使用 `local-ci: <status> <head_sha前12位> <run_id>`，
-其中 status 保留 `pass/fail/infra_error/cancelled` 的真实结果语义；上传重试不产生重复提交。
-不使用 Release 附件或额外交付索引。必传证据最多 32 份、选传附件最多 8 份，
-路径去重且只有成功上传的文件占用各自名额；`result.json` 单独必传，不占附件名额。
-单文件 2 MiB、附件总计 10 MiB，`result.json` 单独不超过 2 MiB；
-超出时保留本机并注明，本机完整日志默认保留 30 天。
-任务与结果格式只有固定名称，不带版本号；旧格式记录跳过，历史文件不会重新执行。
+本地与 Gitee 结果使用同一目录命名。分支名中的 `/` 使用 URL 编码，
+`head_sha` 为完整 40 位提交号，`task_id` 为冻结任务摘要；
+同一 SHA 的不同运行用 `run_id` 隔离，接收器按结果内的 `task_id` 匹配。
+任务结束后清理对应 work 目录及空的 SHA 父目录，保留其他运行和 runs 中的证据。
+清理失败保留待处理状态。已发布的大日志与证据默认在本机保留 30 天。
 
-GitHub 自定义阶段（Basic、API、Security、Approve、Dispatch）和最终 Summary 使用 Commit Status；
-PR 仅写入 `head_sha`，实际测试仍针对任务冻结的合并提交 `tested_sha`。各阶段按依赖逐步出现，
-Summary 在所需审批通过且投递成功后才出现；控制分支自身 push 同样回写 Basic/API/Security 三项状态。
-状态绑定任务与工作流运行，旧运行不能覆盖当前任务。原生 Actions 的日志、耗时及审批入口不变。
-历史 Check Run 和旧名称仅用于兼容读取及待定状态收尾，已有记录不会自动消失。
-同一 head 的目标分支基线变化后，需要重新派发；要求合并前检查通过时，还应启用严格的分支保护，
-避免把旧合并提交的绿色结果视为新基线的验证结果。
-GitHub 接收器只回写仍对应当前 PR 的结果；任务关闭后终止待定状态，不追加取消评论。
-新运行追加中文结果评论，同一结果重试不重复发布；检查状态说明使用英文。
-Dashboard 展示任务、算子、后端、性能与健康状态。
+## 结果与证据
+
+结果状态为 `pass`、`fail`、`infra_error` 或 `cancelled`，与实际验证结论一致。
+私有状态、完整日志和会话留在本机。结果与所选文件封存后一次提交到 Gitee，
+标题为 `local-ci: <status> <head_sha前12位> <run_id>`；上传重试不重复执行验证或创建相同提交。
+
+| 发布内容 | 范围与限制 |
+| --- | --- |
+| `result.json` | 必传，单独不超过 2 MiB，不占附件名额 |
+| 必传证据 | `change_validation` 报告及 `checks.evidence` 引用文件，最多 32 份 |
+| 选传附件 | `artifacts` 按重要性选择的摘要、失败片段、用例或性能数据，最多 8 份 |
+| 附件预算 | 路径去重；单文件不超过 2 MiB，合计不超过 10 MiB；仅成功上传文件占名额 |
+
+必传证据优先使用预算。缺失或无法上传时保留检查实际状态，但整体通过结论改为
+`infra_error`；选传文件超限保留在本机，不改变结论。省略原因写入 `evidence_delivery`。
+报告沿用任务实际文件名，文件从 `sealed/` 与结果一起发布。
+
+GitHub 阶段状态及 `Local CI Summary` 使用 Commit Status，PR 写入 `head_sha`，
+实际验证对应冻结的 `tested_sha`。Basic → API → Security 按成功依赖推进；
+外部 fork 完成前置检查及回写后进入审批，同仓库任务直接投递。
+Summary 在审批要求满足且投递成功后出现，状态只允许当前任务及其工作流回写。
+
+PR 目标基线变化后需要重新派发；严格分支保护用于确保当前合并基线已验证。
+任务关闭时结束待定状态；每次运行追加中文结果评论，同一结果重试不重复发布。
+状态说明使用英文，Dashboard 展示完整检查、审查、证据及健康信息。
+网关配置和回写细节见 [GitHub 网关](../ci/README.md)。
 
 ## 部署与验证
 
-`prepare/config.example.json` 虽保留原名，现为 `jiwang_ci` 的完整非敏感部署配置和唯一维护来源，修改会影响部署。请在开发仓库修改、提交并经 Gitee 部署。服务器 `/home/jiwang_ci/local_ci/config/local-ci.json` 是生成的运行副本，没有本地覆盖 JSON；凭据继续独立保存在 `credentials.env` 与 `codex-source/`。
+`prepare/config.example.json` 是服务器完整非敏感配置的唯一维护来源。
+修改在开发仓库提交，经 Gitee 部署；服务器 `local-ci.json` 是生成的运行副本。
+凭据单独保存在 `credentials.env` 与 `codex-source/`。
 
-已有控制 checkout 时，以 `jiwang_ci` 用户运行安装器预览；加 `--apply` 应用，运行配置缺失时也会创建：
-
-```bash
-python3 scripts/local_ci/prepare/install.py \
-  --config /home/jiwang_ci/local_ci/config/local-ci.json \
-  --credentials-env /home/jiwang_ci/local_ci/config/credentials.env
-```
-
-空服务器使用[服务器准备](prepare/README.md)中的独立引导脚本和经审核的精确控制提交 SHA 自动创建 checkout，再调用同一正式安装器。安装入口准备环境并启动 Worker、控制仓更新和必要维护定时器；不需要工具服务或独立调度控制台。
-支持版本的 LLVM 清单、尚待填写的真实挂载摘要以及服务器部署验收步骤见 [LLVM 变体环境部署](prepare/VARIANT_LLVM_DEPLOYMENT.md)。
-详见 [服务器准备](prepare/README.md)、[维护](maintenance/README.md)
-与 [GitHub 配置](../ci/README.md)。新 PR 任务使用 `control_policy=worker`，不绑定控制提交；网关记录的 `worker_revision_sha` 仅作来源记录，不参与该类任务 ID，Worker 使用已安装的可信控制代码，并在结果 `environment.control_revision` 记录实际版本。源码 head/base/tested、LLVM 与 PR 信息仍按原规则冻结。旧任务身份保持兼容；手动分支等固定版本任务要求不同控制版本时，在释放任务锁后将任务身份和 SHA 原子写入单一 `control-update/request.json`，再触发一次 `control-update.service`。多个等待版本按控制仓祖先顺序选择最早的前向提交。更新只允许从配置的 Gitee `control_anchor` 镜像快进到任务指定提交，在同一次 Worker 重启前同步该提交的配置；Worker 检查进程与磁盘版本一致，任务执行期间不会切换控制版本。没有需要更新的新任务时不轮询控制仓，也不定时追随分支最新提交。
-
-安装和更新共用配置同步：按 JSON 结构比较，相同则不写；有差异时先校验，再原子替换，保持 CI 用户所有和 600 权限。`control_update.py --config <运行配置> --expected-revision <40位SHA>` 默认预览，加 `--apply` 应用，也可用当前同一 SHA 修复配置偏差。首次经旧更新器到达新提交后，用新脚本对当前 SHA 执行一次 `--apply` 完成迁移。修改 `control_root`、`state_dir`、`python_bin` 或 `runtime` 等宿主部署锚点需要重新运行安装器。具体命令见[服务器准备](prepare/README.md)。
+- [环境准备与部署](prepare/README.md)：配置来源、安装、固定 SHA 更新及服务器验收。
+- [只读依赖](prepare/DEPENDENCY_MOUNTS.md)：版本匹配、目录摘要、挂载规则及跨 LLVM 验证。
+- [运行维护](maintenance/README.md)：健康采集、恢复预算、补传和演练。
 
 本地行为回归：
 
@@ -145,6 +150,4 @@ python3 -m pytest scripts/local_ci/tests -q
 ```
 
 需要 Python 3.10+、pytest、PyYAML 和 Git；页面测试还需要 Node.js。
-这些检查验证控制逻辑，实际环境仍需在服务器完成 build/install/smoke/JIT 与性能验收。
-
-执行中断后的封存、恢复预算、上传重试、外部告警和部署演练见 [运维与恢复说明](maintenance/RECOVERY.md)。
+服务器验收覆盖对应工具链的 build/install/smoke/JIT 与性能验证。

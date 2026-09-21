@@ -65,8 +65,7 @@ Worker 为 base/candidate 分别提供完整 `runtime_env`、LLVM、profile、�
 ```
 
 后端原生命令加 `--backend`，会校验该 variant 的能力并加载其后端脚本。只读依赖可共享，
-两边 venv、构建、缓存与产物目录始终独立。缺少 `runtime_env` 的旧独立工具 context 继续
-使用原调用环境；Worker 新生成的 context 始终提供完整环境。
+两边 venv、构建、缓存与产物目录始终独立，Worker 提供的 context 包含完整运行环境。
 
 性能基线由 `performance_baselines[tool_id]` 指定文件、提交与环境信息；比较时核对
 后端、算子和采样条件。没有可比基线时报告 `not_comparable`；有效性能回退只报告，
