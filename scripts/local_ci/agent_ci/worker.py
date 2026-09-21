@@ -222,14 +222,14 @@ class Worker:
             "state": state, "failure_code": failure_code, "action": action,
             "next_retry_at": now + delay if delay is not None else None,
             "last_recovery_at": now if state == "recovered" else previous.get("last_recovery_at"),
-            "outcome": "recovered" if state == "recovered" else "failed" if state == "exhausted" else "pending",
+            "outcome": {"normal": None, "recovered": "recovered", "exhausted": "failed"}.get(state, "pending"),
             "attempt": (budget or {}).get("codex_attempts_used", 0),
             "execution_attempt": (budget or {}).get("execution_attempts_used", 0),
             **extra,
         }
         self.journal.update(task_id, run_id=run_id, recovery=recovery, budget=budget)
         significant = ("state", "failure_code", "action", "outcome", "attempt", "execution_attempt")
-        if any(recovery.get(key) != previous.get(key) for key in significant):
+        if state != "normal" and any(recovery.get(key) != previous.get(key) for key in significant):
             self.journal.event(task_id, "recovery", {
                 **{k: recovery[k] for k in ("state", "failure_code", "action", "next_retry_at", "outcome")},
                 "attempt": (budget or {}).get("codex_attempts_used", 0),

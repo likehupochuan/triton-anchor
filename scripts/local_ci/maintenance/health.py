@@ -417,6 +417,8 @@ def public_snapshot(snapshot):
         if not observed_at - 7 * 86400 <= seconds <= observed_at or counts.get(task_id, 0) >= 20:
             continue
         detail = event.get("detail") if isinstance(event.get("detail"), dict) else {}
+        if event["kind"] == "recovery" and detail.get("state") == "normal":
+            continue
         clean = {"at": at, "task_id": task_id, "run_id": identifier(event.get("run_id")),
                  "kind": event["kind"], "detail": {k: v for k, v in recovery(detail).items()
                  if k in {"state", "failure_code", "action", "outcome"} and v is not None}}

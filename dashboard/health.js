@@ -8,6 +8,8 @@
     cacheUrl: 'https://local-ci-alert.2272640910.workers.dev/health',
   };
   const incidents = {
+    source_unreadable: ['数据读取异常', '健康数据读取失败（不能据此判断服务器宕机）'],
+    service_failed: ['服务异常', '服务器侧维护服务失败'],
     poller_unavailable: ['服务异常', 'Worker 已停止或心跳异常'],
     runtime_unavailable: ['服务异常', 'Docker 容器运行环境不可用'],
     relay_poll_failed: ['中转访问异常', '服务器访问 Gitee 失败；可能涉及网络、认证或仓库访问'],
@@ -30,7 +32,7 @@
     timeout: ['执行超时', 'bad'], succeeded: ['已完成', 'good'], cancelled: ['已取消', 'info'],
   };
   const serviceNames = {
-    'triton-anchor-local-ci.service': 'Worker',
+    'triton-anchor-local-ci.service': 'Worker 服务',
     'triton-anchor-local-ci-health.timer': '健康采集定时器',
     'triton-anchor-local-ci-health.service': '健康采集服务',
     'triton-anchor-local-ci-control-update.service': '控制代码更新',
@@ -45,7 +47,7 @@
   const rows = value => Array.isArray(value) ? value : [];
   const age = (value, now) => (now - Date.parse(value)) / 1000;
   const fresh = (value, now) => age(value, now) >= -60 && age(value, now) <= source.staleSeconds;
-  const date = value => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('zh-CN', {hour12: false}) : '未上报';
+  const date = value => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('zh-CN', {hour12: false, timeZone:'Asia/Shanghai'}) : '未上报';
 
   function assess(worker, events = [], {now = Date.now(), workerError = ''} = {}) {
     const issues = [], seen = new Set();
@@ -210,6 +212,7 @@
     const budget = task.budget || {}, recovery = task.recovery || {};
     const attempts = (used, limit) => Number.isInteger(used) ? used + ' / ' + (Number.isInteger(limit) ? limit : '未上报') : '未上报';
     return [
+      ['Head SHA', task.head_sha || '未上报'],
       ['任务 ID', task.task_id || '未上报'], ['运行 ID', task.run_id || '未上报'],
       ['执行阶段', describe(task.stage, stages)], ['恢复状态', describe(recovery.state, recoveryStates)],
       ['异常原因', describe(recovery.failure_code, failureNames)], ['恢复动作', describe(recovery.action, recoveryActions)],
@@ -218,7 +221,7 @@
       ['session 切换', attempts(budget.session_switches, budget.session_switches_limit)],
       ['最近有效进展', date(task.last_progress_at)], ['下次重试', date(recovery.next_retry_at)],
       ['执行截止时间', date(budget.codex_deadline_at)], ['恢复截止时间', date(budget.recovery_deadline_at)],
-      ['最近恢复', date(recovery.last_recovery_at)], ['恢复结果', describe(recovery.outcome, {success:'成功', recovered:'已恢复', failed:'失败', pending:'进行中'})],
+      ['最近恢复', date(recovery.last_recovery_at)], ['恢复结果', recovery.state === 'normal' ? '无需恢复' : describe(recovery.outcome, {success:'成功', recovered:'已恢复', failed:'失败', pending:'进行中'})],
     ];
   }
 
@@ -234,13 +237,16 @@
   }
   function eventText(row) {
     const detail = row.detail || {};
+    const historicalStates = {retry_wait:'当时等待重试', waiting_dependency:'当时等待依赖恢复', recovering:'当时恢复中'};
     return [...new Set([date(row.at), row.task_id ? '任务 ' + row.task_id.slice(0, 12) : '外部监测',
       row.run_id && row.run_id !== 'unknown' ? '运行 ' + row.run_id : '',
       row.kind === 'recovered' ? '确认恢复' : row.kind === 'fault' ? '发现异常' : row.kind === 'finished_failed' ? '恢复失败，任务已结束' : '',
-      rows(row.codes).map(code => incidents[code]?.[1] || failureNames[code] || code).join('；'),
-      detail.phase && describe(detail.phase, stages), detail.state && detail.state !== 'unknown' && describe(detail.state, recoveryStates), detail.failure_code && describe(detail.failure_code, failureNames),
+      rows(row.codes).map(code => row.kind === 'recovered' && code === 'source_unreadable' ? '健康数据读取已恢复'
+        : incidents[code]?.[1] || codexStates[code.replace(/^codex_/, '')]?.[0] || controlUpdateStates[code.replace(/^control_update_/, '')] || failureNames[code] || code).join('；'),
+      detail.phase && describe(detail.phase, stages), detail.state && detail.state !== 'unknown' && (historicalStates[detail.state] || describe(detail.state, recoveryStates)), detail.failure_code && describe(detail.failure_code, failureNames),
       detail.action && describe(detail.action, recoveryActions), Number.isInteger(detail.attempt) ? '第 ' + detail.attempt + ' 次' : '',
-      detail.outcome && describe(detail.outcome, {success:'恢复成功', recovered:'恢复成功', failed:'恢复失败', pending:'进行中'}),
+      detail.outcome && !(detail.outcome === 'pending' && historicalStates[detail.state])
+        && describe(detail.outcome, {success:'恢复成功', recovered:'恢复成功', failed:'恢复失败', pending:'当时尚未恢复'}),
     ].filter(Boolean))].join(' · ');
   }
 
@@ -249,18 +255,22 @@
     for (const row of [...events].reverse().sort((a,b) => Date.parse(a.at) - Date.parse(b.at))) {
       const detail = row.detail || {}, key = row.task_id && row.run_id && row.task_id !== 'unknown' && row.run_id !== 'unknown'
         && JSON.stringify([row.task_id, row.run_id]);
+      // Normal lifecycle records only delimit recovery episodes; they are not incidents.
+      if (row.kind === 'phase' || row.kind === 'recovery' && detail.state === 'normal') {
+        if (key && (detail.state === 'normal' || ['published', 'cancelled'].includes(detail.phase))) active.delete(key);
+        continue;
+      }
       if (!key || row.kind !== 'recovery') {
         groups.push({events:[row]});
-        if (key && ['published', 'cancelled'].includes(detail.phase)) active.delete(key);
         continue;
       }
       let group = active.get(key);
-      if (!group || (detail.failure_code && group.reason && detail.failure_code !== group.reason) || detail.state === 'normal') {
+      if (!group || (detail.failure_code && group.reason && detail.failure_code !== group.reason)) {
         group = {events:[], reason:detail.failure_code || ''}; groups.push(group); active.set(key, group);
       }
       group.events.push(row);
       group.reason ||= detail.failure_code || '';
-      if (['normal', 'recovered', 'exhausted'].includes(detail.state) || ['success', 'recovered', 'failed'].includes(detail.outcome)) active.delete(key);
+      if (['recovered', 'exhausted'].includes(detail.state) || ['success', 'recovered', 'failed'].includes(detail.outcome)) active.delete(key);
     }
     return groups.reverse().sort((a,b) => Date.parse(b.events.at(-1).at) - Date.parse(a.events.at(-1).at));
   }
@@ -268,7 +278,7 @@
   function mount(root) {
     const node = (tag, className, text) => { const item = document.createElement(tag); if (className) item.className = className; if (text) item.textContent = text; return item; };
     const heading = node('div', 'health-heading'), title = node('div');
-    title.append(node('h2', '', '运行概览'), node('p', 'health-muted', source.worker + ' · Gitee 健康快照'));
+    title.append(node('h2', '', '运行概览'), node('p', 'health-muted', source.worker + ' · Gitee 健康快照 · 时间均为北京时间（UTC+8）'));
     const refresh = node('button', 'button secondary', '刷新健康状态'); refresh.type = 'button';
     heading.append(title, refresh);
     const content = node('div'); content.setAttribute('aria-live', 'polite');
@@ -392,6 +402,7 @@
       content.append(alertSection);
       const records = node('section', 'health-section');
       records.append(node('h3', '', '异常与恢复记录（近 7 天）'));
+      records.append(node('p', 'health-muted', '记录服务器恢复过程和 Cloudflare 外部监测事件；以下为事件发生时的状态，当前任务状态以上方“任务执行与恢复”为准。'));
       if (monitor.error) records.append(node('p', 'health-muted', monitor.error + '；服务器上报的记录仍会展示。'));
       const history = node('ul', 'health-history');
       const groups = groupHistory(model.history);

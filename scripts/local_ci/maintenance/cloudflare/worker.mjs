@@ -221,18 +221,25 @@ function eventText(event) {
     label(detail.action), Number.isInteger(detail.attempt) && `第 ${detail.attempt} 次`, label(detail.outcome)].filter(Boolean))].join(' · ');
 }
 
+function beijingTime(value) {
+  if (!instant(value)) return '尚未取得';
+  // Keep the offset parseable when recovering an incident from its Issue body.
+  return new Date(Date.parse(value) + 8 * 3600000).toISOString().replace('Z', '+08:00');
+}
+
 function issueBody(state, at, recovered = false) {
-  const lines = [MARKER, `服务器：${CONFIG.worker}`, '', `首次发现：${state.first_seen}`, `本次观测：${at}`,
-    `故障证据快照：${state.fault_snapshot_at || '尚未取得'}`, ''];
+  const lines = [MARKER, `服务器：${CONFIG.worker}`, '以下时间均为北京时间（UTC+8）。', '',
+    `首次发现：${beijingTime(state.first_seen)}`, `本次观测：${beijingTime(at)}`,
+    `故障证据快照：${beijingTime(state.fault_snapshot_at)}`, ''];
   const minutes = Math.max(0, Math.round((Date.parse(at) - Date.parse(state.first_seen)) / 60000));
   lines.push(`持续时间：约 ${minutes} 分钟。`);
-  if (recovered) lines.push(`恢复时间：${at}`, `恢复证据快照：${state.last_source_at}`,
+  if (recovered) lines.push(`恢复时间：${beijingTime(at)}`, `恢复证据快照：${beijingTime(state.last_source_at)}`,
     state.finished_failed ? '任务恢复失败，已发布基础设施失败结果并结束；这不表示该任务恢复成功。'
       : '更新且有效的健康快照确认此前异常已结束。', '', '此前异常：');
   else lines.push('当前异常（缺少明确恢复证据的原有异常继续保留）：');
   for (const code of state.codes) lines.push(`- ${LABELS[code]}`);
   const events = rows(state.events).filter(event => Date.parse(event.at) >= Date.parse(state.first_seen)).slice(0, 20).reverse();
-  if (events.length) lines.push('', '近期异常与恢复过程：', ...events.map(event => `- ${event.at} · ${eventText(event)}`));
+  if (events.length) lines.push('', '近期异常与恢复过程：', ...events.map(event => `- ${beijingTime(event.at)} · ${eventText(event)}`));
   lines.push('', '仅依据公开健康快照；Cloudflare 不执行服务器恢复。原始错误、认证信息和服务器日志不在此发布。');
   return lines.join('\n');
 }
