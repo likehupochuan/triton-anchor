@@ -108,6 +108,14 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
         def tasks(self):
             return [task]
 
+        def source_variants(self, frozen):
+            return {
+                "base": {"source_sha": frozen["base_sha"], "llvm_hash": "f" * 40,
+                         "triton_version": "3.0.0"},
+                "candidate": {"source_sha": frozen["tested_sha"], "llvm_hash": frozen["llvm_hash"],
+                              "triton_version": "3.3.0"},
+            }
+
         def publish_result(self, task, run_id, directory):
             nonlocal uploads
             uploads += 1
@@ -125,6 +133,11 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
         def acquire_task(self, task, run_id):
             return {
                 "run_id": run_id,
+                "variants": {
+                    variant: {**source, "profile": variant, "backend_enabled": variant == "base",
+                              "environment_fingerprint": variant, "image_id": "fixture"}
+                    for variant, source in task["variants"].items()
+                },
                 "profile": "fixture",
                 "backend_enabled": False,
                 "environment_fingerprint": "fixture",
@@ -204,6 +217,11 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
         (worker.journal.run_dir(task["task_id"]) / "sealed/result.json").read_text()
     )
     assert result["status"] == ("cancelled" if cancelled else "pass")
+    assert result["task"] == task and "variants" not in task
+    runtimes = result["environment"]["variants"]
+    assert runtimes["base"]["llvm_hash"] == "f" * 40
+    assert runtimes["candidate"]["llvm_hash"] == task["llvm_hash"]
+    assert runtimes["base"]["source_sha"] == task["base_sha"]
     assert events[-3:] == ["stop", "collect", "destroy"]
     worker.journal = Journal(tmp_path)
     assert worker.journal.register(task)["run_id"] == row["run_id"]

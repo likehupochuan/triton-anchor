@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import shlex
 import subprocess
 import tarfile
@@ -109,23 +110,25 @@ class DockerExecutor:
 
     def environment(self, variant="candidate"):
         root = Path("/task") / variant
-        env = {str(k): str(v) for k, v in self.generation.get("env", {}).items()}
+        runtime = self.generation["variants"][variant]
+        env = {str(k): str(v) for k, v in runtime["env"].items()}
         jobs = str(self.config.get("max_jobs", 12))
         env.update(
             ANCHOR_DIR=str(root / "checkout"),
             LOCAL_CI_TASK_ROOT=str(root),
             WORKSPACE="/task",
-            LOCAL_CI_ARTIFACT_DIR="/task/artifacts",
+            LOCAL_CI_ARTIFACT_DIR=f"/task/artifacts/{variant}",
             LOCAL_CI_TASK_ID=self.task["task_id"],
-            LOCAL_CI_TESTED_SHA=self.task[
-                "base_sha" if variant == "base" else "tested_sha"
-            ],
+            LOCAL_CI_TESTED_SHA=runtime["source_sha"],
+            LOCAL_CI_VARIANT=variant,
+            LOCAL_CI_LLVM_HASH=runtime["llvm_hash"],
+            LOCAL_CI_TRITON_VERSION=runtime["triton_version"],
             PYTHON_BIN=str(root / "venv/bin/python"),
             PYTHON_VENV_ACTIVATE=str(root / "venv/bin/activate"),
             VIRTUAL_ENV=str(root / "venv"),
             PYTHONNOUSERSITE="1",
             PIP_REQUIRE_VIRTUALENV="true",
-            LOCAL_CI_SEED_PYTHON=ci_python(self.config, self.generation.get("env")),
+            LOCAL_CI_SEED_PYTHON=ci_python(self.config, runtime["env"]),
             BASH_ENV=self.config.get("container_control_root", "/opt/local-ci/control")
             + "/scripts/local_ci/tools/basic_tools/ci_python_env.sh",
             PATH=str(root / "venv/bin")
@@ -139,7 +142,7 @@ class DockerExecutor:
             CMAKE_BUILD_PARALLEL_LEVEL=jobs,
             LANG="C.UTF-8",
         )
-        if self.generation.get("backend_enabled"):
+        if runtime["backend_enabled"]:
             env["BACKEND_PATH"] = str(root / "backend")
         env.pop("PYTHONHOME", None)
         return env
@@ -147,11 +150,11 @@ class DockerExecutor:
     def tool_context(self, variant="candidate"):
         root = Path("/task") / variant
         env = self.environment(variant)
-        profile = self.config["profiles"][self.generation["profile_branch"]]
-        tools = dict(profile.get("tools", {}))
-        original = self.generation.get("env", {})
+        runtime = self.generation["variants"][variant]
+        tools = copy.deepcopy(runtime["tools"])
+        original = runtime["env"]
+        tools["llvm_dir"] = original["LLVM_BUILD_DIR"]
         fallbacks = {
-            "llvm_dir": original.get("LLVM_BUILD_DIR"),
             "flaggems_dir": original.get("FLAGGEMS_CLONE_DIR"),
             "expected_backend": original.get("EXPECTED_TRITON_BACKEND"),
         }
@@ -193,27 +196,29 @@ class DockerExecutor:
             "backend_wheel_pattern", original.get("BACKEND_WHEEL_PATTERN") or "*.whl"
         )
         return {
+            "variant": variant,
+            "runtime_env": env,
             "source_dir": str(root / "checkout"),
             "artifact_dir": f"/task/artifacts/{variant}",
             "task_root": str(root),
             "task_id": self.task["task_id"],
             "target_sha": env["LOCAL_CI_TESTED_SHA"],
             "base_sha": self.task["base_sha"],
-            "triton_version": str(
-                profile.get("triton_version") or self.generation["profile"]
-            ).replace("triton-", ""),
+            "triton_version": runtime["triton_version"],
+            "llvm_hash": runtime["llvm_hash"],
+            "backend_enabled": runtime["backend_enabled"],
             "python_bin": env["PYTHON_BIN"],
             "task_venv": str(root / "venv"),
-            "trusted_python_bin": ci_python(self.config, self.generation.get("env")),
+            "trusted_python_bin": ci_python(self.config, runtime["env"]),
             "tools_dir": self.config.get(
                 "container_control_root", "/opt/local-ci/control"
             )
             + "/scripts/local_ci/tools",
-            "environment_fingerprint": self.generation["environment_fingerprint"],
+            "environment_fingerprint": runtime["environment_fingerprint"],
             "profile": {
-                "id": self.generation["profile"],
-                "llvm_revision": self.task["llvm_hash"],
-                "backend_enabled": self.generation["backend_enabled"],
+                "id": runtime["profile"],
+                "llvm_revision": runtime["llvm_hash"],
+                "backend_enabled": runtime["backend_enabled"],
                 "tools": tools,
             },
         }

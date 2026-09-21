@@ -60,7 +60,7 @@ jobs:
           ref: ${{ inputs.worker_revision_sha }}
           persist-credentials: false
           submodules: false
-      - name: Freeze exact task and candidate LLVM
+      - name: Freeze exact task and base/candidate environments
         id: task
         env:
           GH_TOKEN: ${{ github.token }}

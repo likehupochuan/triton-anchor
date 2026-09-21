@@ -37,6 +37,8 @@ from agent_ci.protocol import (
     metadata_digest,
     task_id as compute_task_id,
     llvm_hash_from_files,
+    TRITON_VERSION_PATH,
+    triton_version_from_source,
     is_legacy_task,
     result_task_prefixes,
     validate_task,
@@ -754,11 +756,17 @@ def prepare_task(
         ref = f"ci/{'full' if full else 'push'}/{branch}"
         base_ref, head_ref = f"ci/base/push/{branch}", f"ci/head/push/{branch}"
         external = False
-    llvm_files = gh.request(f"contents/triton/cmake?ref={quote(merge, safe='')}")
-    llvm_hash = llvm_hash_from_files(
-        [entry["path"] for entry in llvm_files if entry["type"] == "file"],
-        lambda path: gh.content(path, merge),
-    )
+    variants = {}
+    for variant, sha in (("base", base), ("candidate", merge)):
+        llvm_files = gh.request(f"contents/triton/cmake?ref={quote(sha, safe='')}")
+        variants[variant] = {
+            "source_sha": sha,
+            "llvm_hash": llvm_hash_from_files(
+                [entry["path"] for entry in llvm_files if entry["type"] == "file"],
+                lambda path: gh.content(path, sha),
+            ),
+            "triton_version": triton_version_from_source(gh.content(TRITON_VERSION_PATH, sha)),
+        }
     task = dict(
         schema=TASK_SCHEMA,
         repository=gh.repository,
@@ -778,7 +786,8 @@ def prepare_task(
         state="open",
         draft=False,
         captured_at=now(),
-        llvm_hash=llvm_hash,
+        llvm_hash=variants["candidate"]["llvm_hash"],
+        variants=variants,
         full=full,
         external_fork=external,
     )

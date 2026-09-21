@@ -235,7 +235,10 @@ class Worker:
         policy, environment = {}, {}
         report = {"status": "infra_error", "summary": "任务未完成"}
         try:
-            generation = self.manager.acquire_task(task, row["run_id"])
+            # Old immutable manifests did not freeze the base LLVM. Resolve both
+            # sides from their pinned source without changing task/result identity.
+            runtime_task = {**task, "variants": self.relay.source_variants(task)}
+            generation = self.manager.acquire_task(runtime_task, row["run_id"])
             active.generation = generation
             if active.cancelled.is_set():
                 raise InterruptedError(active.reason)
@@ -259,20 +262,19 @@ class Worker:
                 ]
             policy = minimum_checks(
                 changes,
-                backend_enabled=generation["backend_enabled"],
+                backend_enabled=generation["variants"]["candidate"]["backend_enabled"],
                 full=task["full"],
                 event_kind=task["event_kind"],
             )
-            environment = {
-                key: generation[key]
-                for key in (
-                    "profile",
-                    "llvm_hash",
-                    "backend_enabled",
-                    "environment_fingerprint",
-                    "image_id",
-                )
-            }
+            environment = {"variants": {
+                variant: {
+                    key: runtime[key] for key in (
+                        "source_sha", "triton_version", "profile", "llvm_hash",
+                        "backend_enabled", "environment_fingerprint", "image_id",
+                    )
+                }
+                for variant, runtime in generation["variants"].items()
+            }}
             environment["control_revision"] = generation.get("control_revision", self.running_control_revision)
             # Both source identities are available offline; Codex chooses whether to build a baseline.
             executor.prepare("base")

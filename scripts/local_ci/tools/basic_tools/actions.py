@@ -396,6 +396,8 @@ def compare_performance(payload: dict[str, Any]) -> None:
     metadata.update(
         environment_fingerprint=environment_fingerprint(context),
         commit_sha=context["target_sha"],
+        profile_id=context.get("profile", {}).get("id"),
+        llvm_revision=context.get("profile", {}).get("llvm_revision"),
     )
     write_json(out / "candidate.json", candidate)
     baseline = context.get("performance_baselines", {}).get(tool)

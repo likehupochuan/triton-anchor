@@ -98,9 +98,101 @@
       ],
       "devices": []
     },
+    "triton_v3.1": {
+      "name": "triton-3.1",
+      "triton_version": "3.1",
+      "llvm_hash": "",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "llvm": {
+        "mode": "mount",
+        "commit": ""
+      },
+      "env": {
+        "PYTHON_VENV_ACTIVATE": "",
+        "MAX_JOBS": "12"
+      },
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-<exact-llvm-commit>",
+          "read_only": true,
+          "sha256": ""
+        }
+      ]
+    },
+    "triton_v3.2": {
+      "name": "triton-3.2",
+      "triton_version": "3.2",
+      "llvm_hash": "",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "llvm": {
+        "mode": "mount",
+        "commit": ""
+      },
+      "env": {
+        "PYTHON_VENV_ACTIVATE": "",
+        "MAX_JOBS": "12"
+      },
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-<exact-llvm-commit>",
+          "read_only": true,
+          "sha256": ""
+        }
+      ]
+    },
     "triton_v3.3": {
       "name": "triton-3.3",
       "triton_version": "3.3",
+      "llvm_hash": "",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "llvm": {
+        "mode": "mount",
+        "commit": ""
+      },
+      "env": {
+        "PYTHON_VENV_ACTIVATE": "",
+        "MAX_JOBS": "12"
+      },
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-<exact-llvm-commit>",
+          "read_only": true,
+          "sha256": ""
+        }
+      ]
+    },
+    "triton_v3.4": {
+      "name": "triton-3.4",
+      "triton_version": "3.4",
+      "llvm_hash": "",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "llvm": {
+        "mode": "mount",
+        "commit": ""
+      },
+      "env": {
+        "PYTHON_VENV_ACTIVATE": "",
+        "MAX_JOBS": "12"
+      },
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-<exact-llvm-commit>",
+          "read_only": true,
+          "sha256": ""
+        }
+      ]
+    },
+    "triton_v3.5": {
+      "name": "triton-3.5",
+      "triton_version": "3.5",
       "llvm_hash": "",
       "backend_enabled": false,
       "workspace_container": "/workspace",
@@ -143,10 +235,30 @@
           "sha256": ""
         }
       ]
+    },
+    "triton_v3.8": {
+      "name": "triton-3.8",
+      "triton_version": "3.8",
+      "llvm_hash": "",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "llvm": {
+        "mode": "mount",
+        "commit": ""
+      },
+      "env": {
+        "PYTHON_VENV_ACTIVATE": "",
+        "MAX_JOBS": "12"
+      },
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-<exact-llvm-commit>",
+          "read_only": true,
+          "sha256": ""
+        }
+      ]
     }
-  },
-  "branch_profiles": {
-    "CI_dev": "triton_v3.0"
   },
   "health_stale_seconds": 1200,
   "evidence_max_bytes": 107374182400,

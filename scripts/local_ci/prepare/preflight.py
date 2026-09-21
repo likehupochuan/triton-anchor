@@ -24,7 +24,7 @@ from prepare.runtime_probe import (
     validate_runtime_config,
 )
 from prepare.dependency_mounts import dependency_mounts, validate_mounted_llvm
-from prepare.runtime import validate_branch_profiles, shared_image, validate_shared_profile
+from prepare.runtime import resolve_task_profile, shared_image, validate_shared_profile
 
 
 def check_configuration(
@@ -135,21 +135,17 @@ def check_configuration(
     check(
         "profiles",
         isinstance(profiles, dict) and bool(profiles),
-        "At least one explicit target-branch recipe is required",
+        "At least one trusted source-version and LLVM profile is required",
     )
-    try:
-        validate_branch_profiles(config)
-        check(
-            "branch_profiles",
-            True,
-            "Task branch aliases select existing profiles without changing task identity or LLVM",
-        )
-    except RuntimeError as exc:
-        check("branch_profiles", False, str(exc))
+    check(
+        "branch_profiles",
+        not config.get("branch_profiles"),
+        "branch_profiles is obsolete; select profiles by source Triton version and LLVM SHA",
+    )
     names = set()
     try:
         shared_image(config)
-        check("shared_image", True, "All branches use one immutable runtime image")
+        check("shared_image", True, "All variants use one immutable runtime image")
     except RuntimeError as exc:
         check("shared_image", False, str(exc))
     for branch, profile in profiles.items():
@@ -166,6 +162,14 @@ def check_configuration(
             bool(SHA_RE.fullmatch(str(profile.get("llvm_hash", "")))),
             "Current exact LLVM revision is required",
         )
+        try:
+            revisions = {profile.get("llvm_hash", ""), *profile.get("llvm", {}).get("revisions", {})}
+            for revision in revisions:
+                if resolve_task_profile(config, revision, profile.get("triton_version", "")) != branch:
+                    raise RuntimeError("Profile must resolve to its own source version and LLVM")
+            check(prefix + ":source_identity", True, "Source Triton version and LLVM select one trusted profile")
+        except (TypeError, ValueError, RuntimeError) as exc:
+            check(prefix + ":source_identity", False, str(exc))
         backend = profile.get("backend_enabled", False)
         triton_30 = str(profile.get("triton_version", "")).split(".")[:2] == ["3", "0"]
         check(

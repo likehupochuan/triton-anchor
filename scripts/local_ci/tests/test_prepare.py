@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 from prepare import runtime_probe as probe, install, container_fs as fs
-from prepare.runtime import EnvironmentManager, identities, shared_image, validate_shared_profile, resolve_task_profile
+from prepare.runtime import EnvironmentManager, identities, shared_image, validate_shared_profile, resolve_task_profile, merge_dependency_mounts
 from prepare.artifacts import tree_digest
 from prepare.artifacts import EnvironmentError
 from prepare.control_mount import bind_control, mount_arguments, mounts, verify_mount, CONTROL_TARGET
@@ -243,26 +243,24 @@ def test_shared_image_rejects_different_profile_images_and_legacy_layers():
             validate_shared_profile(profile)
 
 
-def test_unmapped_branch_selects_unique_llvm_profile_without_overriding_routing():
+def test_profile_resolution_uses_source_version_and_llvm_without_branch_routing():
     settings = {
         "profiles": {
-            "triton_v3.0": {"llvm_hash": "a" * 40, "llvm": {"revisions": {"c" * 40: {}}}},
-            "triton_v3.3": {"llvm_hash": "b" * 40},
+            "triton_v3.0": {"triton_version": "3.0", "llvm_hash": "a" * 40, "llvm": {"revisions": {"c" * 40: {}}}},
+            "triton_v3.1": {"triton_version": "3.1", "llvm_hash": "a" * 40},
+            "triton_v3.3": {"triton_version": "3.3", "llvm_hash": "b" * 40},
         },
         "branch_profiles": {"CI_dev": "triton_v3.0"},
     }
-    assert resolve_task_profile(settings, "local-ci-unified", "a" * 40) == "triton_v3.0"
-    assert resolve_task_profile(settings, "feature/change", "c" * 40) == "triton_v3.0"
-    # Explicit selections stay authoritative, even if later LLVM validation fails.
-    assert resolve_task_profile(settings, "CI_dev", "b" * 40) == "triton_v3.0"
-    assert resolve_task_profile(settings, "triton_v3.0", "b" * 40) == "triton_v3.0"
+    assert resolve_task_profile(settings, "a" * 40, "3.0.0") == "triton_v3.0"
+    assert resolve_task_profile(settings, "a" * 40, "3.1.0") == "triton_v3.1"
+    assert resolve_task_profile(settings, "c" * 40, "3.0.1") == "triton_v3.0"
+    assert resolve_task_profile(settings, "b" * 40, "3.3.1") == "triton_v3.3"
     with pytest.raises(EnvironmentError, match="No configured profile supports LLVM"):
-        resolve_task_profile(settings, "feature/change", "d" * 40)
-    settings["profiles"]["alternate"] = {"llvm_hash": "a" * 40}
-    with pytest.raises(EnvironmentError, match="Multiple profiles.*branch_profiles"):
-        resolve_task_profile(settings, "local-ci-unified", "a" * 40)
-    settings["branch_profiles"]["local-ci-unified"] = "triton_v3.0"
-    assert resolve_task_profile(settings, "local-ci-unified", "a" * 40) == "triton_v3.0"
+        resolve_task_profile(settings, "b" * 40, "3.0.0")
+    settings["profiles"]["alternate"] = {"triton_version": "3.0", "llvm_hash": "a" * 40}
+    with pytest.raises(EnvironmentError, match="Multiple profiles"):
+        resolve_task_profile(settings, "a" * 40, "3.0.0")
 
 
 def test_profiles_use_same_image_without_build_or_control_sha_revalidation(tmp_path):
@@ -308,9 +306,26 @@ def test_profiles_use_same_image_without_build_or_control_sha_revalidation(tmp_p
         state["active_images"].clear()
         for row in state["images"].values():
             row["created_at"] = "2000-01-01T00:00:00Z"
+        state["attempts"]["task"] = {
+            "state": "running", "image_release_id": b["image_release_id"],
+            "variants": {"base": a, "candidate": b},
+        }
+        manager._save(state)
+        assert manager.collect_retired()["removed"] == []
+        state["attempts"]["task"]["state"] = "removed"
         manager._save(state)
         assert len(manager.collect_retired()["removed"]) == 2
         docker.assert_not_called()  # Retiring profiles never deletes the shared image.
+
+
+def test_variant_mounts_reject_a_shared_target_with_different_contents():
+    mount = dict(source="/deps/a", target="/opt/local-ci/runtime/deps/backend",
+                 read_only=True, sha256="a" * 64)
+    with pytest.raises(EnvironmentError, match="Variant dependency mount conflict"):
+        merge_dependency_mounts({
+            "base": {"dependency_mounts": [mount]},
+            "candidate": {"dependency_mounts": [{**mount, "source": "/deps/b", "sha256": "b" * 64}]},
+        })
 
 
 def test_runtime_probe_does_not_execute_wheel_validation_commands(tmp_path):
@@ -338,14 +353,18 @@ def test_runtime_probe_does_not_execute_wheel_validation_commands(tmp_path):
     assert create[create.index("--entrypoint") + 1] == "/bin/sh"
 
 
-def test_task_mounts_expose_only_work_artifacts_and_readonly_control(tmp_path):
+@pytest.mark.parametrize("different_llvm", [False, True])
+def test_task_mounts_expose_only_work_artifacts_and_readonly_control(tmp_path, different_llvm):
     cfg = {
         "runtime": {
             "kind": "docker-rootless",
             "endpoint": "unix:///run/user/1001/docker.sock",
         },
         "resources": {"cpus": 2, "memory_bytes": 1024**3, "pids_limit": 100},
-        "profiles": {"triton_v3.0": {"llvm_hash": "b" * 40}},
+        "profiles": {
+            "triton_v3.0": {"llvm_hash": "b" * 40, "triton_version": "3.0"},
+            "triton_v3.3": {"llvm_hash": "e" * 40, "triton_version": "3.3"},
+        },
     }
     manager = EnvironmentManager(cfg, tmp_path)
     image = dict(
@@ -357,6 +376,8 @@ def test_task_mounts_expose_only_work_artifacts_and_readonly_control(tmp_path):
         env={},
         environment_fingerprint="f",
         daemon_id="d",
+        dependency_mounts=[dict(source="/deps/shared", target="/opt/local-ci/runtime/deps/shared",
+                               read_only=True, sha256="f" * 64)],
     )
     calls = []
 
@@ -367,15 +388,28 @@ def test_task_mounts_expose_only_work_artifacts_and_readonly_control(tmp_path):
     task = dict(
         task_id="a" * 64,
         head_sha="d" * 40,
+        base_sha="a" * 40,
+        tested_sha="d" * 40,
         pr_number=7,
         target_branch="main",
         llvm_hash="b" * 40,
         worker_revision_sha="f" * 40,
         control_policy="worker",
+        variants={
+            "base": dict(source_sha="a" * 40, llvm_hash="e" * 40 if different_llvm else "b" * 40,
+                         triton_version="3.3.0" if different_llvm else "3.0.0"),
+            "candidate": dict(source_sha="d" * 40, llvm_hash="b" * 40, triton_version="3.0.0"),
+        },
     )
+    def environment(profile, llvm):
+        value = {**image, "llvm_hash": llvm, "profile": profile}
+        value["dependency_mounts"] = [*image["dependency_mounts"],
+            dict(source="/deps/llvm-" + llvm, target="/opt/local-ci/runtime/deps/llvm-" + llvm,
+                 read_only=True, sha256=llvm[0] * 64)]
+        return value
     with (
         patch.object(manager, "_control_revision", return_value="c" * 40),
-        patch.object(manager, "ensure_image", return_value=image) as ensure,
+        patch.object(manager, "ensure_image", side_effect=environment) as ensure,
         patch.object(
             manager,
             "_control_mount",
@@ -387,13 +421,13 @@ def test_task_mounts_expose_only_work_artifacts_and_readonly_control(tmp_path):
         patch.object(manager, "_docker", side_effect=docker),
     ):
         handle = manager.acquire_task(task, "run-1")
-    ensure.assert_called_once_with("triton_v3.0", "b" * 40)
+    assert ensure.call_count == (2 if different_llvm else 1)
     assert handle["target_branch"] == "main"
     assert handle["control_revision"] == "c" * 40
     assert handle["profile_branch"] == "triton_v3.0"
     create = next(c for c in calls if c[0] == "create")
     mounts = [create[i + 1] for i, x in enumerate(create) if x == "--mount"]
-    assert len(mounts) == 5
+    assert len(mounts) == (8 if different_llvm else 7)
     assert mounts[0].endswith(",target=/task")
     assert mounts[1].endswith(",target=/task/artifacts")
     assert handle["artifacts_host"] == str(
@@ -404,8 +438,10 @@ def test_task_mounts_expose_only_work_artifacts_and_readonly_control(tmp_path):
     assert all(
         m == "type=bind,source=/control_anchor/" + path + ",target=" + CONTROL_TARGET
         + "/" + path + ",readonly,bind-recursive=disabled"
-        for m, path in zip(mounts[2:], ["scripts", "api_contract", "envsetup.sh"])
+        for m, path in zip(mounts[2:5], ["scripts", "api_contract", "envsetup.sh"])
     )
+    assert sum("target=/opt/local-ci/runtime/deps/shared," in m for m in mounts) == 1
+    assert handle["variants"]["base"]["llvm_hash"] == task["variants"]["base"]["llvm_hash"]
     assert create[create.index("--user") + 1] == "11001:11001"
     assert handle["attempt_id"] == handle["run_id"] == "run-1"
     assert handle["uids"] == {"task": 11001}
@@ -455,7 +491,8 @@ def test_workspace_rejects_partial_and_changed_seed(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fs,
         "manifest",
-        lambda: {"uids": {"task": os.getuid()}, "gids": {"task": os.getgid()}},
+        lambda: {"uids": {"task": os.getuid()}, "gids": {"task": os.getgid()},
+                 "variants": {"candidate": {"environment_fingerprint": "image-1", "env": {}}}},
     )
     with pytest.raises(ValueError, match="Partial or different"):
         fs.prepare_workspace({"environment_fingerprint": "image-1"})

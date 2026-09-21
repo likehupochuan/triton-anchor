@@ -69,6 +69,7 @@ class FakeGitHub:
         self.statuses, self.comments = [], []
         self.latest_statuses, self.writes = {}, []
         self.cmake_files = {"triton/cmake/llvm-hash.txt": b"a" * 40 + b"\n"}
+        self.source_files = {}
         self.content_reads = []
         self.environment = {
             "protection_rules": [
@@ -83,8 +84,10 @@ class FakeGitHub:
         self.approvals = []
 
     def request(self, path, method="GET", data=None):
-        if path == "contents/triton/cmake?ref=" + self.tested:
-            return [{"type": "file", "path": name} for name in self.cmake_files]
+        if path.startswith("contents/triton/cmake?ref="):
+            ref = path.split("ref=", 1)[1]
+            files = self.source_files.get(ref, self.cmake_files)
+            return [{"type": "file", "path": name} for name in files if name.startswith("triton/cmake/")]
         if path == "environments/local-ci-fork-approval":
             return self.environment
         if path == "actions/runs/12345/approvals":
@@ -103,9 +106,11 @@ class FakeGitHub:
         return []
 
     def content(self, path, ref):
-        assert ref == self.tested
+        assert ref in {self.base, self.head, self.tested}
         self.content_reads.append(path)
-        return self.cmake_files[path]
+        if path == g.TRITON_VERSION_PATH:
+            return self.source_files.get(ref, {}).get(path, b"__version__ = '3.0.0'\n")
+        return self.source_files.get(ref, self.cmake_files)[path]
 
     def status(self, task, state, description, url=""):
         self.statuses.append((task["task_id"], state))
@@ -219,6 +224,9 @@ class GatewayBehaviorTests(unittest.TestCase):
         version = self.source / "triton/python/triton/__init__.py"
         version.parent.mkdir(parents=True)
         version.write_text("__version__ = '3.0.0'\n")
+        llvm = self.source / "triton/cmake/llvm-hash.txt"
+        llvm.parent.mkdir(parents=True)
+        llvm.write_text("a" * 40 + "\n")
         (self.source / "README.md").write_text("old\n")
         git(self.source, "add", ".")
         git(self.source, "commit", "-qm", "base")
@@ -327,7 +335,7 @@ class GatewayBehaviorTests(unittest.TestCase):
         ):
             with self.subTest(files=tuple(files)):
                 self.gh.cmake_files = {"triton/cmake/" + name: value for name, value in files.items()}
-                expected_reads = set(self.gh.cmake_files)
+                expected_reads = set(self.gh.cmake_files) | {g.TRITON_VERSION_PATH}
                 self.gh.cmake_files.update({
                     "triton/cmake/amd-llvm-info.json": b"invalid",
                     "triton/cmake/llvm-build-info.json": b"invalid",
@@ -350,6 +358,68 @@ class GatewayBehaviorTests(unittest.TestCase):
                 self.gh.cmake_files = {"triton/cmake/" + name: value for name, value in files.items()}
                 with self.assertRaises(ValueError):
                     g.prepare_task(self.gh, self.base, 7)
+
+    def test_prepare_freezes_and_validates_each_source_environment(self):
+        self.gh.source_files[self.tested] = {
+            "triton/cmake/llvm-info.json": json.dumps({"llvm_hash": "b" * 40}).encode(),
+            g.TRITON_VERSION_PATH: b"__version__ = '3.3.0'\n",
+        }
+        task = g.prepare_task(self.gh, self.base, 7)
+        self.assertEqual(task["variants"], {
+            "base": {"source_sha": self.base, "llvm_hash": "a" * 40, "triton_version": "3.0.0"},
+            "candidate": {"source_sha": self.tested, "llvm_hash": "b" * 40, "triton_version": "3.3.0"},
+        })
+        legacy = {key: value for key, value in task.items() if key != "variants"}
+        self.assertEqual(g.compute_task_id(legacy), task["task_id"])
+        g.validate_task(legacy)
+        for variant, key, value in (
+            ("base", "source_sha", self.head),
+            ("base", "llvm_hash", "invalid"),
+            ("candidate", "triton_version", "3.3"),
+            ("candidate", "llvm_hash", "c" * 40),
+        ):
+            changed = copy.deepcopy(task)
+            changed["variants"][variant][key] = value
+            with self.subTest(variant=variant, key=key), self.assertRaises(ValueError):
+                g.validate_task(changed)
+
+    def test_version_metadata_is_static_and_unambiguous(self):
+        self.assertEqual(g.triton_version_from_source(b"__version__: str = '3.5.1'\n"), "3.5.1")
+        self.assertEqual(g.triton_version_from_source(b"__version__ = '3.8.0.dev20260101'\n"), "3.8.0.dev20260101")
+        for source in (
+            b"__version__ = discover_version()\n",
+            b"__version__ = '3.0.0'\n__version__ = '3.1.0'\n",
+            b"# __version__ = '3.0.0'\n",
+        ):
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                g.triton_version_from_source(source)
+
+    def test_relay_reads_legacy_base_and_verifies_new_variant_metadata(self):
+        from agent_ci.relay import GitRelay
+
+        (self.source / "triton/cmake/llvm-hash.txt").write_text("b" * 40 + "\n")
+        (self.source / g.TRITON_VERSION_PATH).write_text("__version__ = '3.3.0'\n")
+        git(self.source, "commit", "-qam", "upgrade compiler")
+        tested = git(self.source, "rev-parse", "HEAD")
+        task = {key: value for key, value in self.task.items() if key != "variants"}
+        task.update(tested_sha=tested, llvm_hash="b" * 40)
+        original = copy.deepcopy(task)
+        relay = GitRelay(str(self.source), self.root / "relay", allow_local=True)
+        relay.git(["fetch", "origin", self.base, tested])
+        variants = relay.source_variants(task)
+        self.assertEqual(variants["base"], {
+            "source_sha": self.base, "llvm_hash": "a" * 40, "triton_version": "3.0.0",
+        })
+        self.assertEqual(variants["candidate"], {
+            "source_sha": tested, "llvm_hash": "b" * 40, "triton_version": "3.3.0",
+        })
+        self.assertEqual(task, original)
+        self.assertEqual(relay.source_variants({**task, "variants": variants}), variants)
+        for field, value in (("llvm_hash", "c" * 40), ("triton_version", "3.1.0")):
+            changed = copy.deepcopy(variants)
+            changed["base"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "base environment identity"):
+                relay.source_variants({**task, "variants": changed})
 
     def test_prepare_uses_documented_pr_merge_result_and_checks_its_identity(self):
         self.assertEqual(self.task["tested_sha"], self.gh.pull["merge_commit_sha"])

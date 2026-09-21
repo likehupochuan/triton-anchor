@@ -3,6 +3,7 @@
 import argparse
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -128,6 +129,46 @@ def test_install_explicit_wheel(tmp_path):
     assert "--no-deps" in command and command[-1] == str(wheel)
     report = json.loads((tmp_path / "artifacts/frontend_install/installation.json").read_text())
     assert report["sha256"] == actions.digest(wheel)
+
+
+def test_native_and_tool_commands_use_base_environment_without_candidate_leaks(tmp_path, monkeypatch):
+    for key in ("LLVM_BUILD_DIR", "LLVM_BINARY_DIR", "BACKEND_PATH", "PYTHONPATH"):
+        monkeypatch.setenv(key, "/candidate-only")
+    monkeypatch.setenv("HTTPS_PROXY", "http://transport.invalid:8080")
+    setup = tmp_path / "setup.sh"
+    setup.write_text("export LLVM_BUILD_DIR=/wrong LLVM_BINARY_DIR=/wrong LLVM_DIR=/wrong\n")
+    ctx = {
+        "source_dir": str(tmp_path), "artifact_dir": str(tmp_path / "artifacts"),
+        "target_sha": "b" * 40, "variant": "base", "tools_dir": str(ROOT / "tools"),
+        "runtime_env": {"PATH": os.defpath, "PYTHON_BIN": sys.executable,
+                        "LLVM_BUILD_DIR": "/base/llvm", "LLVM_BINARY_DIR": "/base/llvm/bin"},
+        "profile": {"tools": {"env_scripts": [{"path": str(setup)}]}},
+    }
+    context_path = tmp_path / "base-context.json"
+    context_path.write_text(json.dumps(ctx))
+    code = (
+        "import os; "
+        "assert os.environ['LLVM_BUILD_DIR']=='/base/llvm'; "
+        "assert os.environ['LLVM_BINARY_DIR']=='/base/llvm/bin'; "
+        "assert 'LLVM_DIR' not in os.environ; "
+        "assert 'BACKEND_PATH' not in os.environ; "
+        "assert not os.environ.get('PYTHONPATH'); "
+        "assert os.environ['HTTPS_PROXY']=='http://transport.invalid:8080'; "
+        "print('base environment verified')"
+    )
+    argv = [sys.executable, "-c", code]
+    native = subprocess.run(
+        [sys.executable, str(ROOT / "tools/basic_tools/variant_exec.py"),
+         "--context", str(context_path), "--", *argv], capture_output=True, text=True,
+    )
+    assert native.returncode == 0, native.stderr
+    assert "base environment verified" in native.stdout
+    command = {"argv": runner.environment_command(argv, ctx["profile"]["tools"], ctx["tools_dir"]),
+               "cwd": str(tmp_path), "env": {}, "timeout": 5}
+    with patch.object(runner, "plan", return_value={"status": "ready", "reason": "", "commands": [command]}):
+        result = runner.execute("environment", ctx)
+    assert result["status"] == "pass"
+    assert result["variant"] == "base"
 
 
 def test_build_cleanup_keeps_paths_outside_source(tmp_path):
@@ -291,3 +332,31 @@ def test_missing_baseline_is_reported_but_invalid_measurements_fail(tmp_path):
     candidate["summary"]["add"]["compile_est"]["median_ms"] = float("nan")
     with pytest.raises(ValueError, match="Invalid"):
         actions.validate_measurements("compile_time", candidate, ["add"])
+
+
+@pytest.mark.parametrize("same_llvm", [True, False])
+def test_performance_comparison_requires_matching_llvm(tmp_path, same_llvm):
+    ctx = {"artifact_dir": str(tmp_path), "target_sha": "a" * 40, "base_sha": "b" * 40,
+           "environment_fingerprint": "same-runtime",
+           "profile": {"id": "frontend", "llvm_revision": "c" * 40}}
+    measurement = {"summary": {"add": {
+        "all_correct": True, "compile_est": {"median_ms": 2.0, "count": 3},
+    }}}
+    baseline_path = tmp_path / "base.json"
+    actions.write_json(baseline_path, {**measurement, "metadata": {
+        "commit_sha": ctx["base_sha"], "environment_fingerprint": "same-runtime",
+    }})
+    ctx["performance_baselines"] = {"compile_time": {
+        "path": str(baseline_path), "sha256": actions.digest(baseline_path),
+        "base_sha": ctx["base_sha"], "profile_id": "frontend",
+        "llvm_revision": ("c" if same_llvm else "d") * 40,
+        "environment_fingerprint": "same-runtime",
+    }}
+    out = tmp_path / "compile_time"
+    actions.write_json(out / "candidate.json", measurement)
+    with patch.object(actions, "run") as run:
+        actions.compare_performance({"tool_id": "compile_time", "context": ctx, "kernels": ["add"]})
+    assert run.called is same_llvm
+    if not same_llvm:
+        result = json.loads((out / "comparison.json").read_text())
+        assert result["status"] == "not_comparable" and result["reason"] == "llvm_revision_mismatch"

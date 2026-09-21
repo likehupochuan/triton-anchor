@@ -18,6 +18,11 @@ import time
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+if __package__:
+    from .variant_exec import command_environment
+else:
+    from variant_exec import command_environment
+
 BACKEND_TOOLS = frozenset(
     {
         "backend_build",
@@ -532,6 +537,12 @@ def execute(
         "exit_code": None,
         "artifacts": [],
     }
+    if context.get("variant"):
+        result.update(
+            variant=context["variant"],
+            llvm_hash=context.get("profile", {}).get("llvm_revision"),
+            environment_fingerprint=context.get("environment_fingerprint"),
+        )
     if spec["reason"]:
         result["reason"] = spec["reason"]
     if spec["status"] == "ready":
@@ -547,7 +558,7 @@ def execute(
                 try:
                     child = subprocess.Popen(
                         command["argv"], cwd=command["cwd"],
-                        env={**os.environ, **command["env"]},
+                        env=command_environment(context, command["env"]),
                         stdout=log, stderr=subprocess.STDOUT,
                         start_new_session=os.name == "posix",
                     )

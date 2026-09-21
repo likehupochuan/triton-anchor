@@ -75,53 +75,48 @@ def identities(config):
     return {"task": values["task"]}, {"task": values["gid"]}
 
 
-def validate_branch_profiles(config):
-    mappings = config.get("branch_profiles", {})
-    profiles = config.get("profiles", {})
-    if not isinstance(mappings, dict) or not isinstance(profiles, dict):
-        raise EnvironmentError(
-            "branch_profiles must map task branches to configured profile keys"
-        )
-    for branch, profile in mappings.items():
-        if (
-            not isinstance(branch, str)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]{0,254}", branch)
-            or branch in profiles
-            or not isinstance(profile, str)
-            or profile not in profiles
-            or not isinstance(profiles[profile], dict)
-        ):
-            raise EnvironmentError(
-                "branch_profiles needs explicit aliases to existing profiles; "
-                "chains and profile overrides are forbidden"
-            )
-    return dict(mappings)
+def triton_minor_version(version):
+    match = re.fullmatch(r"(\d+\.\d+)(?:\.\d+)?(?:[a-zA-Z0-9.+-]*)", str(version))
+    if not match:
+        raise EnvironmentError("A valid Triton version is required")
+    return match[1]
 
 
-def resolve_task_profile(config, branch, llvm_hash):
-    """Prefer explicit routing; otherwise reuse one configured LLVM environment."""
-    mappings = validate_branch_profiles(config)
+def resolve_task_profile(config, llvm_hash, triton_version):
+    """Select a trusted environment by the frozen source's version and LLVM."""
+    version = triton_minor_version(triton_version)
+    if not SHA_RE.fullmatch(llvm_hash):
+        raise EnvironmentError("Exact source LLVM SHA is required")
     profiles = config.get("profiles", {})
-    if branch in mappings:
-        return mappings[branch]
-    if branch in profiles:
-        return branch
     matches = [
         name for name, profile in profiles.items()
-        if profile.get("llvm_hash") == llvm_hash
-        or llvm_hash in profile.get("llvm", {}).get("revisions", {})
+        if triton_minor_version(profile.get("triton_version", "")) == version
+        and (profile.get("llvm_hash") == llvm_hash
+             or llvm_hash in profile.get("llvm", {}).get("revisions", {}))
     ]
     if len(matches) == 1:
         return matches[0]
     if not matches:
         raise EnvironmentError(
-            f"No configured profile supports LLVM {llvm_hash} for branch {branch}; "
+            f"No configured profile supports LLVM {llvm_hash} for Triton {triton_version}; "
             "prepare a profile with the matching LLVM mount"
         )
     raise EnvironmentError(
-        f"Multiple profiles support LLVM {llvm_hash}: {', '.join(sorted(matches))}; "
-        f"set branch_profiles[{branch!r}] to choose one"
+        f"Multiple profiles support LLVM {llvm_hash} for Triton {triton_version}: "
+        f"{', '.join(sorted(matches))}; configure one unambiguous trusted profile"
     )
+
+
+def merge_dependency_mounts(variants):
+    """Mount identical dependencies once; never silently replace another variant."""
+    merged = {}
+    for variant in variants.values():
+        for mount in variant.get("dependency_mounts", []):
+            target = mount["target"]
+            if target in merged and merged[target] != mount:
+                raise EnvironmentError("Variant dependency mount conflict: " + target)
+            merged[target] = copy.deepcopy(mount)
+    return [merged[target] for target in sorted(merged)]
 
 
 def shared_image(config):
@@ -518,6 +513,7 @@ class EnvironmentManager:
             LOCAL_CI_LLVM_HASH=sha,
             LOCAL_CI_TRITON_VERSION=profile["triton_version"],
             RUN_BACKEND_STAGES="true" if profile.get("backend_enabled") else "false",
+            SEED_PYTHON=ci_python(self.config, env),
         )
         if profile.get("backend_enabled"):
             for key in ("BACKEND_PATH", "PPL_ROOT", "FLAGGEMS_CLONE_DIR"):
@@ -853,10 +849,35 @@ class EnvironmentManager:
             raise EnvironmentError(
                 "Task worker revision differs from installed control"
             )
-        profile_branch = resolve_task_profile(
-            self.config, task["target_branch"], task["llvm_hash"]
-        )
-        image = self.ensure_image(profile_branch, task["llvm_hash"])
+        sources = task.get("variants", {})
+        if set(sources) != {"base", "candidate"}:
+            raise EnvironmentError("Both frozen source variants are required")
+        variants, environments = {}, {}
+        for variant, source_key in (("base", "base_sha"), ("candidate", "tested_sha")):
+            source = sources[variant]
+            if source["source_sha"] != task[source_key]:
+                raise EnvironmentError("Variant source differs from the frozen task")
+            profile_branch = resolve_task_profile(
+                self.config, source["llvm_hash"], source["triton_version"]
+            )
+            identity = (profile_branch, source["llvm_hash"])
+            if identity not in environments:
+                environments[identity] = self.ensure_image(*identity)
+            environment = environments[identity]
+            variants[variant] = {
+                **{key: copy.deepcopy(environment[key]) for key in (
+                    "profile", "image_release_id", "image_id", "llvm_hash",
+                    "backend_enabled", "env", "environment_fingerprint", "daemon_id",
+                )},
+                "dependency_mounts": copy.deepcopy(environment.get("dependency_mounts", [])),
+                **source,
+                "profile_branch": profile_branch,
+                "tools": copy.deepcopy(self.config["profiles"][profile_branch].get("tools", {})),
+            }
+        image = variants["candidate"]
+        if any(v["image_id"] != image["image_id"] for v in variants.values()):
+            raise EnvironmentError("Task variants require the same immutable runtime image")
+        dependency_mounts = merge_dependency_mounts(variants)
         with self._lock(True), self._lock():
             state = self._load()
             self._safe(state)
@@ -892,9 +913,10 @@ class EnvironmentManager:
             handle.update(
                 control_revision=revision,
                 control_mount=control,
-                dependency_mounts=copy.deepcopy(image.get("dependency_mounts", [])),
+                dependency_mounts=dependency_mounts,
+                variants=variants,
                 target_branch=task["target_branch"],
-                profile_branch=profile_branch,
+                profile_branch=image["profile_branch"],
                 task_id=task_id,
                 head_sha=head_sha,
                 run_id=run_id,
@@ -919,6 +941,7 @@ class EnvironmentManager:
                 generation=ident,
                 run_id=run_id,
                 image_release_id=image["image_release_id"],
+                image_release_ids=sorted({v["image_release_id"] for v in variants.values()}),
             )
             self._save(state, "attempt_creating", attempt_id=ident)
             try:
@@ -967,6 +990,7 @@ class EnvironmentManager:
                         "gids",
                         "env",
                         "backend_enabled",
+                        "variants",
                     )
                 }
                 payload["python_bin"] = ci_python(self.config, handle.get("env"))
@@ -1089,7 +1113,7 @@ class EnvironmentManager:
         return self._helper(
             h,
             "prepare-workspace",
-            dict(variant=variant, environment_fingerprint=h["environment_fingerprint"]),
+            dict(variant=variant, environment_fingerprint=h["variants"][variant]["environment_fingerprint"]),
         )
 
     def prepare_native_workspace(self, h):
@@ -1379,6 +1403,12 @@ class EnvironmentManager:
                 for x in state["attempts"].values()
                 if x["state"] != "removed"
             }
+            protected.update(
+                variant["image_release_id"]
+                for attempt in state["attempts"].values()
+                if attempt["state"] != "removed"
+                for variant in attempt.get("variants", {}).values()
+            )
             protected.update(state.get("previous_images", {}).values())
             removed = []
             for ident, row in list(state["images"].items()):

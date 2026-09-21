@@ -1,8 +1,4 @@
 {
-  "branch_profiles": {
-    "CI_dev": "triton_v3.0",
-    "main": "triton_v3.0"
-  },
   "cleanup_timeout_seconds": 60,
   "codex_attempts": 10,
   "codex_bin": "/usr/local/bin/codex",
@@ -104,6 +100,34 @@
       "name": "triton-3.0",
       "triton_version": "3.0",
       "workspace_container": "/workspace"
+    },
+    "triton_v3.1": {
+      "name": "triton-3.1",
+      "triton_version": "3.1",
+      "llvm_hash": "10dc3a8e916d73291269e5e2b82dd22681489aa1",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "local_image_tag": "jiwang-ci/slim-foundation:torch2.8-tpu0.17",
+      "llvm": {
+        "commit": "10dc3a8e916d73291269e5e2b82dd22681489aa1",
+        "mode": "mount"
+      },
+      "env": {
+        "PYTHON_BIN": "/opt/venv/bin/python",
+        "PYTHON_VENV_ACTIVATE": "/opt/venv/bin/activate",
+        "SEED_PYTHON": "/opt/venv/bin/python",
+        "MAX_JOBS": "12",
+        "CMAKE_BUILD_PARALLEL_LEVEL": "8"
+      },
+      "mounts": [
+        {
+          "read_only": true,
+          "sha256": "51d5be74afb88d256cebecccdf0ce8f46cb2a78dc20f9059ec2d7eece4e2f7b3",
+          "source": "/home/jiwang_ci/local_ci/workspace/dependencies/llvm-10dc3a8e916d73291269e5e2b82dd22681489aa1",
+          "target": "/opt/local-ci/runtime/deps/llvm-10dc3a8e916d73291269e5e2b82dd22681489aa1"
+        }
+      ],
+      "devices": []
     },
     "triton_v3.3": {
       "name": "triton-3.3",

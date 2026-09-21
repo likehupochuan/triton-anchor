@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -16,6 +17,8 @@ SHA = re.compile(r"[0-9a-f]{40}\Z")
 ID = re.compile(r"[0-9a-f]{64}\Z")
 RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,159}\Z")
 LLVM_METADATA = re.compile(r"triton/cmake/llvm-(?:hash|info)(?:\.(?:txt|json))?\Z")
+TRITON_VERSION_PATH = "triton/python/triton/__init__.py"
+TRITON_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[a-zA-Z0-9.+-]*)\Z")
 IDENTITY_FIELDS = (
     "repository",
     "event_kind",
@@ -53,6 +56,26 @@ def llvm_hash_from_files(paths, read_file):
     if len(revisions) != 1:
         raise ContractError("Conflicting LLVM commits in triton/cmake metadata")
     return revisions.pop()
+
+
+def triton_version_from_source(source: bytes) -> str:
+    """Read the upstream version declaration without executing candidate code."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError) as exc:
+        raise ContractError("Invalid Triton version source") from exc
+    versions = []
+    for node in tree.body:
+        targets = node.targets if isinstance(node, ast.Assign) else (
+            [node.target] if isinstance(node, ast.AnnAssign) else []
+        )
+        if any(isinstance(target, ast.Name) and target.id == "__version__" for target in targets):
+            if not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str):
+                raise ContractError("Triton __version__ must be a literal string")
+            versions.append(node.value.value)
+    if len(versions) != 1 or not TRITON_VERSION.fullmatch(versions[0]):
+        raise ContractError("Expected one explicit Triton major.minor.patch version")
+    return versions[0]
 
 
 def canonical(value: Any) -> bytes:
@@ -171,6 +194,24 @@ def validate_task(
     ):
         if not isinstance(task[key], str) or not SHA.fullmatch(task[key]):
             raise ContractError(f"Invalid {key}")
+    if "variants" in task:
+        variants = task["variants"]
+        if not isinstance(variants, dict) or set(variants) != {"base", "candidate"}:
+            raise ContractError("Task needs base and candidate source variants")
+        for variant, source_sha in (("base", task["base_sha"]), ("candidate", task["tested_sha"])):
+            source = variants[variant]
+            if (
+                not isinstance(source, dict)
+                or set(source) != {"source_sha", "llvm_hash", "triton_version"}
+                or source.get("source_sha") != source_sha
+                or not isinstance(source.get("llvm_hash"), str)
+                or not SHA.fullmatch(source["llvm_hash"])
+                or not isinstance(source.get("triton_version"), str)
+                or not TRITON_VERSION.fullmatch(source["triton_version"])
+            ):
+                raise ContractError(f"Invalid {variant} source variant")
+        if task["llvm_hash"] != variants["candidate"]["llvm_hash"]:
+            raise ContractError("Task LLVM alias differs from candidate source variant")
     if type(task["draft"]) is not bool or type(task["full"]) is not bool:
         raise ContractError("Task draft/full must be booleans")
     if not isinstance(task["labels"], list) or any(

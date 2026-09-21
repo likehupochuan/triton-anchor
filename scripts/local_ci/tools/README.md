@@ -55,6 +55,19 @@ pytest 参数为 `paths`（相对路径或 node ID）、`keyword`；FlagGems 为
 不要拆批规避上限。full 保留完整算子目录，每个算子仍可包含多个参数化用例。
 
 普通 pytest 输出简单计数，失败、空收集和全部跳过都不会显示为通过。
+Worker 为 base/candidate 分别提供完整 `runtime_env`、LLVM、profile、能力与环境指纹。
+基础工具只继承调用端的网络代理／证书设置，构建环境由选中的 context 提供；不能借用另一侧
+的后端、LLVM 或 Python 搜索路径。原生 shell 使用同一环境入口：
+
+```bash
+"$LOCAL_CI_SEED_PYTHON" /opt/local-ci/control/scripts/local_ci/tools/basic_tools/variant_exec.py \
+  --context /task/artifacts/base-context.json -- bash -c '"$PYTHON_BIN" -m pytest tests/test_example.py'
+```
+
+后端原生命令加 `--backend`，会校验该 variant 的能力并加载其后端脚本。只读依赖可共享，
+两边 venv、构建、缓存与产物目录始终独立。缺少 `runtime_env` 的旧独立工具 context 继续
+使用原调用环境；Worker 新生成的 context 始终提供完整环境。
+
 性能基线由 `performance_baselines[tool_id]` 指定文件、提交与环境信息；比较时核对
 后端、算子和采样条件。没有可比基线时报告 `not_comparable`；有效性能回退只报告，
 测量无效或正确性失败则返回失败。

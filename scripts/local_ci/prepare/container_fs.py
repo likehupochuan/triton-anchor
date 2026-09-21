@@ -222,8 +222,9 @@ def import_checkout(params, stream):
     ):
         raise ValueError("Imported checkout differs from frozen commit")
     set_tree_identity(destination, data["uids"]["task"], data["gids"]["task"])
-    backend = data.get("env", {}).get("BACKEND_PATH")
-    if data.get("backend_enabled") and backend:
+    runtime = data["variants"][variant]
+    backend = runtime.get("env", {}).get("BACKEND_PATH")
+    if runtime.get("backend_enabled") and backend:
         target = checked(TASK, variant + "/backend")
         shutil.copytree(backend, target, symlinks=True)
         set_tree_identity(target, data["uids"]["task"], data["gids"]["task"])
@@ -331,6 +332,9 @@ def prepare_workspace(params):
         raise ValueError("Unknown task data version")
     root = checked(TASK, variant, exists=True)
     fingerprint = params["environment_fingerprint"]
+    runtime = data["variants"][variant]
+    if fingerprint != runtime["environment_fingerprint"]:
+        raise ValueError("Workspace differs from its frozen variant environment")
     venv = root / "venv"
     marker = venv / ".local-ci-environment.json"
     expected = {"environment_fingerprint": fingerprint}
@@ -344,13 +348,13 @@ def prepare_workspace(params):
         ):
             raise ValueError("Partial or different task venv requires a new run")
     else:
-        seed_venv(root, {**data.get("env", {}), "SEED_PYTHON": ci_python({"container_python": data.get("python_bin")}, data.get("env"))})
+        seed_venv(root, runtime["env"])
         write(marker, json.dumps(expected, sort_keys=True).encode(), mode=0o644)
         set_tree_identity(venv, data["uids"]["task"], data["gids"]["task"])
     for name in ("home", "tmp", "cache", "state"):
         (root / name).mkdir(exist_ok=True)
         own(root / name, data["uids"]["task"], data["gids"]["task"], 0o755)
-    flaggems = data.get("env", {}).get("FLAGGEMS_CLONE_DIR")
+    flaggems = runtime["env"].get("FLAGGEMS_CLONE_DIR")
     if flaggems:
         write(
             root / "home/.gitconfig",

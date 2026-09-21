@@ -58,13 +58,14 @@ FlagGems；非 full 最多 6 个不同算子，空 impact 使用固定六个代�
 
 每任务一个 Rootless Docker 容器、一个非 root 用户，Codex 与构建测试共享任务环境。
 只读挂载可信控制代码和服务器依赖，源码、venv、编译输出及缓存写入任务目录。
-candidate/base 使用冻结提交和独立环境；基线源码已提供，是否构建比较由 Codex 决定。
+candidate/base 分别冻结源码声明的 LLVM SHA 与 Triton 版本，按 LLVM 和 Triton major.minor 选择可信 profile，生成各自的 context、环境变量、后端能力与 fingerprint。相同只读依赖可复用，checkout、venv、build/cache/artifacts 保持隔离；基线源码已提供，是否构建比较由 Codex 决定，一旦执行 base 必须使用 base 自己的环境。性能环境不可比时报告 `not_comparable`。
 后端 wheel 在任务内重新构建。`/tmp` 允许动态库加载，编译缓存优先使用 `/task`。
 
 FlagGems 使用服务器 profile 中的固定只读依赖；修改 PR 中的 FlagGems 子模块指针
 不会改变该依赖。其他子模块仍通过 Gitee 固定到对应提交。
-所有 PR 目标分支都可派发。服务器优先使用 `branch_profiles` 或同名 profile；没有显式选择时，
-按被测源码的 LLVM SHA 唯一匹配已配置环境，无需为每个新分支补映射。
+所有 PR 目标分支都可派发；环境选择不依赖分支名，`branch_profiles` 已停用。
+两侧都必须唯一匹配已配置的源码版本与 LLVM 环境，不用 candidate 环境代替 base。
+后端能力仍只对已验证的 Triton 3.0 开启；同 LLVM 的 3.1 只复用 LLVM 安装，不继承 3.0 后端能力。
 
 Worker 轮询任务有效性，PR 关闭、转 Draft、更换目标或增加提交时停止旧容器。
 Codex 短暂中断可恢复同一 CLI 会话；Worker 重启会清理未完成容器并新建任务运行，
@@ -131,6 +132,7 @@ python3 scripts/local_ci/prepare/install.py \
 ```
 
 空服务器使用[服务器准备](prepare/README.md)中的独立引导脚本和经审核的精确控制提交 SHA 自动创建 checkout，再调用同一正式安装器。安装入口准备环境并启动 Worker、控制仓更新和必要维护定时器；不需要工具服务或独立调度控制台。
+支持版本的 LLVM 清单、尚待填写的真实挂载摘要以及服务器部署验收步骤见 [LLVM 变体环境部署](prepare/VARIANT_LLVM_DEPLOYMENT.md)。
 详见 [服务器准备](prepare/README.md)、[维护](maintenance/README.md)
 与 [GitHub 配置](../ci/README.md)。新 PR 任务使用 `control_policy=worker`，不绑定控制提交；网关记录的 `worker_revision_sha` 仅作来源记录，不参与该类任务 ID，Worker 使用已安装的可信控制代码，并在结果 `environment.control_revision` 记录实际版本。源码 head/base/tested、LLVM 与 PR 信息仍按原规则冻结。旧任务身份保持兼容；手动分支等固定版本任务要求不同控制版本时，在释放任务锁后将任务身份和 SHA 原子写入单一 `control-update/request.json`，再触发一次 `control-update.service`。多个等待版本按控制仓祖先顺序选择最早的前向提交。更新只允许从配置的 Gitee `control_anchor` 镜像快进到任务指定提交，在同一次 Worker 重启前同步该提交的配置；Worker 检查进程与磁盘版本一致，任务执行期间不会切换控制版本。没有需要更新的新任务时不轮询控制仓，也不定时追随分支最新提交。
 

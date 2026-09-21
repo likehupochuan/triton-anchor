@@ -15,6 +15,8 @@ from .protocol import (
     PREINSTALLED_SUBMODULES,
     ContractError,
     llvm_hash_from_files,
+    TRITON_VERSION_PATH,
+    triton_version_from_source,
     current_key,
     result_task_prefix,
     result_task_prefixes,
@@ -216,18 +218,37 @@ class GitRelay:
                     or self.ref_sha(module["task_ref"]) != module["sha"]
                 ):
                     return False, "Pinned Gitee submodule snapshot changed"
-        paths = self.git(
-            ["ls-tree", "-r", "--name-only", "-z", task["tested_sha"], "--", "triton/cmake/"]
-        ).stdout.decode().split("\0")
         try:
-            llvm = llvm_hash_from_files(
-                paths, lambda path: self.git(["show", f"{task['tested_sha']}:{path}"]).stdout
-            )
-        except ValueError as exc:
-            return False, f"Invalid tested LLVM metadata: {exc}"
-        if llvm != task["llvm_hash"]:
-            return False, "Task LLVM identity does not match tested source"
+            self.source_variants(task)
+        except (ValueError, RuntimeError) as exc:
+            return False, f"Invalid source environment metadata: {exc}"
         return True, "current"
+
+    def source_variants(self, task: dict) -> dict:
+        """Verify both frozen sources, including base metadata absent in old tasks."""
+        variants = {}
+        for variant, sha in (("base", task["base_sha"]), ("candidate", task["tested_sha"])):
+            try:
+                paths = self.git(
+                    ["ls-tree", "-r", "--name-only", "-z", sha, "--", "triton/cmake/"]
+                ).stdout.decode().split("\0")
+                source = {
+                    "source_sha": sha,
+                    "llvm_hash": llvm_hash_from_files(
+                        paths, lambda path: self.git(["show", f"{sha}:{path}"]).stdout
+                    ),
+                    "triton_version": triton_version_from_source(
+                        self.git(["show", f"{sha}:{TRITON_VERSION_PATH}"]).stdout
+                    ),
+                }
+            except (ValueError, RuntimeError) as exc:
+                raise ContractError(f"Cannot read {variant} LLVM/Triton metadata: {exc}") from exc
+            if "variants" in task and source != task["variants"].get(variant):
+                raise ContractError(f"Task {variant} environment identity does not match frozen source")
+            variants[variant] = source
+        if variants["candidate"]["llvm_hash"] != task["llvm_hash"]:
+            raise ContractError("Task LLVM identity does not match tested source")
+        return variants
 
     def checkout(self, sha: str, destination: Path) -> None:
         if destination.exists():
