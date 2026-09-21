@@ -29,7 +29,8 @@
   "monitor_services": [
     "triton-anchor-local-ci.service",
     "triton-anchor-local-ci-health.timer",
-    "triton-anchor-local-ci-watchdog.timer"
+    "triton-anchor-local-ci-health.service",
+    "triton-anchor-local-ci-control-update.service"
   ],
   "poll_interval_seconds": 60,
   "profiles": {
@@ -206,5 +207,14 @@
   "schema": "triton-anchor-local-ci-config",
   "state_dir": "/home/jiwang_ci/local_ci/state",
   "task_workspace_max_bytes": 107374182400,
-  "worker_id": "jiwang-ci-race-1"
+  "worker_id": "jiwang-ci-race-1",
+  "execution_attempts": 3,
+  "codex_session_switches": 1,
+  "codex_resume_no_progress_attempts": 2,
+  "recovery_timeout_seconds": 21600,
+  "sealing_attempts": 3,
+  "publish_fast_attempts": 5,
+  "publish_retry_interval_seconds": 3600,
+  "progress_warning_seconds": 1800,
+  "progress_stalled_seconds": 3600
 }

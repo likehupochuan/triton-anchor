@@ -24,11 +24,7 @@ from prepare.preflight import check_configuration
 from prepare.runtime import EnvironmentManager
 from prepare.runtime_probe import probe_runtime
 from prepare.deployment_config import load_deployment_config, sync_deployment_config
-
-
-OBSOLETE_UNITS = (
-    "triton-anchor-local-ci-control-update.timer",
-)
+from prepare.service_units import OBSOLETE_UNITS, retire_obsolete_units
 
 
 def quoted(value: str) -> str:
@@ -91,15 +87,6 @@ def render_units(
     )
     units["triton-anchor-local-ci-retention.timer"] = (
         "[Unit]\nDescription=Daily Local CI result retention\n\n[Timer]\nOnBootSec=30min\nOnUnitActiveSec=1d\nPersistent=true\nRandomizedDelaySec=5min\n\n[Install]\nWantedBy=timers.target\n"
-    )
-    watchdog = f"{python} {quoted(str(root / 'maintenance/watchdog.py'))} --config {quoted(str(config_path))} --publish"
-    units["triton-anchor-local-ci-watchdog.service"] = (
-        "[Unit]\nDescription=Observe public health on the CI host\n\n[Service]\nType=oneshot\n"
-        + common
-        + f"ExecStart={watchdog}\nTimeoutStartSec=5min\n"
-    )
-    units["triton-anchor-local-ci-watchdog.timer"] = (
-        "[Unit]\nDescription=Independent same-host watchdog\n\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=5min\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n"
     )
     return units
 
@@ -298,18 +285,7 @@ def main():
                 / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             )
             manifest = install_units(units, Path(args.unit_dir), backup)
-            installed_obsolete = [
-                name
-                for name in OBSOLETE_UNITS
-                if manifest["units"][name]["existed"]
-            ]
-            if installed_obsolete:
-                subprocess.run(
-                    ["systemctl", "--user", "disable", "--now", *installed_obsolete],
-                    check=True,
-                )
-            for name in OBSOLETE_UNITS:
-                (Path(args.unit_dir) / name).unlink(missing_ok=True)
+            retire_obsolete_units(Path(args.unit_dir), reload=False)
             subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
             services = ["triton-anchor-local-ci.service"] + [
                 name for name in units if name.endswith(".timer")

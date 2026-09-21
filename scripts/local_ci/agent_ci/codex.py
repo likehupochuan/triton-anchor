@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -25,6 +26,24 @@ class CodexDriver:
             if len(v) > 3
             and any(x in k.upper() for x in ("TOKEN", "SECRET", "PASSWORD", "API_KEY"))
         }
+        # Restart sealing may run before any new CLI launch; load redaction values
+        # without requiring credentials to be currently usable for execution.
+        home = Path(config.get("codex_home") or os.environ.get("CODEX_AI_CI_HOME", ""))
+        if home.is_absolute():
+            try:
+                self.remember(json.loads((home / "auth.json").read_text()))
+            except (OSError, ValueError):
+                pass
+
+    def remember(self, value):
+        if isinstance(value, str) and len(value) > 3:
+            self.secrets.add(value)
+        elif isinstance(value, dict):
+            for item in value.values():
+                self.remember(item)
+        elif isinstance(value, list):
+            for item in value:
+                self.remember(item)
 
     def redact(self, text):
         for value in sorted(self.secrets, key=len, reverse=True):
@@ -43,6 +62,8 @@ class CodexDriver:
                 status = "auth_error"
             elif re.search(r"\b429\b|rate limit|quota exceeded", message):
                 status = "rate_limited"
+            elif re.search(r"session (?:not found|does not exist|invalid)|thread (?:not found|does not exist)", message):
+                status = "session_invalid"
             elif re.search(r"connection|reconnect|network|timed? out|timeout|error sending request|stream disconnected|dns", message):
                 status = "connection_error"
             self.health = {**self.health, "codex_status": status}
@@ -60,10 +81,38 @@ class CodexDriver:
             if k in {"PATH", "HOME", "XDG_RUNTIME_DIR", "DOCKER_CONFIG", "LANG"}
         }
 
-    def run(self, executor, *, cancelled, deadline, recovery=""):
+    def check_credentials(self):
+        return validate_credentials(
+            Path(self.config.get("codex_home") or os.environ.get("CODEX_AI_CI_HOME", "")),
+            Path.home() / ".codex",
+        )
+
+    def credentials_fingerprint(self):
+        """Local change detector only; never include this digest in public health."""
+        home = Path(self.config.get("codex_home") or os.environ.get("CODEX_AI_CI_HOME", ""))
+        digest = hashlib.sha256()
+        for name in ("auth.json", "config.toml"):
+            try:
+                digest.update((home / name).read_bytes())
+            except OSError:
+                digest.update(b"missing:" + name.encode())
+        try:
+            provider_keys = re.findall(
+                r"(?m)^\s*env_key\s*=\s*[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']",
+                (home / "config.toml").read_text(),
+            )
+        except OSError:
+            provider_keys = []
+        for key in sorted(set(provider_keys) | {"OPENAI_API_KEY", "OPENAI_BASE_URL"}):
+            digest.update(key.encode() + b"=" + os.environ.get(key, "").encode())
+        return digest.hexdigest()
+
+    def run(self, executor, *, cancelled, deadline, recovery="", session_mode="resume_if_available"):
+        if session_mode not in {"resume_if_available", "new"}:
+            raise ValueError("Unknown Codex session mode")
         self.health = {
             "codex_status": "starting", "codex_alive": False,
-            "last_progress_at": time.time(),
+            "last_progress_at": None,
         }
         home = validate_credentials(
             Path(
@@ -76,17 +125,7 @@ class CodexDriver:
             for name in ("config.toml", "auth.json")
         }
 
-        def remember(value):
-            if isinstance(value, str) and len(value) > 3:
-                self.secrets.add(value)
-            elif isinstance(value, dict):
-                for item in value.values():
-                    remember(item)
-            elif isinstance(value, list):
-                for item in value:
-                    remember(item)
-
-        remember(json.loads(files["auth.json"]))
+        self.remember(json.loads(files["auth.json"]))
         program = (
             Path(self.config["control_root"]) / "scripts/local_ci/AI_CI_PROGRAM.md"
         ).read_text()
@@ -118,8 +157,11 @@ class CodexDriver:
         executor.deploy_session(files, env)
         saved = executor.run_dir / "codex-session.json"
         session_id = (
-            json.loads(saved.read_text()).get("session_id") if saved.exists() else None
+            json.loads(saved.read_text()).get("session_id") if saved.exists() and session_mode != "new" else None
         )
+        if session_mode == "new" and saved.exists():
+            previous = json.loads(saved.read_text()).get("session_id")
+            atomic_json(saved, {"session_id": None, "previous_session_id": previous})
         arguments = [
             "-c",
             'approval_policy="never"',
@@ -223,13 +265,6 @@ class CodexDriver:
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
-            return {
-                "exit_code": process.returncode,
-                "reason": reason,
-                "session_id": json.loads(saved.read_text()).get("session_id")
-                if saved.exists()
-                else None,
-            }
         finally:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)
@@ -241,6 +276,19 @@ class CodexDriver:
                 status = reason
             elif process.returncode == 0:
                 status = "succeeded"
-            elif status not in {"connection_error", "auth_error", "rate_limited"}:
+            elif status not in {"connection_error", "auth_error", "rate_limited", "session_invalid"}:
                 status = "failed"
             self.health = {**self.health, "codex_status": status, "codex_alive": False}
+
+        return {
+            "exit_code": process.returncode,
+            "reason": reason,
+            "failure_code": {
+                "connection_error": "connection", "auth_error": "authentication",
+                "rate_limited": "rate_limit", "session_invalid": "session_invalid",
+            }.get(self.health["codex_status"], "cli_failed" if process.returncode else ""),
+            "session_reused": bool(session_id),
+            "session_id": json.loads(saved.read_text()).get("session_id") if saved.exists() else None,
+            "progressed": self.health.get("last_progress_at") is not None,
+            "last_progress_at": self.health.get("last_progress_at"),
+        }

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -53,48 +54,78 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
     stale = not heartbeat or now - heartbeat > int(
         config.get("heartbeat_stale_seconds", 180)
     )
-    tasks, uploads = [], []
-    for file in run_state_paths(state):
+    tasks, recent_tasks, uploads, events = [], [], [], []
+    tasks_available = (state / "runs").is_dir() and os.access(state / "runs", os.R_OK | os.X_OK)
+    try:
+        state_paths = run_state_paths(state)
+    except OSError:
+        tasks_available, state_paths = False, []
+    for file in state_paths:
         try:
             record = json.loads(file.read_text())
-            if record.get("abandoned") or record.get("phase") == "published":
+            if not isinstance(record, dict):
+                raise ValueError("Invalid local task state")
+            if record.get("abandoned") and record.get("phase") not in {"publish_pending", "published"}:
                 continue
+            try:
+                manifest = json.loads(file.with_name("task.json").read_text())
+                if not isinstance(manifest, dict):
+                    raise ValueError("Invalid local task manifest")
+            except (OSError, ValueError):
+                tasks_available = False
+                manifest = {}
+            budget = dict(record.get("budget") or {})
+            budget.update(codex_attempts_limit=config.get("codex_attempts", 10),
+                          execution_attempts_limit=config.get("execution_attempts", 3),
+                          session_switches_limit=config.get("codex_session_switches", 1))
             task = {
                 "task_id": record.get("task_id", file.parent.parent.name),
-                "head_sha": record.get("head_sha"),
-                "run_id": file.parent.name,
+                "repository": manifest.get("repository"),
+                "head_sha": manifest.get("head_sha", record.get("head_sha")),
+                "tested_sha": manifest.get("tested_sha"),
+                "pr_number": manifest.get("pr_number", 0),
+                "run_id": record.get("run_id", file.parent.name),
                 "stage": record.get("phase", "preparing"),
-                "updated_at": iso(record["updated"])
-                if isinstance(record.get("updated"), (int, float))
-                else record.get("updated_at"),
+                "updated_at": record.get("updated", record.get("updated_at")),
+                "last_progress_at": record.get("last_progress_at"),
+                "progress_state": record.get("progress_state"),
+                "budget": budget,
+                "recovery": record.get("recovery") or {},
+                "result_status": (record.get("detail") or {}).get("result_status"),
             }
-            tasks.append(task)
+            updated = record.get("updated", 0)
+            if task["stage"] == "published":
+                if isinstance(updated, (int, float)) and now - 7 * 86400 <= updated <= now:
+                    recent_tasks.append(task)
+            else:
+                tasks.append(task)
+            for event in record.get("events", []):
+                if (isinstance(event, dict) and event.get("kind") in {"recovery", "phase"}
+                        and type(event.get("at")) in (int, float)
+                        and now - 7 * 86400 <= event["at"] <= now):
+                    events.append({**event, "task_id": task["task_id"], "run_id": event.get("run_id", task["run_id"])})
             if task["stage"] == "publish_pending":
-                uploads.append(
-                    {
-                        "task_id": task["task_id"],
-                        "queued_at": iso(record["delivery"]["queued_at"])
-                        if isinstance((record.get("delivery") or {}).get("queued_at"), (int, float))
-                        else task["updated_at"],
-                        "attempts": (record.get("delivery") or {}).get("attempts", 0),
-                    }
-                )
-        except (OSError, ValueError):
+                delivery = record.get("delivery") or {}
+                recovery = record.get("recovery") or {}
+                uploads.append({
+                    "task_id": task["task_id"], "run_id": task["run_id"],
+                    "queued_at": delivery.get("queued_at", task["updated_at"]),
+                    "attempts": delivery.get("attempts", 0),
+                    "next_retry_at": delivery.get("next_retry_at", recovery.get("next_retry_at")),
+                    "failure_code": recovery.get("failure_code"),
+                })
+        except (OSError, ValueError, TypeError):
+            tasks_available = False
             continue
-    active = next(
-        (entry for entry in tasks if entry["stage"] == "running"),
-        tasks[0] if tasks else None,
-    )
+    tasks.sort(key=lambda row: row["updated_at"] if type(row.get("updated_at")) in (int, float) else 0, reverse=True)
+    recent_tasks.sort(key=lambda row: row["updated_at"], reverse=True)
+    active = next((entry for entry in tasks if entry["stage"] == "running"), tasks[0] if tasks else None)
     if (active and active["stage"] == "running" and alive and not stale
-            and worker.get("active_task") == active["task_id"]):
+            and worker.get("active_task") == active["task_id"]
+            and worker.get("active_run_id", active["run_id"]) == active["run_id"]):
         for key in ("last_progress_at", "codex_alive", "codex_status"):
-            if key in worker:
-                value = worker[key]
-                active[key] = (
-                    iso(value)
-                    if key.endswith("_at") and isinstance(value, (int, float))
-                    else value
-                )
+            if key in worker and (key != "last_progress_at" or worker[key] is not None):
+                active[key] = worker[key]
     roots = {str(state)}
     storage = []
     for root in sorted(roots):
@@ -168,7 +199,7 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
                     "--user",
                     "show",
                     name,
-                    "--property=LoadState,ActiveState,SubState,Result",
+                    "--property=LoadState,ActiveState,SubState,Result,Type",
                 ],
                 text=True,
                 capture_output=True,
@@ -183,6 +214,7 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
                 active_state=fields.get("ActiveState", "unknown"),
                 sub_state=fields.get("SubState", "unknown"),
                 result=fields.get("Result", "unknown"),
+                type=fields.get("Type", "timer" if name.endswith(".timer") else "unknown"),
             )
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -244,6 +276,13 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
         },
         "active_task": active,
         "tasks": tasks,
+        "tasks_available": tasks_available,
+        "uploads_available": tasks_available,
+        "recent_tasks": recent_tasks[:20],
+        "events": events,
+        "thresholds": {"progress_warning_seconds": config.get("progress_warning_seconds", 1800),
+                       "progress_stalled_seconds": config.get("progress_stalled_seconds", 3600),
+                       "upload_seconds": 1200},
         "uploads": uploads,
         "environments": environments,
         "workspaces": workspaces,
@@ -269,6 +308,11 @@ def public_snapshot(snapshot):
         )
 
     def instant(value):
+        if type(value) in (int, float):
+            try:
+                return iso(value) if value >= 0 else None
+            except (ValueError, OverflowError, OSError):
+                return None
         try:
             return (
                 value
@@ -288,26 +332,106 @@ def public_snapshot(snapshot):
             else None
         )
 
+    def flag(value):
+        return value if type(value) is bool else None
+
+    def code(value):
+        return value if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", value) else None
+
+    def failure_code(value):
+        return value if value in {
+            "recovery_exhausted", "sealing_failed", "authentication", "connection", "rate_limit",
+            "session_invalid", "cli_failed", "result_missing", "environment_unavailable",
+            "cleanup_unconfirmed", "container_failed", "container_oom", "execution_interrupted", "disk_budget",
+            "runtime_unavailable", "configuration_invalid", "publish_failed", "delivery_failed", "timeout", "control_update_failed"
+        } else None
+
+    def recovery(row):
+        row = row if isinstance(row, dict) else {}
+        return {
+            "state": row.get("state") if row.get("state") in {
+                "normal", "retry_wait", "waiting_dependency", "recovering", "recovered", "exhausted"
+            } else "unknown",
+            "failure_code": failure_code(row.get("failure_code")),
+            "action": row.get("action") if row.get("action") in {
+                "resume", "new_session", "rebuild", "wait_dependency", "retry_sealing", "retry_publish",
+                "resume_codex", "new_codex_session", "rebuild_execution", "defer_wait_dependency", "no_retry",
+                "wait_credentials", "wait_runtime", "publish_infra_error", "continue_sealing", "published"
+            } else None,
+            "next_retry_at": instant(row.get("next_retry_at")),
+            "last_recovery_at": instant(row.get("last_recovery_at")),
+            "outcome": row.get("outcome") if row.get("outcome") in {
+                "pending", "running", "success", "failed", "recovered", "exhausted", "waiting"
+            } else None,
+        }
+
     def task(row):
+        budget = row.get("budget") if isinstance(row.get("budget"), dict) else {}
         return {
             "task_id": identifier(row.get("task_id")),
             "run_id": identifier(row.get("run_id")),
+            "repository": row.get("repository") if isinstance(row.get("repository"), str)
+            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", row["repository"]) else None,
+            "head_sha": row.get("head_sha") if isinstance(row.get("head_sha"), str)
+            and re.fullmatch(r"[0-9a-f]{40}", row["head_sha"]) else None,
+            "tested_sha": row.get("tested_sha") if isinstance(row.get("tested_sha"), str)
+            and re.fullmatch(r"[0-9a-f]{40}", row["tested_sha"]) else None,
+            "pr_number": number(row.get("pr_number")),
+            "budget": {**{k: number(budget.get(k)) for k in (
+                "codex_attempts_used", "execution_attempts_used", "session_switches",
+                "codex_attempts_limit", "execution_attempts_limit", "session_switches_limit")},
+                **{k: instant(budget.get(k)) for k in ("codex_deadline_at", "recovery_deadline_at")}},
+            "recovery": recovery(row.get("recovery")),
+            "result_status": row.get("result_status") if row.get("result_status") in {
+                "pass", "fail", "infra_error", "cancelled"
+            } else None,
             "stage": row.get("stage")
             if row.get("stage")
             in {"preparing", "running", "sealing", "publish_pending", "published"}
             else "unknown",
             "updated_at": instant(row.get("updated_at")),
             "last_progress_at": instant(row.get("last_progress_at")),
+            "progress_state": row.get("progress_state") if row.get("progress_state") in {"normal", "delayed", "stalled_review"} else "unknown",
             "codex_alive": row.get("codex_alive")
             if type(row.get("codex_alive")) is bool
             else None,
             "codex_status": row.get("codex_status")
             if row.get("codex_status") in {
                 "starting", "running", "retrying", "connection_error", "auth_error",
-                "rate_limited", "failed", "succeeded", "cancelled", "timeout",
+                "rate_limited", "session_invalid", "failed", "succeeded", "cancelled", "timeout",
             }
             else None,
         }
+
+    events = []
+    counts, seen_events = {}, set()
+    collected = instant(snapshot.get("collected_at"))
+    observed_at = datetime.fromisoformat(collected.replace("Z", "+00:00")).timestamp() if collected else time.time()
+    raw_events = [r for r in snapshot.get("events", []) if isinstance(r, dict)]
+    for event in sorted(raw_events, key=lambda row: str(instant(row.get("at")) or ""), reverse=True):
+        at = instant(event.get("at"))
+        if not at or event.get("kind") not in {"recovery", "phase"}:
+            continue
+        seconds = datetime.fromisoformat(at.replace("Z", "+00:00")).timestamp()
+        task_id = identifier(event.get("task_id"))
+        if not observed_at - 7 * 86400 <= seconds <= observed_at or counts.get(task_id, 0) >= 20:
+            continue
+        detail = event.get("detail") if isinstance(event.get("detail"), dict) else {}
+        clean = {"at": at, "task_id": task_id, "run_id": identifier(event.get("run_id")),
+                 "kind": event["kind"], "detail": {k: v for k, v in recovery(detail).items()
+                 if k in {"state", "failure_code", "action", "outcome"} and v is not None}}
+        clean["detail"]["attempt"] = number(detail.get("attempt"))
+        clean["detail"]["execution_attempt"] = number(detail.get("execution_attempt"))
+        if detail.get("phase") in {"preparing", "running", "sealing", "publish_pending", "published"}:
+            clean["detail"]["phase"] = detail["phase"]
+        clean["id"] = hashlib.sha256(json.dumps(clean, sort_keys=True).encode()).hexdigest()[:16]
+        if clean["id"] in seen_events:
+            continue
+        seen_events.add(clean["id"])
+        events.append(clean)
+        counts[task_id] = counts.get(task_id, 0) + 1
+        if len(events) >= 100:
+            break
 
     poller = snapshot.get("poller", {})
     runtime = snapshot.get("runtime", {})
@@ -322,9 +446,9 @@ def public_snapshot(snapshot):
         if snapshot.get("state") in {"healthy", "busy", "offline"}
         else "unknown",
         "poller": {
-            "alive": poller.get("alive") is True,
+            "alive": flag(poller.get("alive")),
             "heartbeat_at": instant(poller.get("heartbeat_at")),
-            "heartbeat_stale": poller.get("heartbeat_stale") is True,
+            "heartbeat_stale": flag(poller.get("heartbeat_stale")),
             "last_poll_status": poller.get("last_poll_status")
             if poller.get("last_poll_status") in {"error", "success"}
             else "unknown",
@@ -346,8 +470,8 @@ def public_snapshot(snapshot):
         },
         "runtime": {
             "kind": "docker-rootless",
-            "available": runtime.get("available") is True,
-            "rootless": runtime.get("rootless") is True,
+            "available": flag(runtime.get("available")),
+            "rootless": flag(runtime.get("rootless")),
         },
         "environments": {
             "unavailable": bool(
@@ -373,14 +497,22 @@ def public_snapshot(snapshot):
             "pause_intake": snapshot.get("workspaces", {}).get("pause_intake") is True,
         },
         "tasks": [task(r) for r in snapshot.get("tasks", []) if isinstance(r, dict)],
+        "tasks_available": flag(snapshot.get("tasks_available")),
+        "uploads_available": flag(snapshot.get("uploads_available")),
+        "recent_tasks": [task(r) for r in snapshot.get("recent_tasks", []) if isinstance(r, dict)][:20],
+        "events": list(reversed(events)),
+        "thresholds": {k: number(snapshot.get("thresholds", {}).get(k)) for k in (
+            "progress_warning_seconds", "progress_stalled_seconds", "upload_seconds")},
         "active_task": task(snapshot["active_task"])
         if isinstance(snapshot.get("active_task"), dict)
         else None,
         "uploads": [
             {
-                "task_id": identifier(r.get("task_id")),
+                "task_id": identifier(r.get("task_id")), "run_id": identifier(r.get("run_id")),
                 "queued_at": instant(r.get("queued_at")),
                 "attempts": number(r.get("attempts")),
+                "next_retry_at": instant(r.get("next_retry_at")),
+                "failure_code": failure_code(r.get("failure_code")),
             }
             for r in snapshot.get("uploads", [])
             if isinstance(r, dict)
@@ -410,10 +542,31 @@ def public_snapshot(snapshot):
             for r in snapshot.get("images", [])
             if isinstance(r, dict)
         ],
+        "task_containers": [
+            {"task_id": identifier(r.get("task_id")), "run_id": identifier(r.get("run_id")),
+             "attempt_id": identifier(r.get("attempt_id")),
+             "expected_running": r.get("state") == "running" if "state" in r else flag(r.get("expected_running")),
+             "available": flag(r.get("available")), "running": flag(r.get("running")),
+             "status": r.get("status") if r.get("status") in {
+                 "created", "running", "paused", "restarting", "removing", "exited", "dead", "missing", "removed"
+             } else "unknown",
+             "exit_code": number(r.get("exit_code")), "oom_killed": flag(r.get("oom_killed")),
+             "finished_at": instant(r.get("finished_at")),
+             **{k: number(r.get(k)) for k in ("cpu_percent", "memory_percent", "pids")}}
+            for r in snapshot.get("task_containers", []) if isinstance(r, dict)
+        ],
         "services": [
             {
                 "name": identifier(r.get("name")),
-                "available": r.get("available") is True,
+                "available": flag(r.get("available")),
+                "type": r.get("type") if r.get("type") in {
+                    "simple", "exec", "forking", "oneshot", "dbus", "notify", "notify-reload", "idle", "timer"
+                } else "unknown",
+                "sub_state": code(r.get("sub_state")),
+                "result": r.get("result") if r.get("result") in {
+                    "success", "exit-code", "signal", "core-dump", "timeout", "watchdog", "start-limit-hit",
+                    "resources", "protocol", "oom-kill", "exec-condition", "none"
+                } else "unknown",
                 "active_state": r.get("active_state")
                 if r.get("active_state")
                 in {"active", "inactive", "failed", "activating"}

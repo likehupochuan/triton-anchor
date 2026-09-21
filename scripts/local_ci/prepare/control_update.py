@@ -20,6 +20,7 @@ if str(LOCAL_ROOT) not in sys.path:
 from prepare.artifacts import SHA_RE, atomic_json, safe_source, utc_now
 from prepare.runtime import EnvironmentManager
 from prepare.deployment_config import load_deployment_config, sync_deployment_config
+from prepare.service_units import retire_obsolete_units
 
 
 UPDATE_SCHEMA = "triton-anchor-local-ci-control-update"
@@ -418,6 +419,9 @@ def update_control(
                 raise RuntimeError("Control checkout did not reach the fetched commit")
             result["changed"] = True
         sync_deployment_config(desired, config_path, apply=True)
+        result["retired_units"] = retire_obsolete_units(
+            backup=state_dir / "deploy-backups/obsolete-units"
+        )
         if restart_needed:
             restart_worker()
             result["restarted"] = True

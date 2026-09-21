@@ -16,7 +16,8 @@ from prepare.runtime import EnvironmentManager
 
 
 @pytest.fixture(autouse=True)
-def isolated_server(monkeypatch):
+def isolated_server(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "user-config"))
     validate = deployment_config.validate_deployment_config
     monkeypatch.setattr(EnvironmentManager, "_docker", lambda *args, **kwargs: b"")
     # These Git/installation tests run without the CI server's mounted dependencies.
@@ -491,3 +492,29 @@ def test_request_file_rejects_symlink_at_configured_path(tmp_path, monkeypatch):
         )
         == 1
     )
+
+
+def test_control_update_retires_old_watchdog_before_its_single_restart(tmp_path, monkeypatch):
+    from prepare import service_units
+    config, control, old, new = fixture_checkout(tmp_path)
+    units = service_units.user_unit_dir()
+    units.mkdir(parents=True)
+    for name in service_units.OBSOLETE_UNITS:
+        (units / name).write_text("original unit " + name)
+    keep = units / "triton-anchor-local-ci-health.timer"
+    keep.write_text("keep health")
+    actions = []
+    original = service_units.retire_obsolete_units
+    monkeypatch.setattr(control_update, "retire_obsolete_units", lambda **kwargs:
+        original(**kwargs, runner=lambda args, **options: actions.append(args)))
+    options = dict(config_path=tmp_path / "local-ci.json", apply=True, allow_local=True,
+                   expected_revision=new, restart_worker=lambda: actions.append("restart-worker"))
+    result = update_control(config, **options)
+    assert result["retired_units"] == list(service_units.OBSOLETE_UNITS)
+    assert actions[-1] == "restart-worker" and actions.count("restart-worker") == 1
+    assert actions[-2] == ["systemctl", "--user", "daemon-reload"]
+    assert keep.read_text() == "keep health"
+    backup = tmp_path / "state/deploy-backups/obsolete-units"
+    assert all((backup / name).read_text() == "original unit " + name for name in service_units.OBSOLETE_UNITS)
+    again = update_control(config, **options)
+    assert not again["retired_units"] and actions.count("restart-worker") == 1

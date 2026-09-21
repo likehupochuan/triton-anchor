@@ -302,3 +302,11 @@ def test_pre_upgrade_sealed_outbox_retries_original_result_path(tmp_path, groupe
     assert subprocess.check_output(
         ["git", "rev-list", "--count", relay.results_branch], cwd=remote,
     ).strip() == b"1"
+
+
+
+def test_oversized_seal_never_leaves_a_result_commit_point(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent_ci.delivery.MAX_RESULT_BYTES", 128)
+    with pytest.raises(ContractError, match="exceeds"):
+        seal(tmp_path, answer())
+    assert not (tmp_path / "sealed/result.json").exists()

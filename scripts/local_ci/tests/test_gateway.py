@@ -890,6 +890,23 @@ class GatewayBehaviorTests(unittest.TestCase):
         (directory / "artifacts/report.txt").write_text("ok")
         self.assertEqual(g.read_result(path, self.task, None)[0], result)
 
+    def test_receiver_progress_cannot_overwrite_a_final_status_seen_during_publication(self):
+        from agent_ci import progress
+        gh = RecordingGitHub(self.gh)
+        pending = gh.seed_status(self.head, g.SUMMARY_CONTEXT, "pending", self.task["task_id"])
+        reader = progress.ReceiverProgress({})
+        # A concurrent finalizer completes after the progress helper's two reads.
+        gh.seed_status(self.head, g.SUMMARY_CONTEXT, "success", self.task["task_id"])
+        with (
+            patch.object(gh, "latest_summary", return_value=pending),
+            patch.object(gh, "owns_task", return_value=True),
+            patch.object(progress, "read_health", return_value={}),
+            patch.object(reader, "description", return_value="Local CI: running checks"),
+        ):
+            reader.update(gh, self.task)
+        self.assertEqual(gh.writes, [])
+        self.assertEqual(gh.summary_statuses(self.head)[g.SUMMARY_CONTEXT]["state"], "success")
+
     def test_receiver_finishes_as_soon_as_its_result_arrives(self):
         control = self.store(g.CONTROL_BRANCH)
         g.enqueue(self.task, self.gh, control, self.source)

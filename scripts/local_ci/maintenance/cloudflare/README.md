@@ -9,7 +9,7 @@
 - 快照分支：`snapshot/jiwang-ci-race-1`
 - 快照文件：`worker-health.json`
 
-Cloudflare 不改写快照或 `watchdog.json`。服务器现有 health/watchdog 保持原有职责。
+Cloudflare 只读取服务器 health 采集发布的 `worker-health.json`，不执行远程恢复，不再读取 `watchdog.json`。旧 watchdog 文件和 Gitee 历史记录保留；服务器升级负责停用旧 watchdog service/timer，health 采集和 systemd 的 Worker 重启继续运行。
 
 ## 部署
 
@@ -23,17 +23,18 @@ Cloudflare 不改写快照或 `watchdog.json`。服务器现有 health/watchdog 
 4. 最后在 **Settings → Triggers → Cron Triggers** 添加 `*/5 * * * *`。只配置这一条定时器，也不要另部署第二个 Worker 同时维护这些 Issues。
 5. 查看 Worker 的执行记录，确认 scheduled 调用成功。定时配置传播可能需要最多 15 分钟。此项目无需接入 GitHub Actions。
 
-后续更新使用本目录配置部署，保留原 KV 绑定、Secret 和定时器。本次从仅定时告警升级时，还需启用 `workers.dev`，并发布 Dashboard，备用读取才会生效。暂停监测时移除该 Cron Trigger，保留 KV 和历史 Issues；已缓存数据会随时间过期。
+后续更新使用本目录配置部署，保留原 KV 绑定、Secret 和定时器。升级顺序：先部署兼容新旧快照的 Cloudflare，再发布 Dashboard，最后部署服务器控制代码。旧快照缺少恢复字段时显示未上报，不制造异常。现有 KV、Issue 及快照历史保留，首次新快照即可补齐恢复展示。暂停监测时移除该 Cron Trigger，保留 KV 和历史 Issues；已缓存数据会随时间过期。
 
 也可使用官方 Wrangler 命令行部署，不依赖浏览器控制扩展。`wrangler login --device --scopes account:read user:read workers_scripts:write workers_kv:write workers_tail:read` 会显示授权地址和一次性代码，由维护者在自己的浏览器确认。凭据由 Wrangler 管理，不复制进仓库。首次部署先不设置 Cron，绑定 KV、配置 Secret 并验证之后再启用定时器；以后只维护同一份部署配置。
 
 ## 告警行为
 
-- 同一轮连续异常合并到一个 Issue，列出故障类别、首次发现及观测时间；异常集合不变时不重复写入。
-- 异常集合变化时更新原 Issue；确认原有问题恢复后，正文补充恢复时间和持续时长并关闭。之后新一轮故障再创建新 Issue。
+- 同一轮连续异常合并到一个 Issue，列出故障类别、首次发现、持续时间、源快照时间和近期恢复过程。只有故障集合或恢复事件发生实质变化才更新；稳定事件 ID 去重，周期刷新不重复写入 Issue。
+- 恢复必须由时间晚于故障证据的有效快照明确证明；旧快照、相同时间快照、未知字段、其他任务成功都不能清除对应故障。恢复补充证据时间并关闭原 Issue，新一轮故障再创建新 Issue。关闭失败重试前重新检查本轮证据，不能在新故障出现或读取失败时继续旧关单动作。
+- 任务恢复耗尽后，只有同一 task/run 明确发布终态结果才可收尾任务级告警，正文写明“恢复失败，任务已结束”；不得写成恢复成功。仍存在的服务、认证等故障继续保留。
 - 心跳快照超过 20 分钟未更新：报告心跳过期、当前服务状态未知，不能仅凭这一点区分停机、断网和采集停止。
 - 连续两轮读取失败：报告健康数据读取异常。不可读或过期时保留此前未确认恢复的故障，不把缺数据解释成恢复。
-- 新鲜快照中明确的 Worker、Docker、Gitee 访问、Codex 连接/认证/限流/执行异常，以及磁盘、环境、结果上传异常，会列入告警。
+- 新鲜快照中明确的 Worker、Docker、Gitee 访问、Codex 连接/认证/限流/执行异常，以及磁盘、环境、任务容器意外停止/OOM、恢复等待/耗尽、结果上传异常，会列入告警。正常结束的 oneshot 服务、未知字段不会误报故障。任务 30 分钟无进展提示、60 分钟等待复查，Cloudflare 不据此终止任务。
 - Codex 的启动、空闲或未上报状态不证明模型服务恢复；已有 Codex 告警需等后续实际运行或成功状态确认。旧服务器需更新控制代码，才会上报这些字段。
 - Issue 写入失败会在下一轮重试。新建请求响应丢失时先查找本 Worker 的活动告警，避免直接重复创建。KV 是最终一致性存储，本实现用于单 Worker、单定时器，不提供多个实例同时写入时的严格去重。
 
@@ -43,11 +44,11 @@ Gitee 故障同时可能影响健康读取和 Issue 写入；此时 Cloudflare �
 
 ## Dashboard
 
-发布新的 `dashboard/worker.html` 后，页面每五分钟优先匿名读取 Gitee 健康快照和告警 Issues；读取失败才使用 Cloudflare 缓存。明确遇到 Gitee 限流时，15 分钟冷却期间直接读缓存，之后再尝试 Gitee。两边都失败时保留最后取得的数据并说明读取失败；数据过期不能表示服务器宕机。
+发布新的 `dashboard/worker.html` 后，页面每五分钟优先匿名读取 Gitee 健康快照和告警 Issues；读取失败才用 Cloudflare 缓存替代这些数据。同时读取只读缓存中的外部异常与恢复历史；这个读取不访问 Gitee，也不写 KV。明确遇到 Gitee 限流时，15 分钟冷却期间直接读缓存，之后再尝试 Gitee。两边都失败时保留最后取得的数据并说明读取失败；数据过期不能表示服务器宕机。
 
 当前缓存地址为 `https://local-ci-alert.2272640910.workers.dev/health`，与 `dashboard/health.js` 的 `source.cacheUrl` 保持一致。这个公开接口只读取 KV，支持跨域 GET；不会接收令牌、写入 Issue 或触发 Gitee 请求。首次部署后需等待一次定时采集，缓存尚不存在或 KV 不可读时返回 503。Cloudflare 的 Gitee 写入令牌和内部告警去重状态不会放入公开缓存。
 
-每轮定时采集合并健康快照、watchdog 和最近告警为一个缓存条目，保留原始 `collected_at`、`updated_at`；外层 `updated_at` 只表示缓存刷新时间。某个来源读取失败时保留该部分旧数据，附固定的读取错误说明，不把原始异常信息发布出去。Issue 写入失败仍会刷新缓存，缓存写入失败也不会阻止本轮告警处理。
+每轮定时采集合并健康快照、近 7 天事件和最近告警为一个缓存条目，保留原始 `collected_at`、`updated_at`；外层 `updated_at` 只表示缓存刷新时间。某个来源读取失败时保留该部分旧数据，附固定的读取错误说明，不把原始异常信息发布出去。Issue 写入失败仍会刷新缓存，缓存写入失败也不会阻止本轮告警处理。较旧快照不能覆盖较新的缓存。外部和服务器事件在现有 KV 对象中保存，按稳定 ID 去重，每任务最多 20 条、全局最多 100 条、最多 7 天。Dashboard 默认展示 20 条，可展开全部；结果上传等待单独展示，明确只重传、不重新测试。
 
 正常运行时每五分钟各写一次内部告警状态和合并缓存，合计约 576 次 KV 写入/天；页面访问只读缓存。浏览器缓存有效期为 60 秒。告警变化无需触发 GitHub 工作流、Pages 重新发布或 Git 提交。
 
@@ -55,8 +56,8 @@ Issue 正文用 `<!-- local-ci-alert:jiwang-ci-race-1 -->` 标记归属，不能
 
 ## 验证
 
-本地运行 `node --test scripts/local_ci/maintenance/cloudflare/worker.test.mjs`，使用内存 KV 和模拟 Gitee API 检查故障、持续去重、恢复及写失败重试，不会向真实仓库写 Issue。
+本地运行 `node --test scripts/local_ci/maintenance/cloudflare/worker.test.mjs scripts/local_ci/tests/dashboard.test.cjs`，使用内存 KV 和模拟 Gitee API 检查故障、持续去重、恢复及写失败重试，不会向真实仓库写 Issue。
 
-上线验收需确认一次真实 scheduled 调用、故障 Issue、持续故障不重复写入和恢复关闭。可以在单独的测试仓库与 Worker 上使用测试快照；不要修改生产心跳来制造故障。仅通过本地测试不代表已部署或通知已经送达。
+上线验收需确认一次正常 scheduled 调用（新鲜服务状态、无误报）、故障 Issue（显示失败原因及恢复动作）、持续故障不重复写入和新快照恢复关闭。额外验证恢复快照之后返回旧故障/旧健康数据不会倒退状态，以及只读 `/health` 请求不会写入 KV。浏览器核对重试次数、下次重试、截止时间、独立上传等待和历史展开。可以在单独的测试仓库与 Worker 上使用测试快照；不要修改生产心跳来制造故障。仅通过本地测试不代表已部署或通知已经送达。
 
 参考：[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/)、[KV 写入限制](https://developers.cloudflare.com/kv/api/write-key-value-pairs/)、[Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)、[Gitee API](https://gitee.com/api/v5/swagger)。

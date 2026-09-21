@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "local_ci"))
+from agent_ci.progress import ReceiverProgress
 from agent_ci.protocol import (
     PREINSTALLED_SUBMODULES,
     TASK_SCHEMA,
@@ -299,7 +300,7 @@ class GitHub:
         return True
 
     def status(self, task: dict, state: str, description: str, url: str = "", *,
-               existing_only: bool = False) -> None:
+               existing_only: bool = False, expected_pending_id: int | None = None) -> None:
         if not self.owns_task(task):
             return
         if state != "error" and not is_current(self, task):
@@ -307,6 +308,13 @@ class GitHub:
         url = url or workflow_url() or f"https://github.com/{self.repository}/commit/{github_sha(task)}"
         url = url.split("#", 1)[0] + f"#local-ci-task={task['task_id']}"
         for sha, context, previous in self.summary_targets(task, existing_only=existing_only, state=state):
+            # Progress must recheck the actual last-read row, not an earlier poll.
+            if expected_pending_id is not None and (
+                not previous or previous.get("id") != expected_pending_id
+                or previous.get("state") != "pending"
+                or status_identity(previous).get("local-ci-task") != task["task_id"]
+            ):
+                continue
             self.post_status(sha, {"state": state, "context": context,
                                   "description": description[:140], "target_url": url}, previous)
 
@@ -1651,6 +1659,7 @@ def receive_result(
         )
     deadline = time.monotonic() + RECEIVER_WAIT_SECONDS
     control = results = None
+    progress = ReceiverProgress()
     try:
         while True:
             try:
@@ -1676,6 +1685,7 @@ def receive_result(
                 if path:
                     read_result(path, task, results)
                     return "ready"
+                progress.update(gh, task)
             except (OSError, RuntimeError) as error:
                 if (
                     isinstance(error, GitHubAPIError)

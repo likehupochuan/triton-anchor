@@ -53,6 +53,9 @@ class GitRelay:
         self.control_snapshot = None
         self.cache = self.root / "cache"
         self.lock = threading.RLock()
+        # Writes use their own temporary checkout; a slow push must not lock the
+        # control snapshot used by cancellation polling and task intake.
+        self.write_lock = threading.RLock()
         self.env = {
             **os.environ,
             "GIT_TERMINAL_PROMPT": "0",
@@ -302,7 +305,7 @@ class GitRelay:
     ) -> None:
         for relative in files:
             within(self.root, relative)
-        with self.lock:
+        with self.write_lock:
             last_error = None
             for _ in range(3):
                 try:

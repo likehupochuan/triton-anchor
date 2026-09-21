@@ -147,11 +147,11 @@ def test_health_publishes_only_current_codex_status_and_original_upload_age(tmp_
     run = make_run(tmp_path, "active", "running", None)
     task_id = "a" * 64
     (run / "state.json").write_text(json.dumps({
-        "task_id": task_id, "phase": "running", "updated": 100,
+        "task_id": task_id, "phase": "running", "updated": 100, "last_progress_at": 100,
     }))
     pending = make_run(tmp_path, "pending", "publish_pending", None)
     (pending / "state.json").write_text(json.dumps({
-        "task_id": "b" * 64, "phase": "publish_pending", "updated": 1900,
+        "task_id": "b" * 64, "phase": "publish_pending", "updated": 1900, "abandoned": True,
         "delivery": {"queued_at": 100, "attempts": 20},
     }))
     heartbeat = {
@@ -171,6 +171,9 @@ def test_health_publishes_only_current_codex_status_and_original_upload_age(tmp_
     assert snapshot["uploads"][0]["queued_at"] == health.iso(100)
     assert snapshot["poller"]["last_poll_status"] == "error"
     assert "PRIVATE_SENTINEL" not in json.dumps(snapshot)
+    heartbeat["last_progress_at"] = None
+    path.write_text(json.dumps(heartbeat))
+    assert health.collect(config, now=1900, manager=manager)["active_task"]["last_progress_at"] == health.iso(100)
     heartbeat["active_task"] = "c" * 64
     path.write_text(json.dumps(heartbeat))
     snapshot = public_snapshot(health.collect(config, now=1900, manager=manager))
@@ -281,3 +284,72 @@ def test_retention_protects_unstarted_null_delivery(tmp_path):
     report = retain_local({"state_dir": str(tmp_path), "state_min_free_bytes": 0})
     assert report["protected"] == [{"task_id": "a" * 64, "run_id": "preparing"}]
     assert not report["errors"]
+
+
+def test_health_exposes_recovery_identity_and_bounded_history_without_private_checkpoint(tmp_path):
+    now = 9 * 86400
+    run = make_run(tmp_path, "active", "running", None)
+    manifest = {"repository": "likehupochuan/triton-anchor", "head_sha": "b" * 40,
+                "tested_sha": "c" * 40, "pr_number": 62}
+    (run / "task.json").write_text(json.dumps(manifest))
+    record = {"task_id": "a" * 64, "run_id": "active", "phase": "running", "updated": now,
+              "checkpoint": {"report": "PRIVATE_SENTINEL"}, "last_progress_at": now-1900,
+              "budget": {"codex_attempts_used": 3, "codex_deadline_at": now+3600,
+                         "execution_attempts_used": 2, "session_switches": 1},
+              "recovery": {"state": "retry_wait", "failure_code": "connection", "action": "resume",
+                           "next_retry_at": now+30, "session_id": "PRIVATE_SENTINEL"},
+              "events": [{"at": now-i, "kind": "recovery", "run_id": "old-run",
+                          "detail": {"state": "recovering", "action": "resume", "attempt": 3,
+                                     "error": "PRIVATE_SENTINEL"}} for i in range(25)]
+                        + [{"at": now, "kind": "codex_exit", "detail": {"session_id": "PRIVATE_SENTINEL"}},
+                           {"at": now-8*86400, "kind": "recovery", "detail": {}}]}
+    (run / "state.json").write_text(json.dumps(record))
+    done = make_run(tmp_path, "done", "published", now-60)
+    (done / "task.json").write_text(json.dumps(manifest))
+    (done / "state.json").write_text(json.dumps({"task_id": "d" * 64, "phase": "published",
+        "updated": now-60, "detail": {"result_status": "pass"}}))
+    result = health.collect({"state_dir": str(tmp_path), "monitor_services": []}, now=now,
+                            manager=SimpleNamespace(health=lambda: {}))
+    task = result["active_task"]
+    assert (task["repository"], task["head_sha"], task["tested_sha"]) == tuple(manifest[k] for k in ("repository", "head_sha", "tested_sha"))
+    assert task["budget"]["codex_attempts_used"] == 3 and task["budget"]["codex_attempts_limit"] == 10
+    assert task["recovery"]["next_retry_at"] == health.iso(now+30)
+    assert len(result["events"]) == 20 and all(e["run_id"] == "old-run" for e in result["events"])
+    assert result["recent_tasks"][0]["result_status"] == "pass"
+    assert "PRIVATE_SENTINEL" not in json.dumps(result)
+    assert public_snapshot(result) == result
+
+
+def test_public_health_keeps_unknown_unknown_and_projects_container_and_oneshot_evidence():
+    result = public_snapshot({"collected_at": health.iso(100), "task_containers": [{
+        "task_id": "a" * 64, "run_id": "run-1", "attempt_id": "attempt-1", "state": "running",
+        "available": True, "running": False, "status": "exited", "exit_code": 137, "oom_killed": True,
+        "finished_at": health.iso(99), "workspace_host": "PRIVATE_SENTINEL", "cpu_percent": 3.0,
+    }], "services": [{"name": "health.service", "available": True, "active_state": "inactive",
+                      "type": "oneshot", "sub_state": "dead", "result": "success"}]})
+    assert result["runtime"]["available"] is None and result["poller"]["alive"] is None
+    container = result["task_containers"][0]
+    assert container["expected_running"] and container["oom_killed"] and container["exit_code"] == 137
+    assert result["services"][0]["type"] == "oneshot" and result["services"][0]["result"] == "success"
+    assert "PRIVATE_SENTINEL" not in json.dumps(result)
+    assert public_snapshot(result) == result
+
+
+def test_health_event_history_has_a_global_limit():
+    now = 10000
+    result = public_snapshot({"collected_at": health.iso(now), "events": [
+        {"at": now-i, "kind": "recovery", "task_id": str(task), "run_id": "run-1",
+         "detail": {"state": "recovering", "action": "resume"}}
+        for task in range(8) for i in range(25)
+    ]})
+    assert len(result["events"]) == 100
+    assert all(sum(e["task_id"] == str(task) for e in result["events"]) <= 20 for task in range(8))
+
+
+def test_broken_local_task_record_does_not_claim_an_empty_healthy_queue(tmp_path):
+    run = make_run(tmp_path, "broken", "publish_pending", None)
+    (run / "state.json").write_text("{interrupted or unreadable")
+    snapshot = health.collect({"state_dir": str(tmp_path), "monitor_services": []}, now=100,
+                              manager=SimpleNamespace(health=lambda: {}))
+    assert snapshot["tasks"] == [] and snapshot["uploads"] == []
+    assert snapshot["tasks_available"] is False and snapshot["uploads_available"] is False

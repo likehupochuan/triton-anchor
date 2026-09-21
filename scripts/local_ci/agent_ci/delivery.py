@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -262,7 +263,9 @@ def seal_result(
     result = _clean(result, redact)
     result["task"] = task
     validate_result(result, task)
-    atomic_json(destination / "result.json", result, pretty=True)
-    if (destination / "result.json").stat().st_size > MAX_RESULT_BYTES:
+    encoded = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True).encode()
+    if len(encoded) + 1 > MAX_RESULT_BYTES:
         raise ContractError("Result summary exceeds 2 MiB")
+    # result.json is the commit point used by restart recovery.
+    atomic_json(destination / "result.json", result, pretty=True)
     return result

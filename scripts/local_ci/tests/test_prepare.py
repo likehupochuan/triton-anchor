@@ -677,7 +677,7 @@ def test_install_prepares_then_starts_user_services(tmp_path):
     )
     assert disable["check"] is True
     for unit in ("triton-anchor-local-ci.service", "triton-anchor-local-ci-health.timer",
-                 "triton-anchor-local-ci-watchdog.timer", "triton-anchor-local-ci-retention.timer"):
+                 "triton-anchor-local-ci-retention.timer"):
         assert (unit_dir / unit).is_file()
     assert "--request-file" in (unit_dir / "triton-anchor-local-ci-control-update.service").read_text()
     assert not any(
@@ -808,3 +808,43 @@ def test_artifact_collection_makes_files_readable_without_following_links(tmp_pa
     assert fs.collect_artifacts()["artifact_dir"] == str(artifacts)
     assert report.stat().st_mode & 0o777 == 0o644
     assert external.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("docker_result,status,available", [(b"", "missing", True), (b"a"*64, "unknown", False), (None, "unknown", False)])
+def test_task_health_distinguishes_missing_container_from_unreadable_runtime(tmp_path, docker_result, status, available):
+    manager = EnvironmentManager(config(tmp_path), tmp_path / "state")
+    handle = {"container_id": "a"*64, "attempt_id": "attempt-1", "image_id": "sha256:"+"b"*64}
+    with patch.object(manager, "_inspect", side_effect=EnvironmentError("private inspect failure")), patch.object(
+        manager, "_docker", side_effect=EnvironmentError("daemon unavailable") if docker_result is None else None,
+        return_value=docker_result,
+    ):
+        observed = manager.task_health(handle)
+    assert observed["status"] == status and observed["available"] is available
+    assert observed["running"] is (False if status == "missing" else None)
+
+
+def test_task_health_reports_real_exit_and_oom_without_changing_the_registry(tmp_path):
+    manager = EnvironmentManager(config(tmp_path), tmp_path / "state")
+    handle = {"container_id": "a"*64, "attempt_id": "attempt-1", "image_id": "sha256:"+"b"*64}
+    raw = {"Image": handle["image_id"], "Config": {"Labels": {
+        "local-ci.owner": manager.owner, "local-ci.attempt": "attempt-1"}},
+        "State": {"Running": False, "Status": "exited", "ExitCode": 137, "OOMKilled": True,
+                  "FinishedAt": "2026-09-20T12:00:00Z"}}
+    with patch.object(manager, "_inspect", return_value=raw), patch.object(manager, "_save") as save:
+        observed = manager.task_health(handle)
+        raw["Config"]["Labels"]["local-ci.owner"] = "another-worker"
+        wrong = manager.task_health(handle)
+    assert observed["oom_killed"] and observed["exit_code"] == 137 and observed["available"]
+    assert wrong["running"] is None and not wrong["available"]
+    save.assert_not_called()
+
+
+@pytest.mark.parametrize("overrides,valid", [({}, True), ({"codex_session_switches": 0}, True),
+    ({"execution_attempts": 0}, False), ({"recovery_timeout_seconds": -1}, False),
+    ({"progress_warning_seconds": 3600, "progress_stalled_seconds": 1800}, False)])
+def test_recovery_configuration_requires_bounded_positive_budgets(tmp_path, overrides, valid):
+    from prepare.preflight import check_configuration
+    result = check_configuration({**config(tmp_path), **overrides}, runtime=False,
+                                 require_notifications=False, verify_content=False)
+    check = next(row for row in result["checks"] if row["check"] == "recovery_policy")
+    assert (check["status"] == "pass") is valid

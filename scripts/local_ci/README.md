@@ -40,7 +40,7 @@ scripts/local_ci/
 ├── AI_CI_PROGRAM.md          # Codex 的职责、工作方式与结果格式
 ├── agent_ci/                # Poller、原生 Codex CLI、任务身份和 Git 发布
 ├── prepare/                 # 环境、依赖、任务容器与部署入口
-├── maintenance/             # 健康、watchdog 与本地保留清理
+├── maintenance/             # 健康采集、外部告警与本地保留清理
 ├── tools/
 │   ├── basic_tools/         # 可复用构建、安装、测试和性能工具
 │   ├── ai_review_tools/     # 架构与专项审查说明
@@ -68,8 +68,8 @@ FlagGems 使用服务器 profile 中的固定只读依赖；修改 PR 中的 Fla
 后端能力仍只对已验证的 Triton 3.0 开启；同 LLVM 的 3.1 只复用 LLVM 安装，不继承 3.0 后端能力。
 
 Worker 轮询任务有效性，PR 关闭、转 Draft、更换目标或增加提交时停止旧容器。
-Codex 短暂中断可恢复同一 CLI 会话；Worker 重启会清理未完成容器并新建任务运行，
-保留之前的本地证据。已封存结果只重试发布，不重编、不重测。
+Codex 短暂中断优先恢复同一 CLI 会话；Worker 重启先核对已保存报告和封存结果，
+完整有效报告继续封存，无法接续才在原预算内重建隔离环境。已封存结果只重试发布，不重编、不重测。
 Codex 默认最多尝试 10 次（含首次），仍共用任务时间预算；已有配置中的 `codex_attempts` 显式值优先。
 
 ```text
@@ -146,3 +146,5 @@ python3 -m pytest scripts/local_ci/tests -q
 
 需要 Python 3.10+、pytest、PyYAML 和 Git；页面测试还需要 Node.js。
 这些检查验证控制逻辑，实际环境仍需在服务器完成 build/install/smoke/JIT 与性能验收。
+
+执行中断后的封存、恢复预算、上传重试、外部告警和部署演练见 [运维与恢复说明](maintenance/RECOVERY.md)。

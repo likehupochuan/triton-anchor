@@ -1440,9 +1440,45 @@ class EnvironmentManager:
             self._save(state)
             return dict(removed=removed, protected=sorted(protected))
 
+    def task_health(self, handle):
+        """Read runtime evidence without adopting, stopping or modifying a task."""
+        unknown = dict(available=False, running=None, status="unknown", exit_code=None,
+                       oom_killed=None, finished_at=None)
+        ident = handle.get("container_id")
+        if not ident:
+            return unknown
+        try:
+            info = self._inspect(ident)
+        except (EnvironmentError, ValueError, KeyError, TypeError):
+            # A successful daemon query is required before calling a container missing.
+            try:
+                found = self._docker("ps", "-aq", "--no-trunc", "--filter", "id=" + ident,
+                                     timeout=15, cancellable=False).decode().strip()
+            except (EnvironmentError, ValueError):
+                return unknown
+            return unknown if found else {**unknown, "available": True, "running": False, "status": "missing"}
+        labels = info.get("Config", {}).get("Labels") or {}
+        if (labels.get("local-ci.owner") != self.owner
+                or labels.get("local-ci.attempt") != handle.get("attempt_id")
+                or info.get("Image") != handle.get("image_id")):
+            return unknown
+        state = info.get("State") or {}
+        return dict(
+            available=True,
+            running=state.get("Running") if type(state.get("Running")) is bool else None,
+            status=state.get("Status", "unknown"),
+            exit_code=state.get("ExitCode") if type(state.get("ExitCode")) is int else None,
+            oom_killed=state.get("OOMKilled") if type(state.get("OOMKilled")) is bool else None,
+            finished_at=state.get("FinishedAt") if isinstance(state.get("FinishedAt"), str)
+            and not state["FinishedAt"].startswith("0001-") else None,
+        )
+
     def health(self):
         state = self._load()
         attempts = list(copy.deepcopy(state["attempts"]).values())
+        for row in attempts:
+            if row.get("state") not in {"removed", "stopped"}:
+                row.update(self.task_health(row))
         usage, usage_available = [], True
         active = [
             a["container_id"]
@@ -1471,6 +1507,11 @@ class EnvironmentManager:
                     )
             except (EnvironmentError, ValueError, KeyError):
                 usage_available = False
+        for attempt in attempts:
+            ident = attempt.get("container_id") or ""
+            resource = next((row for row in usage if ident and row.get("container_id")
+                             and ident.startswith(row["container_id"])), {})
+            attempt.update({key: resource[key] for key in ("cpu_percent", "memory_percent", "pids") if key in resource})
         return dict(
             schema=SCHEMA,
             collected_at=utc_now(),

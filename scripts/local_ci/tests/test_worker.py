@@ -3,6 +3,7 @@
 import fcntl
 import hashlib
 import json
+import time
 from pathlib import Path
 import select
 import subprocess
@@ -590,7 +591,8 @@ sys.path.insert(0, sys.argv[1])
 from agent_ci import worker
 
 class IdleWorker:
-    def __init__(self, config):
+    def __init__(self, config, **kwargs):
+        self.execution_thread = None
         self.config = config
         self.state_dir = Path(config['state_dir'])
         self.stop_event = threading.Event()
@@ -630,3 +632,437 @@ raise SystemExit(worker.main(['--config', sys.argv[2]]))
             if child.poll() is None:
                 child.kill()
                 child.communicate()
+
+
+@pytest.fixture
+def recovery_worker(tmp_path, monkeypatch):
+    """Real journal/sealing with controlled CLI and runtime failure boundaries."""
+    from types import SimpleNamespace
+    task = manifest()
+    calls, uploads = [], []
+    relay_tasks = [task]
+    credentials = ["first"]
+
+    class Relay:
+        def refresh(self):
+            pass
+        def validity(self, task):
+            return True, "current"
+        def tasks(self):
+            return relay_tasks
+        def source_variants(self, frozen):
+            return {
+                "base": {"source_sha": frozen["base_sha"], "llvm_hash": "f" * 40,
+                         "triton_version": "3.0.0"},
+                "candidate": {"source_sha": frozen["tested_sha"], "llvm_hash": frozen["llvm_hash"],
+                              "triton_version": "3.3.0"},
+            }
+        def publish_result(self, task, run_id, directory):
+            uploads.append((task["task_id"], run_id))
+            return hashlib.sha256((directory / "result.json").read_bytes()).hexdigest()
+
+    class Manager:
+        def generations(self):
+            return {}
+        def collect_retired(self):
+            pass
+        def acquire_task(self, task, run_id):
+            variants = {
+                variant: {**source, "profile": variant, "backend_enabled": variant == "base",
+                          "environment_fingerprint": variant, "image_id": "fixture"}
+                for variant, source in task["variants"].items()
+            }
+            return dict(run_id=run_id, variants=variants, profile="fixture", backend_enabled=False,
+                        environment_fingerprint="fixture", llvm_hash=task["llvm_hash"],
+                        image_id="fixture", artifacts_host=str(local_run_dir(tmp_path, task, run_id) / "artifacts"))
+        def stop_task(self, handle):
+            pass
+        def collect_artifacts(self, handle):
+            pass
+        def destroy_task(self, handle):
+            pass
+
+    class Executor:
+        def __init__(self, config, state_dir, generation, task, relay, *, manager):
+            self.run_dir = Path(generation["artifacts_host"]).parent
+        def prepare(self, variant="candidate"):
+            return tmp_path
+        def write_context(self, policy, changes):
+            pass
+
+    def write_report(executor, status="fail"):
+        report = {"status": status, "summary": "actual test conclusion", "checks": [], "reviews": []}
+        atomic_json(executor.run_dir / "artifacts/agent-result.json", report)
+        return report
+
+    class Driver:
+        health = {}
+        def redact(self, text):
+            return text
+        def credentials_fingerprint(self):
+            return credentials[0]
+        def run(self, executor, **kwargs):
+            calls.append(kwargs)
+            write_report(executor)
+            return {"exit_code": 1, "reason": "", "failure_code": "connection"}
+
+    monkeypatch.setattr("agent_ci.worker.changed_files", lambda *a: [{"path": "README.md"}])
+    monkeypatch.setattr("agent_ci.worker.minimum_checks", lambda *a, **kw: {"required_checks": [], "required_reviews": []})
+    worker = Worker({"state_dir": str(tmp_path), "simulation": True, "retry_delay_seconds": 0},
+                    relay=Relay(), manager=Manager(), driver=Driver(), executor_factory=Executor)
+    return SimpleNamespace(worker=worker, task=task, calls=calls, uploads=uploads,
+                           tasks=relay_tasks, credentials=credentials, write_report=write_report)
+
+
+def test_failed_report_is_final_even_when_cli_exits_with_connection_error(recovery_worker):
+    f = recovery_worker
+    f.worker.scan()
+    row = f.worker.journal.task(f.task["task_id"])
+    assert len(f.calls) == 1 and row["phase"] == "published"
+    assert f.worker.journal.result_status(f.worker.journal.delivery(f.task["task_id"])) == "fail"
+
+
+def test_restart_preserves_task_budget_and_does_not_refund_attempts(tmp_path):
+    journal = Journal(tmp_path)
+    task = manifest()
+    journal.register(task)
+    journal.claim(task["task_id"], "execution_attempts_used", 3)
+    original = journal.claim(task["task_id"], "codex_attempts_used", 10, timeout=21600)
+    for _ in range(2):
+        journal = Journal(tmp_path)
+        journal.restart(task["task_id"])
+        budget = journal.claim(task["task_id"], "execution_attempts_used", 3)
+        assert budget["codex_deadline_at"] == original["codex_deadline_at"]
+        assert budget["codex_attempts_used"] == 1
+    with pytest.raises(ValueError, match="次数预算"):
+        journal.claim(task["task_id"], "execution_attempts_used", 3)
+    journal.update(task["task_id"], budget={**budget, "codex_deadline_at": 1})
+    with pytest.raises(ValueError, match="时间预算"):
+        Journal(tmp_path).claim(task["task_id"], "codex_attempts_used", 10)
+
+
+def test_sealed_crash_window_uploads_before_runtime_and_current_checks(recovery_worker):
+    f = recovery_worker
+    row = f.worker.journal.register(f.task)
+    f.worker.finish(row, {"status": "fail", "summary": "saved failure"})
+    digest = f.worker.journal.delivery(f.task["task_id"])["digest"]
+    f.worker.journal.update(f.task["task_id"], delivery=None, phase="sealing")
+    f.worker.manager._daemon = lambda: (_ for _ in ()).throw(OSError("Docker down"))
+    f.worker.relay.validity = lambda task: (False, "superseded")
+    f.worker.journal = Journal(f.worker.state_dir)
+    f.worker.scan()
+    assert not f.calls and len(f.uploads) == 1
+    assert f.worker.journal.delivery(f.task["task_id"])["digest"] == digest
+    assert f.worker.journal.task(f.task["task_id"])["phase"] == "published"
+
+
+def test_auth_wait_requires_changed_credentials_and_shares_budget(recovery_worker):
+    f = recovery_worker
+    original = f.worker.driver.run
+    def unauthenticated(executor, **kwargs):
+        f.calls.append(kwargs)
+        return {"exit_code": 1, "failure_code": "authentication"}
+    f.worker.driver.run = unauthenticated
+    f.worker.scan()
+    f.worker.scan()
+    assert len(f.calls) == 1
+    row = f.worker.journal.task(f.task["task_id"])
+    deadline = row["budget"]["codex_deadline_at"]
+    assert row["recovery"]["state"] == "waiting_dependency"
+    f.credentials[0] = "changed"
+    f.worker.driver.run = original
+    f.worker.scan()
+    row = f.worker.journal.task(f.task["task_id"])
+    assert len(f.calls) == 2 and row["budget"]["codex_attempts_used"] == 2
+    assert row["budget"]["codex_deadline_at"] == deadline
+    assert row["phase"] == "published"
+
+
+def test_no_progress_resume_switches_session_once_without_new_budget(recovery_worker):
+    f = recovery_worker
+    def disconnected(executor, **kwargs):
+        f.calls.append(kwargs)
+        if len(f.calls) == 4:
+            f.write_report(executor)
+        return {"exit_code": 1, "failure_code": "connection", "session_reused": len(f.calls) > 1, "progressed": False}
+    f.worker.driver.run = disconnected
+    f.worker.scan()
+    assert len(f.calls) == 4 and f.calls[-1]["session_mode"] == "new"
+    budget = f.worker.journal.task(f.task["task_id"])["budget"]
+    assert budget["codex_attempts_used"] == 4 and budget["session_switches"] == 1
+
+
+def test_upload_backoff_keeps_immutable_result_until_success(recovery_worker, monkeypatch):
+    f = recovery_worker
+    row = f.worker.journal.register(f.task)
+    f.worker.finish(row, {"status": "fail", "summary": "preserved"})
+    box = f.worker.journal.delivery(f.task["task_id"])
+    original = Path(box["payload_path"]).read_bytes()
+    now = [time.time()]
+    monkeypatch.setattr("agent_ci.worker.time.time", lambda: now[0])
+    publish = f.worker.relay.publish_result
+    f.worker.relay.publish_result = lambda *a: (_ for _ in ()).throw(OSError("relay outage"))
+    for delay in (60, 120, 300, 300, 3600, 3600):
+        f.worker.retry_delivery(row)
+        box = f.worker.journal.delivery(f.task["task_id"])
+        assert box["next_retry_at"] == now[0] + delay
+        assert Path(box["payload_path"]).read_bytes() == original
+        now[0] = box["next_retry_at"]
+    f.worker.relay.publish_result = publish
+    f.worker.retry_delivery(row)
+    assert f.worker.journal.result_status(f.worker.journal.delivery(f.task["task_id"])) == "fail"
+    assert f.worker.journal.task(f.task["task_id"])["phase"] == "published"
+
+
+def test_long_execution_does_not_block_outbox_or_kill_silent_live_task(recovery_worker):
+    import threading
+    f = recovery_worker
+    done, started = threading.Event(), threading.Event()
+    def running(executor, **kwargs):
+        started.set()
+        assert done.wait(5)
+        f.write_report(executor)
+        return {"exit_code": 0}
+    f.worker.driver.run = running
+    f.worker.background = True
+    old = revised_manifest("f" * 40, "2026-09-12T00:00:00Z")
+    row = f.worker.journal.register(old)
+    f.worker.finish(row, {"status": "fail", "summary": "old result"})
+    try:
+        f.worker.scan()
+        assert started.wait(2)
+        f.worker.journal.update(f.task["task_id"], last_progress_at=time.time()-3700)
+        f.worker.inspect_active()
+        assert f.worker.active is not None and not f.worker.active.cancelled.is_set()
+        assert f.worker.journal.record(f.task["task_id"])["progress_state"] == "stalled_review"
+        assert (old["task_id"], row["run_id"]) in f.uploads
+        f.worker.heartbeat()
+        heartbeat = json.loads((f.worker.state_dir / "health/worker.json").read_text())
+        assert heartbeat["active_task"] == f.task["task_id"] and heartbeat["active_run_id"]
+    finally:
+        done.set()
+        if f.worker.execution_thread:
+            f.worker.execution_thread.join(5)
+
+
+
+def test_recoverable_task_holds_control_revision_but_outbox_does_not(recovery_worker):
+    f = recovery_worker
+    worker = f.worker
+    row = worker.journal.register(f.task)
+    worker.running_control_revision = f.task["worker_revision_sha"]
+    worker.manager.current_control_revision = lambda: worker.running_control_revision
+    worker.journal.update(f.task["task_id"], credentials_fingerprint="first")
+    worker.recovery(f.task["task_id"], "waiting_dependency", "authentication", "wait_credentials")
+    newer = revised_manifest("f" * 40, "2026-09-12T00:00:00Z")
+    f.tasks.append(newer)
+    selected = []
+    def select(config, current, waiting, **kwargs):
+        selected.extend(waiting)
+        return waiting[0]
+    worker.control_request_selector = select
+    assert worker.scan() is None and not selected and not f.calls
+    worker.finish(row, {"status": "infra_error", "summary": "no more recovery"})
+    request = worker.scan()
+    assert request["revision"] == newer["worker_revision_sha"]
+    assert selected and not f.calls
+
+
+def test_old_unbudgeted_task_is_not_silently_given_a_new_execution(recovery_worker):
+    f = recovery_worker
+    f.worker.journal.register(f.task)
+    f.worker.journal.update(f.task["task_id"], budget=None)
+    f.worker.scan()
+    assert not f.calls
+    result = json.loads(Path(f.worker.journal.delivery(f.task["task_id"])["payload_path"]).read_text())
+    assert result["status"] == "infra_error" and "重新派发" in result["summary"]
+
+
+def test_budget_migration_requires_explicit_contiguous_start_evidence(tmp_path):
+    journal = Journal(tmp_path)
+    task = manifest()
+    journal.register(task)
+    journal.update(task["task_id"], budget=None)
+    journal.event(task["task_id"], "codex_exit", {"exit_code": 1})
+    assert journal.recover_budget(task["task_id"]) is None
+    evidence = {"deadline_at": time.time()+21600, "execution_attempt": 1, "session_switches": 0}
+    journal.event(task["task_id"], "codex_start", {"attempt": 1, **evidence})
+    journal.event(task["task_id"], "codex_start", {"attempt": 2, **evidence})
+    recovered = journal.recover_budget(task["task_id"])
+    assert recovered["codex_attempts_used"] == 2
+    assert recovered["codex_deadline_at"] > time.time()
+
+
+def test_historical_outbox_updates_original_run_only(recovery_worker):
+    f = recovery_worker
+    old = f.worker.journal.register(f.task)
+    f.worker.finish(old, {"status": "fail", "summary": "saved"})
+    previous = f.worker.journal.record(f.task["task_id"])
+    current = f.worker.journal._new(f.task, previous)
+    f.worker.recover_local()
+    assert f.worker.journal.task(f.task["task_id"], old["run_id"])["phase"] == "published"
+    assert f.worker.journal.task(f.task["task_id"], current["run_id"])["phase"] == "preparing"
+    assert f.uploads == [(f.task["task_id"], old["run_id"])]
+
+
+def test_sealing_exhaustion_preserves_report_and_manual_resume_does_not_reset_budget(recovery_worker, monkeypatch):
+    f = recovery_worker
+    row = f.worker.journal.register(f.task)
+    now = [time.time()]
+    monkeypatch.setattr("agent_ci.worker.time.time", lambda: now[0])
+    monkeypatch.setattr("agent_ci.worker.seal_result", lambda *a, **kw: (_ for _ in ()).throw(OSError("disk unavailable")))
+    report = {"status": "fail", "summary": "real test failure"}
+    assert not f.worker.finish(row, report)
+    for delay in (30, 60):
+        now[0] += delay
+        assert not f.worker.seal_checkpoint(row)
+    now[0] += 3600
+    assert not f.worker.seal_checkpoint(row)
+    saved = f.worker.journal.record(f.task["task_id"])
+    assert saved["checkpoint"]["report"] == report and saved["sealing_attempts"] == 3
+    with pytest.raises(ValueError, match="预算已耗尽"):
+        f.worker.journal.resume(f.task["task_id"])
+    monkeypatch.setattr("maintenance.retention.retain_local", lambda config: {"pause_intake": True})
+    # A later disk outage must not revive the exhausted sealing budget or replace
+    # its terminal reason with a generic dependency wait on every scan.
+    for _ in range(2):
+        now[0] += 3600
+        f.worker.scan()
+        saved = f.worker.journal.record(f.task["task_id"])
+        assert saved["recovery"]["state"] == "exhausted"
+        assert saved["recovery"]["failure_code"] == "sealing_failed"
+        assert saved["sealing_attempts"] == 3 and saved["checkpoint"]["report"] == report
+    assert not f.calls
+
+
+
+def test_slow_upload_does_not_block_heartbeat_or_cancellation(recovery_worker):
+    import threading
+    f = recovery_worker
+    started, release = threading.Event(), threading.Event()
+    original = f.worker.relay.publish_result
+    def slow_publish(*args):
+        started.set()
+        assert release.wait(5)
+        return original(*args)
+    f.worker.relay.publish_result = slow_publish
+    old = revised_manifest("f"*40, "2026-09-12T00:00:00Z")
+    row = f.worker.journal.register(old)
+    f.worker.finish(row, {"status": "fail", "summary": "saved"})
+    f.worker.background = True
+    from agent_ci.worker import ActiveTask
+    f.worker.journal.register(f.task)
+    active = ActiveTask(f.task, f.worker.manager)
+    f.worker.active = active
+    try:
+        f.worker.scan()
+        assert started.wait(2)
+        f.worker.relay.validity = lambda task: (False, "PR closed")
+        f.worker.scan()
+        assert active.cancelled.is_set()
+        f.worker.heartbeat()
+        heartbeat = json.loads((f.worker.state_dir / "health/worker.json").read_text())
+        assert time.time()-heartbeat["heartbeat_at"] < 2
+        assert not f.uploads
+    finally:
+        release.set()
+        if f.worker.delivery_thread:
+            f.worker.delivery_thread.join(5)
+    assert f.uploads == [(old["task_id"], row["run_id"])]
+
+
+def test_relay_write_does_not_hold_control_snapshot_read_lock(tmp_path):
+    import threading
+    from agent_ci.relay import GitRelay
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    relay = GitRelay(str(remote), tmp_path / "relay", allow_local=True)
+    started, release = threading.Event(), threading.Event()
+    def git(args, **kwargs):
+        if args[0] == "ls-remote":
+            started.set()
+            assert release.wait(5)
+        stdout = b"d"*40 if args[0] == "rev-parse" else b""
+        return subprocess.CompletedProcess(args, 0, stdout, b"")
+    relay.git = git
+    writer = threading.Thread(target=lambda: relay.write("results", {"result.json": b"{}"}))
+    writer.start()
+    try:
+        assert started.wait(2)
+        relay.refresh()
+        assert relay.control_snapshot == "d"*40
+    finally:
+        release.set()
+        writer.join(5)
+    assert not writer.is_alive()
+
+
+def test_offline_relay_does_not_suspend_local_execution_deadline(recovery_worker):
+    from agent_ci.worker import ActiveTask
+    f = recovery_worker
+    f.worker.journal.register(f.task)
+    budget = f.worker.journal.record(f.task["task_id"])["budget"]
+    f.worker.journal.update(f.task["task_id"], budget={**budget, "codex_deadline_at": 1})
+    active = ActiveTask(f.task, f.worker.manager)
+    f.worker.active = active
+    f.worker.relay.refresh = lambda: (_ for _ in ()).throw(OSError("network unavailable"))
+    f.worker.scan()
+    assert active.cancelled.is_set() and active.reason == "recovery_exhausted"
+    heartbeat = json.loads((f.worker.state_dir / "health/worker.json").read_text())
+    assert heartbeat["control_channel"] == "unreachable"
+
+
+
+def test_restart_seals_failed_report_with_both_frozen_llvm_environments(recovery_worker, monkeypatch):
+    f = recovery_worker
+    original_task = json.loads(json.dumps(f.task))
+    # Interrupt after the real execution and stable host checkpoint, before the
+    # seal commit point. This must not turn the existing failure into a rerun.
+    monkeypatch.setattr(f.worker, "seal_checkpoint", lambda row: False)
+    f.worker.scan()
+    saved = f.worker.journal.record(f.task["task_id"])
+    checkpoint = saved["checkpoint"]
+    assert len(f.calls) == 1 and checkpoint["complete"]
+    assert checkpoint["report"]["status"] == "fail"
+    assert not (f.worker.journal.run_dir(f.task["task_id"]) / "sealed/result.json").exists()
+    runtimes = checkpoint["environment"]["variants"]
+    assert runtimes["base"]["llvm_hash"] == "f" * 40
+    assert runtimes["candidate"]["llvm_hash"] == original_task["llvm_hash"]
+    assert runtimes["base"]["backend_enabled"] is True
+    assert runtimes["candidate"]["backend_enabled"] is False
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("A complete checkpoint must not rebuild, retest or resolve new runtimes")
+    monkeypatch.setattr(f.worker.manager, "acquire_task", forbidden)
+    monkeypatch.setattr(f.worker.driver, "run", forbidden)
+    monkeypatch.setattr(f.worker.relay, "source_variants", forbidden)
+    restarted = Worker(f.worker.config, relay=f.worker.relay, manager=f.worker.manager,
+                       driver=f.worker.driver, executor_factory=f.worker.executor_factory)
+    restarted.scan()
+    delivery = restarted.journal.delivery(f.task["task_id"])
+    result = json.loads(Path(delivery["payload_path"]).read_text())
+    assert result["status"] == "fail" and result["run_id"] == saved["run_id"]
+    assert result["task"] == original_task == f.task and "variants" not in f.task
+    assert result["environment"] == checkpoint["environment"]
+    assert len(f.calls) == 1 and f.uploads == [(f.task["task_id"], saved["run_id"])]
+    assert restarted.journal.task(f.task["task_id"])["phase"] == "published"
+
+
+
+def test_invalid_source_metadata_is_terminal_configuration_failure(recovery_worker, monkeypatch):
+    from agent_ci.protocol import ContractError
+    f = recovery_worker
+    def invalid_sources(task):
+        raise ContractError("Task base environment identity does not match frozen source")
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Invalid frozen source metadata must not create an environment")
+    monkeypatch.setattr(f.worker.relay, "source_variants", invalid_sources)
+    monkeypatch.setattr(f.worker.manager, "acquire_task", forbidden)
+    f.worker.scan()
+    f.worker.scan()
+    saved = f.worker.journal.record(f.task["task_id"])
+    result = json.loads(Path(saved["delivery"]["payload_path"]).read_text())
+    assert result["status"] == "infra_error" and saved["phase"] == "published"
+    assert saved["recovery"]["failure_code"] == "configuration_invalid"
+    assert saved["recovery"]["state"] == "exhausted"
+    assert not f.calls and len(f.uploads) == 1

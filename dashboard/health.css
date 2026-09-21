@@ -22,3 +22,7 @@
 .health-history { padding-left:18px; line-height:1.9; }
 .health-panel button:focus-visible { outline:3px solid #76b997; outline-offset:3px; }
 @media(max-width:760px) { .health-panel { padding:16px; } .health-heading { align-items:flex-start; flex-wrap:wrap; } .health-cards { grid-template-columns:repeat(2,minmax(0,1fr)); } .health-detail-grid { grid-template-columns:1fr; gap:0; } }
+
+.health-upload + .health-upload { border-top:1px dashed var(--border); padding-top:16px; margin-top:16px; }
+.health-history { overflow-wrap:anywhere; }
+.health-section .button { margin-top:12px; }

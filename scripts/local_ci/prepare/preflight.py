@@ -102,6 +102,20 @@ def check_configuration(
         type(cleanup_timeout) is int and cleanup_timeout > 0,
         "Task process cleanup requires a positive whole-number timeout in seconds; the default is 60",
     )
+    recovery_defaults = {
+        "codex_attempts": 10, "codex_timeout_seconds": 21600, "execution_attempts": 3,
+        "codex_resume_no_progress_attempts": 2, "recovery_timeout_seconds": 21600,
+        "sealing_attempts": 3, "publish_fast_attempts": 5,
+        "publish_retry_interval_seconds": 3600, "progress_warning_seconds": 1800,
+        "progress_stalled_seconds": 3600, "retry_delay_seconds": 30,
+    }
+    positive = all(type(config.get(key, default)) is int and config.get(key, default) > 0
+                   for key, default in recovery_defaults.items())
+    switches = config.get("codex_session_switches", 1)
+    warning, stalled = config.get("progress_warning_seconds", 1800), config.get("progress_stalled_seconds", 3600)
+    check("recovery_policy", positive and type(switches) is int and switches >= 0
+          and type(warning) is int and type(stalled) is int and stalled >= warning,
+          "Recovery counts/timeouts must be positive; session switches may be zero and stalled review follows warning")
     if config.get("control_root"):
         control = Path(config["control_root"])
         check(

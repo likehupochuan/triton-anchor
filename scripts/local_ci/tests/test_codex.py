@@ -59,6 +59,8 @@ def test_cli_resumes_with_original_configuration_and_without_service_credentials
         )
     assert "resume" not in commands[0]
     assert "resume" in commands[1] and "fixture-session" in commands[1]
+    outcome = driver.run(executor, cancelled=threading.Event(), deadline=time.monotonic()+5, session_mode="new")
+    assert "resume" not in commands[2] and outcome["session_reused"] is False
     assert sessions[0][0]["config.toml"] == settings
     assert "GITEE_TOKEN" not in sessions[0][1]
     assert sessions[0][1]["COMPANY_CREDENTIAL"] == "fixture-provider-key"
@@ -74,6 +76,7 @@ def test_cli_resumes_with_original_configuration_and_without_service_credentials
     ("401 Unauthorized: secret token", "auth_error"),
     ("429 rate limit exceeded", "rate_limited"),
     ("unexpected internal error", "failed"),
+    ("session not found", "session_invalid"),
 ])
 def test_cli_health_classifies_errors_without_publishing_text(tmp_path, message, status):
     driver = CodexDriver({}, tmp_path)
