@@ -111,7 +111,15 @@ function renderDetail(run) {
   const pendingEvidence=evidencePending(run);
   const head=el('div','ci-detail-head'); const heading=el('div'); heading.append(el('p','eyebrow','验证与审查'),el('h2','',title(run))); head.append(heading,badge(run.conclusion==='error'&&pendingEvidence?'evidence_pending':run.conclusion));root.append(head);
   const identity=el('div','ci-identity'); identity.append(el('code','',displaySha(run)),el('span','',date(run.completed_at))); root.append(identity);
-  facts(root,[['本地验证',pendingEvidence?'证据待确认':labels[run.local_conclusion]||run.local_conclusion],['环境',run.environment.profile||'未记录']]);
+  const environmentRows = run.environment.variants
+    ? ['base','candidate'].map(variant => {
+      const environment = run.environment.variants[variant];
+      const profile = LocalCIData.environmentProfile(run.environment,variant) || '未记录';
+      const backend = environment?.backend_enabled === true ? ' · 后端开启' : environment?.backend_enabled === false ? ' · 后端关闭' : '';
+      return [variant+' 环境',profile+backend];
+    })
+    : [['环境',LocalCIData.environmentProfile(run.environment)||'未记录']];
+  facts(root,[['本地验证',pendingEvidence?'证据待确认':labels[run.local_conclusion]||run.local_conclusion],...environmentRows]);
   if(run.superseded)root.append(el('p','ci-notice','任务已失效或被新任务替代；以下保留该次执行记录，不作为当前提交的合入依据。'));
   if(run.evidence_delivery?.status==='incomplete')root.append(el('p','ci-notice',pendingEvidence?'必传检查证据未完整发布，整体结论待确认；已执行检查结果保持原状态。':run.local_conclusion==='passed'?'执行通过，证据发布不完整。':'证据发布不完整，已执行检查结果保持原状态。'));
   if(run.receiver_message)root.append(el('p','ci-notice',run.receiver_message));

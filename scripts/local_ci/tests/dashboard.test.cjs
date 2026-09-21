@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { normalize, business, blockerGroups } = require('../../../dashboard/data.js');
+const { normalize, business, blockerGroups, environmentProfile } = require('../../../dashboard/data.js');
 const { assess: assessHealth, readSnapshot, readAlerts, readHealth, monitorReading, source: healthSource, taskFacts, historyEvents, eventText } = require('../../../dashboard/health.js');
 const task = (id, date) => ({task_id:id, repository:'example/repo',pr_number:7,target_branch:'main',head_sha:('f'+id).repeat(20),tested_sha:id.repeat(40),captured_at:date});
 
@@ -268,9 +268,38 @@ test('full view excludes impact-only selection and preserves failing operator de
   let data = business(normalize({schema:'triton-anchor-dashboard',tasks:[run]}));
   assert.equal(data.fullTest.operators[0].status,'failed');
   assert.equal(data.fullTest.operators[0].failure_stage,'准确率验证');
+  assert.equal(data.fullTest.run.backend,'fixture');
   run.result.checks[0].details["flaggems-summary"].mode='impact';
   data = business(normalize({schema:'triton-anchor-dashboard',tasks:[run]}));
   assert.equal(data.fullTest.operators.length,0);
+});
+
+test('variant environments preserve both sources and use candidate for business results', () => {
+  const environment = {variants:{base:{profile:'triton-3.0',backend_enabled:true},
+    candidate:{profile:'triton-3.1',backend_enabled:false}}};
+  const feed = {schema:'triton-anchor-dashboard',tasks:[{task:task('a','2026-09-10'),result:{environment,checks:[
+    {tool_id:'backend_tests',status:'not_applicable'},
+    {tool_id:'compile_time',status:'pass',details:{candidate:{summary:{add:{compile_est:{median_ms:7}}}}}},
+  ]}}]};
+  const normalized = normalize(feed);
+  assert.deepEqual(normalized.runs[0].environment,environment);
+  assert.equal(environmentProfile(environment,'base'),'triton-3.0');
+  let data = business(normalized);
+  assert.equal(data.backends.backends.length,0);
+  assert.equal(data.performance.backend,'triton-3.1');
+  assert.equal(data.performance.compile_time.backend,'triton-3.1');
+  environment.variants.candidate = {profile:'triton-3.0',backend_enabled:true};
+  feed.tasks[0].result.checks = [{tool_id:'backend_tests',status:'pass'},
+    {tool_id:'flaggems',status:'pass',details:{'flaggems-summary':{mode:'full',results:[{op:'add',exit_code:0,passed:1}]}}}];
+  data = business(normalize(feed));
+  assert.equal(data.backends.backends[0].profile,'triton-3.0');
+  assert.equal(data.fullTest.run.backend,'triton-3.0');
+  delete environment.variants.candidate;
+  environment.profile = 'legacy';
+  assert.equal(environmentProfile(environment),'');
+  data = business(normalize(feed));
+  assert.equal(data.fullTest.run.backend,'未记录环境');
+  assert.equal(data.backends.backends[0].profile,'未记录环境');
 });
 
 test('empty initial feed does not create placeholder success data', () => {
@@ -444,7 +473,7 @@ test('all original reasons survive classification, with exact duplicates collaps
   assert.equal(groups.flatMap(group=>group.reasons).length,3);
 });
 
-test('remote review text is inert and missing evidence is distinct from execution failure', () => {
+test('task details render remote text safely and preserve environment and evidence states', () => {
   const vm = require('node:vm');
   const fs = require('node:fs');
   class Element {
@@ -462,7 +491,7 @@ test('remote review text is inert and missing evidence is distinct from executio
   const root = new Element('main');
   const original = '未知异常 <img src=x onerror=alert(1)>';
   const context = {document,URLSearchParams,URL,setInterval:()=>{},fetch:()=>new Promise(()=>{}),
-    location:{search:''},LocalCIData:{blockerGroups},root,
+    location:{search:''},LocalCIData:{blockerGroups,environmentProfile},root,
     run:errorRun({summary:'Task worker revision differs from installed control',
       blocking_reasons:['必要审查未通过：architecture',original]})};
   vm.runInNewContext(fs.readFileSync(require.resolve('../../../dashboard/local-ci.js'),'utf8')+
@@ -471,6 +500,19 @@ test('remote review text is inert and missing evidence is distinct from executio
   const rendered = flatten(root);
   assert.ok(rendered.some(node=>node.textContent===original));
   assert.ok(!rendered.some(node=>node.tag==='img'));
+  for (const [environment,expected] of [
+    [{variants:{base:{profile:'triton-3.0',backend_enabled:true},candidate:{profile:'triton-3.1',backend_enabled:false}}},
+      ['base 环境','triton-3.0 · 后端开启','candidate 环境','triton-3.1 · 后端关闭']],
+    [{variants:{candidate:{profile:original}}},['base 环境','未记录','candidate 环境',original]],
+    [{profile:'legacy'},['环境','legacy']],
+    [{generation:'legacy-generation'},['环境','legacy-generation']],
+    [{},['环境','未记录']],
+  ]) {
+    context.run=errorRun({environment});
+    vm.runInNewContext('renderDetail(run)',context);
+    const facts=flatten(nodes.get('taskDetail')).find(node=>node.className==='ci-facts');
+    assert.deepEqual(facts.children.slice(2).map(node=>node.textContent),expected);
+  }
   context.run=errorRun({status:'infra_error',checks:[{tool_id:'frontend_smoke',status:'pass'}],
     reviews:[{kind:'architecture',status:'pass'}],
     evidence_delivery:{status:'incomplete',omitted:[{path:'smoke.log',required:true}]},
