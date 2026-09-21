@@ -122,8 +122,10 @@ state_dir/
 必传证据优先使用预算。缺失或无法上传时保留检查实际状态，但整体通过结论改为
 `infra_error`；选传文件超限保留在本机，不改变结论。省略原因写入 `evidence_delivery`。
 报告沿用任务实际文件名，文件从 `sealed/` 与结果一起发布。
-`findings` 按独立问题保存结论、分析及代码证据；`blocking_reasons` 保留失败诊断，
-不在 PR 评论中重复追加为缺陷。`limitations` 单独保存环境、工具或证据不足的限制说明，
+`findings` 按独立问题保存结论、分析及代码证据；`blocking_reasons` 使用阻塞 findings 的简短结论，
+不重复追加检查和审查诊断。无阻塞 finding 时，优先保留 Agent 的阻塞说明，否则以失败检查、
+必要审查的诊断或失败摘要兜底。详细诊断与证据保留在 `checks`、`reviews` 中。
+`limitations` 单独保存环境、工具或证据不足的限制说明，在 PR 评论和 Dashboard 独立展示，
 不改变检查的实际状态和最低验证要求。
 
 GitHub 阶段状态及 `Summary` 使用 Commit Status，PR 写入 `head_sha`，

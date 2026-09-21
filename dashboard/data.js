@@ -30,13 +30,22 @@
     const negative = value => ['fail','failure','failed'].includes(value);
     const unfinished = value => ['infra_error','error','skipped','not_selected','unknown'].includes(value);
     const failedReviews = reviews.filter(item => negative(item.status));
-    if (failedReviews.length || findings.length) {
+    if (findings.length || Array.isArray(run.limitations)) {
+      const id = findings.length || failedReviews.length ? 'review' : 'validation';
+      const reasons = findings.length
+        ? findings.map(finding => ({category:id,reason:finding.summary || '高风险审查发现',source:'审查发现',finding}))
+        : [...new Set(array(run.blocking_reasons))].map(reason => ({category:id,reason,source:'阻塞结论'}));
+      if (!reasons.length && negative(run.local_conclusion || run.conclusion)) {
+        reasons.push({category:id,reason:review.summary || '检查未通过，具体原因见执行报告。',source:'任务摘要'});
+      }
+      return reasons.length ? [{id,...blockerCategories[id],reasons,impacts:[]}] : [];
+    }
+    if (failedReviews.length) {
       // A failed review is already the root cause. Keep each distinct review
       // conclusion readable; checks and evidence remain in the result report.
       const reviewNames = {pr_info:'PR 信息',architecture:'架构契约',intent:'专项审查'};
-      const sources = failedReviews.length ? failedReviews.map(item =>
-        (reviewNames[item.kind] || item.kind) + '：' + (item.summary || '未通过')) :
-        findings.map(item => item.summary || '高风险审查发现');
+      const sources = failedReviews.map(item =>
+        (reviewNames[item.kind] || item.kind) + '：' + (item.summary || '未通过'));
       const reasons = [...new Set(sources.map(value => String(value).replace(/\s+/g,' ').trim()).filter(Boolean))]
         .map(reason => ({category:'review',reason,source:'审查结论'}));
       return [{id:'review',...blockerCategories.review,
@@ -140,7 +149,7 @@
         artifacts, checks, evidence, performance,
         policy: {...(result.policy || {}), docs_only: result.policy?.impact?.level === 'non_executable',
                  manual_full: task.full, changed_paths: array(result.policy?.changes).map(c => c.path)},
-        blocking_reasons: blockers, evidence_delivery,
+        blocking_reasons: blockers, limitations:Array.isArray(result.limitations) ? result.limitations : null, evidence_delivery,
         ai_review: {summary: result.summary,
           ...Object.fromEntries(['pr_info','architecture','intent'].filter(kind => reviews[kind])
             .map(kind => [kind, {...reviews[kind], status: status(reviews[kind].status)}])),

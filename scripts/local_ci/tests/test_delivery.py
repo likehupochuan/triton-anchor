@@ -220,18 +220,42 @@ def test_code_failure_and_tool_limitations_have_separate_explanations(tmp_path):
     value["checks"][0].update(status="fail", summary="Plugin discovery regression reproduced")
     value["checks"].append({"tool_id": "control_plane", "status": "infra_error",
                             "summary": "Checker rejects an in-tree symlink"})
+    value["reviews"][1].update(status="fail", summary="Plugin discovery violates the architecture contract")
+    value["blocking_reasons"] = ["Plugin discovery regression reproduced"]
     value["findings"] = [{"severity": "high", "blocking": True,
                            "summary": "Installed plugins are not discovered",
                            "qualification": "Directory scanning omits entry-point plugins",
-                           "code_evidence": ["src/backends.py:17"]}]
+                           "code_evidence": ["src/backends.py:17"]},
+                          {"severity": "high", "summary": "Initialization leaks a resource"}]
     value["limitations"] = ["The checker limitation does not affect the independently reproduced regression"]
     result = seal(tmp_path, value)
     assert result["status"] == "fail"
-    assert len([reason for reason in result["blocking_reasons"] if "frontend_tests" in reason]) == 1
-    assert not any("control_plane" in reason for reason in result["blocking_reasons"])
+    assert result["blocking_reasons"] == [finding["summary"] for finding in value["findings"]]
+    assert result["checks"][0]["summary"] == value["checks"][0]["summary"]
+    assert result["reviews"][1]["summary"] == value["reviews"][1]["summary"]
     assert any("control_plane" in reason for reason in result["limitations"])
     assert value["limitations"][0] in result["limitations"]
     assert result["findings"] == value["findings"]
+
+
+@pytest.mark.parametrize("source", ["check", "review", "agent", "summary"])
+def test_failure_without_blocking_findings_keeps_a_reason(tmp_path, source):
+    value = answer()
+    value["findings"] = [{"severity": "low", "summary": "Improve error wording"}]
+    if source in {"check", "agent"}:
+        value["checks"][0].update(status="fail", summary="Regression reproduced")
+    elif source == "review":
+        value["reviews"][1].update(status="fail", summary="Architecture contract broken")
+    else:
+        value.update(status="fail", summary="Independent validation failed")
+    if source == "agent":
+        value["blocking_reasons"] = ["Independent blocker"]
+    expected = {"check": "frontend_tests：Regression reproduced",
+                "review": "必要审查未通过：architecture — Architecture contract broken",
+                "agent": "Independent blocker", "summary": "Independent validation failed"}
+    result = seal(tmp_path, value)
+    assert result["status"] == "fail"
+    assert result["blocking_reasons"] == [expected[source]]
 
 
 def test_limitations_do_not_turn_a_completed_review_into_a_code_failure(tmp_path):

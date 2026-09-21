@@ -119,6 +119,7 @@ def seal_result(
     if not isinstance(reasons, list):
         raise ContractError("Blocking reasons must be a list")
     reasons = [str(reason) for reason in reasons]
+    failure_diagnostics = []
     limitations = agent_result.get("limitations", [])
     if not isinstance(limitations, list) or any(not isinstance(item, str) for item in limitations):
         raise ContractError("Limitations must be a list of explanations")
@@ -142,7 +143,7 @@ def seal_result(
     for check in checks:
         if check["status"] in {"fail", "infra_error", "cancelled"}:
             reason = f"{check['tool_id']}：{check['summary'] or check['status']}"
-            destination_reasons = reasons if check["status"] == "fail" else limitations
+            destination_reasons = failure_diagnostics if check["status"] == "fail" else limitations
             if check["status"] == "fail" or check["tool_id"] not in policy.get("required_checks", []):
                 destination_reasons.append(reason)
             failed |= check["status"] == "fail"
@@ -152,7 +153,7 @@ def seal_result(
     for kind in required_reviews:
         review = reviewed.get(kind, {})
         if review.get("status") != "pass":
-            (reasons if review.get("status") == "fail" else limitations).append(
+            (failure_diagnostics if review.get("status") == "fail" else limitations).append(
                 f"必要审查未通过：{kind}"
                 + (f" — {review['summary']}" if review.get("summary") else "")
             )
@@ -161,13 +162,14 @@ def seal_result(
     for review in reviews:
         if review["kind"] not in required_reviews and review["status"] in {"infra_error", "cancelled"}:
             limitations.append(f"{review['kind']}：{review['summary'] or review['status']}")
+    blocking_summaries = []
     for finding in findings:
         if finding.get("blocking") is True or finding.get("severity") in {
             "high",
             "critical",
         }:
             failed = True
-            reasons.append(str(finding.get("summary", "高风险审查发现")))
+            blocking_summaries.append(str(finding.get("summary") or "高风险审查发现"))
     requested = agent_result.get("status", "pass")
     if requested not in RESULT_STATUSES:
         raise ContractError("Invalid Agent result status")
@@ -179,6 +181,8 @@ def seal_result(
         status = "fail"
     else:
         status = "infra_error" if incomplete else "pass"
+    # Findings own defect conclusions; diagnostics are a fallback, not extra issues.
+    reasons = blocking_summaries or reasons or failure_diagnostics
     summary = str(agent_result.get("summary", ""))
     if status == "fail" and not reasons:
         reasons.append(summary or status)

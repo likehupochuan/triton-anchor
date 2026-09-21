@@ -90,6 +90,15 @@ function renderBlockers(parent, run) {
     box.append(el('h3','','阻塞原因'));
     const list=el('ul'),visible=[];
     for(const group of selected){
+      if(Array.isArray(run.limitations)||group.reasons.some(item=>item.finding)) {
+        for(const item of group.reasons) {
+          const row=el('li','',publicText(item.reason));
+          if(item.finding?.qualification)row.append(el('p','ci-muted',publicText(item.finding.qualification)));
+          if(arr(item.finding?.code_evidence).length)evidenceList(row,item.finding.code_evidence);
+          list.append(row);
+        }
+        continue;
+      }
       // Show one root cause per category. Check rows and generic incomplete
       // impacts remain available in the detail table.
       const direct=group.reasons.filter(item=>!String(item.source||'').startsWith('检查：') && item.source!=='展示说明');
@@ -127,6 +136,12 @@ function renderDetail(run) {
   const metrics=el('div','ci-metrics'); const checks=arr(run.checks); const values=[[checks.filter(c=>c.required).length,'最低必检项'],[checks.filter(c=>c.status==='passed').length,'已通过检查'],[checks.filter(c=>['skipped','not_selected','not_applicable'].includes(c.status)).length,'未选择 / 未执行 / 不适用'],[arr(run.artifacts).filter(artifact=>!artifact.omitted).length,'所选证据文件']];
   for(const [value,label] of values){const box=el('div','ci-metric');box.append(el('strong','',value),el('span','',label));metrics.append(box);}root.append(metrics);
   renderBlockers(root,run);
+  if(arr(run.limitations).length) {
+    const limits=section(root,'限制说明');
+    const list=el('ul','ci-evidence');
+    for(const limitation of new Set(run.limitations))list.append(el('li','',publicText(limitation)));
+    limits.append(list);
+  }
   const scope=section(root,'检查选择与执行结果');
   const policy=run.policy||{};scope.append(el('p','ci-muted',policy.docs_only?'文档变更：依规则免构建；架构审查仍需提供证据。':policy.manual_full?'维护者手动触发全量测试。':'按改动影响选择检查，并满足主机控制面规定的最低要求。'));
   const wrap=el('div','ci-table-shell'),table=el('table','ci-table'),thead=el('thead'),header=el('tr'); for(const s of ['检查','要求','结果','结果说明'])header.append(el('th','',s));thead.append(header);table.append(thead);const tbody=el('tbody');

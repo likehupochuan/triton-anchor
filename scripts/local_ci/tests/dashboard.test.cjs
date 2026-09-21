@@ -473,7 +473,7 @@ test('all original reasons survive classification, with exact duplicates collaps
   assert.equal(groups.flatMap(group=>group.reasons).length,3);
 });
 
-test('task details render remote text safely and preserve environment and evidence states', () => {
+test('task details preserve findings, limitations, environment and evidence states safely', () => {
   const vm = require('node:vm');
   const fs = require('node:fs');
   class Element {
@@ -512,6 +512,36 @@ test('task details render remote text safely and preserve environment and eviden
     vm.runInNewContext('renderDetail(run)',context);
     const facts=flatten(nodes.get('taskDetail')).find(node=>node.className==='ci-facts');
     assert.deepEqual(facts.children.slice(2).map(node=>node.textContent),expected);
+  }
+  const findings=[{summary:'插件未被发现',severity:'high',qualification:'目录扫描遗漏独立安装插件',code_evidence:['src/file.py:17']},
+    {summary:'初始化泄漏资源',blocking:true}];
+  context.run=errorRun({status:'fail',findings,blocking_reasons:findings.map(item=>item.summary),
+    reviews:[{kind:'architecture',status:'fail',summary:'架构审查重复诊断'}],
+    checks:[{tool_id:'control_plane',status:'infra_error',summary:'工具异常'}],limitations:[original,original]});
+  assert.deepEqual(context.run.limitations,[original,original]);
+  vm.runInNewContext('renderDetail(run)',context);
+  const detail=nodes.get('taskDetail');
+  const blockers=detail.children.find(node=>node.className==='ci-blockers');
+  const items=blockers.children.find(node=>node.tag==='ul').children;
+  assert.deepEqual(items.map(node=>node.textContent),findings.map(item=>item.summary));
+  assert.ok(flatten(blockers).some(node=>node.textContent==='src/file.py:17'));
+  assert.ok(flatten(blockers).some(node=>node.textContent===findings[0].qualification));
+  assert.ok(!flatten(blockers).some(node=>['工具异常',original,'架构审查重复诊断'].includes(node.textContent)));
+  for (const status of ['pass','infra_error','cancelled']) {
+    context.run=errorRun({status,limitations:[original,original],
+      checks:[{tool_id:'control_plane',status:status==='pass'?'pass':'infra_error',summary:'工具异常'}]});
+    vm.runInNewContext('renderDetail(run)',context);
+    assert.deepEqual(blockerGroups(context.run),[]);
+    const limits=detail.children.find(node=>node.children.some(child=>child.textContent==='限制说明'));
+    assert.deepEqual(limits.children[1].children.map(node=>node.textContent),[original]);
+    assert.ok(!flatten(limits).some(node=>node.tag==='img'));
+    assert.equal(context.run.local_conclusion,{pass:'passed',infra_error:'error',cancelled:'cancelled'}[status]);
+  }
+  for (const reasons of [['无 finding 的独立失败'],[]]) {
+    context.run=errorRun({status:'fail',summary:'失败摘要',blocking_reasons:reasons,limitations:[]});
+    vm.runInNewContext('renderDetail(run)',context);
+    assert.deepEqual(blockerGroups(context.run)[0].reasons.map(item=>item.reason),reasons.length?reasons:['失败摘要']);
+    assert.ok(!flatten(detail).some(node=>node.textContent==='限制说明'));
   }
   context.run=errorRun({status:'infra_error',checks:[{tool_id:'frontend_smoke',status:'pass'}],
     reviews:[{kind:'architecture',status:'pass'}],

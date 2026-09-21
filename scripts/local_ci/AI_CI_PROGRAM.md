@@ -139,6 +139,8 @@ ops 或 categories 展开后超过上限会报错，不自动截断。空 impact
 分别列成多个问题。`summary` 写简短问题结论，`qualification` 说明原因、触发条件及影响，
 `code_evidence` 给出相关代码路径和行号；多个不同缺陷须分别列出，不能因同文件或同检查而合并。
 `blocking_reasons` 只复用阻塞 findings 的简短结论，不再用另一种措辞重复解释。
+封存层从阻塞 findings 提取这些结论；无阻塞 finding 时，以已有阻塞说明、失败检查或必要审查诊断、
+失败摘要依次兜底，确保失败仍有明确原因。详细诊断与证据保留在 checks 和 reviews 中。
 
 环境、工具、证据发布和不可比测量造成的检查限制写入 `limitations`，不要冒充代码缺陷写入
 findings 或 blocking_reasons。检查本身仍如实记录状态和诊断，封存时自动补充未完成检查的限制；
