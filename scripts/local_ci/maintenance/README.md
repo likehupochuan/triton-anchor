@@ -68,7 +68,7 @@ systemctl --user start triton-anchor-local-ci.service
 | `health.py` | 约每五分钟独立采集心跳、任务进展、恢复预算、容器退出/OOM、systemd 与磁盘状态，发布 `worker-health.json` |
 | Cloudflare Worker | 每五分钟读取公开快照，识别故障、维护告警 Issue 和健康缓存，不远程执行恢复 |
 | Worker 页面 | 展示当前执行、恢复、资源、独立上传等待及近 7 天事件 |
-| Local CI Summary | 派发后为 pending，接收器最多每五分钟读取健康源显示进展；最终结果优先 |
+| Local CI Summary | 任务初始化即为 pending；派发后接收器最多每五分钟读取健康源显示进展，最终结果优先 |
 | 本机 Journal / systemd 日志 | 保存具体错误和私有诊断 |
 
 心跳、采集时间和有效任务进展分别记录。容器状态来自实际查询，查询失败标记未知；
@@ -149,7 +149,6 @@ node --test scripts/local_ci/maintenance/cloudflare/worker.test.mjs scripts/loca
 使用维护者派发的测试任务或适用的已有记录，记录 task_id、run_id 和 head/tested SHA。
 确认前置检查、审批和投递按依赖推进，Worker 经准备、执行、封存、上传完成，
 执行期间心跳持续更新，GitHub、Gitee 与 Dashboard 的结果及证据一致。
-跨 LLVM 构建验收见 [依赖验证](../prepare/DEPENDENCY_MOUNTS.md#validation)。
 
 ### 上传恢复演练
 

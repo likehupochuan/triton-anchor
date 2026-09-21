@@ -26,11 +26,11 @@ FlagGems 使用服务器 profile 的固定只读目录；其子模块指针不�
 
 检查按成功依赖推进，状态回写可与下一检查并行：
 
-1. 冻结任务，创建 Basic 状态；PR 任务校验信息后执行 Basic CI。
+1. 冻结任务并取得执行归属，创建 Basic 与 pending Summary；PR 任务校验信息后执行 Basic CI。
 2. Basic 通过后执行 API Compatibility，API 通过后执行 Security Gate。
 3. 同仓库任务在前置检查通过后投递；外部 fork 在检查及回写完成后生成审批卡。
 4. 外部 fork 经 `local-ci-fork-approval` environment 审批，复查冻结身份后投递。
-5. 源码与任务成功发布到 Gitee 后创建 Summary，并启动接收器。
+5. 源码与任务成功发布到 Gitee 后更新 Summary 的等待说明，并启动接收器。
 
 前置失败仅结束已到达的阶段。外部审批拒绝或校验失败终止审批阶段，
 取消记录为错误状态，不创建 Dispatch。
@@ -44,23 +44,28 @@ PR 正文提供概述、影响范围和验证情况，创建 PR 时自动使用�
 只有 environment 明确记录人工拒绝，才向仍匹配的 PR 通知审批未通过；
 审批校验错误或取消按对应状态处理。任务取消仅更新状态和 Gitee 停止标记。
 
-## 状态与分支保护
+## 检查状态
 
 Basic、API、Security、Approve、Dispatch 和 Summary 均使用 Commit Status。
 PR 状态写入 `head_sha`，实际测试及证据对应冻结的 `tested_sha`；
 分支任务状态写入 `tested_sha`。控制分支自身 push 也发布前置阶段状态。
 
-分支保护要求以下五个 context：
+`Local CI Summary` 表示整轮验证的结论，阶段检查只在执行到该阶段时创建。
+Summary 从可信任务初始化开始为 `pending`，覆盖前置检查、外部审批、
+任务投递、服务器执行与结果接收；阶段切换不会使整轮验证短暂显示为全部成功。
 
-- `Basic CI`
-- `API Compatibility`
-- `Security Gate`
-- `Local CI Dispatch`
-- `Local CI Summary`
+| 情况 | Summary |
+| --- | --- |
+| 验证进行中、等待审批或结果 | `pending` |
+| 最终结果及必需证据校验通过，验证成功 | `success` |
+| PR 信息不完整、前置检查或服务器验证失败、人工拒绝审批 | `failure` |
+| 取消、任务失效、审批配置异常、投递失败或接收超时 | `error` |
 
-`Local CI Approve` 只用于外部 fork，审批结果通过 Dispatch 的依赖反映。
-在 GitHub 保存 required contexts 及管理员约束；启用严格基线检查时，
-目标分支更新需要新的合并基线验证。
+前置失败不创建后续未执行项，Summary 指出失败原因并链接对应运行。
+新任务及完整重跑重新初始化 Summary，旧运行不能覆盖新运行的结论；
+重复初始化不会重新打开已结束的阶段。结果接收器只在成功投递后接管 Summary。
+`Local CI Approve` 只用于外部 fork，同仓库任务不创建该项。
+这些状态报告验证进度与结果，不配置强制合并规则，也不保证 Merge 按钮置灰。
 
 阶段与工作流绑定 task ID、workflow run ID 和 attempt。
 Basic 状态标识当前执行归属，接收器还要求对应 Dispatch 已成功；

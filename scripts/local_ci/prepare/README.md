@@ -191,8 +191,7 @@ Worker 与两个 timer 应处于 active。health 和 control-update 是 oneshot�
 
 真实任务沿 GitHub → Gitee → Worker 执行，记录 task_id、run_id、head/tested SHA、
 构建结果及证据路径。相同源码和环境的有效记录可复用。
-各版本 frontend build/install/smoke、3.0 后端及两侧 LLVM 隔离的验证见
-[依赖验收](DEPENDENCY_MOUNTS.md#validation)；任务派发见 [网关文档](../../ci/README.md)。
+任务派发见 [网关文档](../../ci/README.md)。
 
 服务器安装、Cloudflare 部署与 Dashboard 发布各有独立入口。
 外部展示和告警更新见 [维护部署](../maintenance/README.md#部署与验证)。

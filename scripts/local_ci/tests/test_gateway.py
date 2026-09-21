@@ -138,8 +138,8 @@ class FakeGitHub:
     def latest_dispatch(self, task):
         return {}
 
-    def reset_existing_summary(self, task):
-        pass
+    def stage_status(self, task, key):
+        return {}
 
     def latest_summary(self, task):
         return None
@@ -1035,16 +1035,21 @@ class GatewayBehaviorTests(unittest.TestCase):
             self.assertEqual([call.args[1:4] for call in check.call_args_list], [("basic", "completed", "failure")])
         self.assertEqual(self.gh.statuses, [])
 
-        # Finish pending statuses left by the short-lived early-summary version.
-        pending = {"state": "pending", "target_url": "https://github.com/run#local-ci-task=" + self.task["task_id"]}
-        for outcomes in (
-            {"prepare": "success", "basic": "failure", "enqueue": "skipped"},
-            {**dict.fromkeys(("prepare", *g.CHECK_NAMES, "card"), "success"),
-             "approval": "failure", "enqueue": "skipped"},
+        # The overall verdict distinguishes check failures from infrastructure errors.
+        for outcomes, expected in (
+            ({"prepare": "success", "basic": "failure", "enqueue": "skipped"}, "failure"),
+            ({"prepare": "success", "basic": "cancelled", "enqueue": "skipped"}, "error"),
+            ({"prepare": "failure", "basic": "skipped", "enqueue": "skipped"}, "error"),
+            ({**dict.fromkeys(("prepare", *g.CHECK_NAMES, "card"), "success"),
+              "approval": "failure", "enqueue": "skipped"}, "error"),
+            ({**dict.fromkeys(("prepare", *g.CHECK_NAMES), "success"), "enqueue": "failure"}, "error"),
         ):
-            with patch.object(self.gh, "latest_summary", return_value=pending), patch.dict(g.os.environ, {"GITHUB_RUN_ID": ""}):
-                g.finalize_preflight(self.gh, self.task, outcomes)
-            self.assertEqual(self.gh.statuses[-1], (self.task["task_id"], "error"))
+            client = RecordingGitHub(self.gh)
+            with self.subTest(outcomes=outcomes), patch.dict(g.os.environ, {"GITHUB_RUN_ID": "12345", "GITHUB_RUN_ATTEMPT": "1"}):
+                g.begin_checks(client, self.task)
+                g.finalize_preflight(client, self.task, outcomes)
+                self.assertEqual(client.latest_summary(self.task)["state"], expected)
+                self.assertFalse(any(row["state"] == "pending" for row in client.commit_statuses(self.head).values()))
 
     def test_stage_completion_advances_only_after_success_without_summary_or_comments(self):
         outcomes = {"success": "success", "failure": "failure",
@@ -1116,12 +1121,13 @@ class GatewayBehaviorTests(unittest.TestCase):
             self.assertTrue(client.owns_task(task, workflow=True))
             self.assertEqual(client.task_start({**task, "event_kind": "manual"}), {})
             g.begin_checks(client, task)
-            self.assertEqual(set(client.commit_statuses(self.head)), {g.CHECK_NAMES["basic"]})
+            self.assertEqual(set(client.commit_statuses(self.head)), {g.CHECK_NAMES["basic"], g.SUMMARY_CONTEXT})
             for stage in g.CHECK_NAMES:
                 self.assertTrue(g.sync_preflight(client, task, {stage: "success"}))
             statuses = client.commit_statuses(self.head)
-            self.assertEqual(set(statuses), set(g.CHECK_NAMES.values()))
-            self.assertTrue(all(row["state"] == "success" for row in statuses.values()))
+            self.assertEqual(set(statuses), {*g.CHECK_NAMES.values(), g.SUMMARY_CONTEXT})
+            self.assertTrue(all(statuses[name]["state"] == "success" for name in g.CHECK_NAMES.values()))
+            self.assertEqual(statuses[g.SUMMARY_CONTEXT]["state"], "pending")
             self.assertTrue(all(path == f"statuses/{self.head}" for path, method, _ in client.writes if method == "POST"))
 
             client.check(task, "dispatch", "completed", "success", "Dispatched", "Dispatched")
@@ -1149,7 +1155,7 @@ class GatewayBehaviorTests(unittest.TestCase):
         message = self.gh.comments[0]
         for text in errors:
             self.assertIn(text, message)
-        self.assertEqual(self.gh.statuses, [])
+        self.assertEqual(self.gh.statuses, [(self.task["task_id"], "failure")])
         self.assertEqual(self.gh.check_calls[-1][1:4], ("basic", "completed", "failure"))
 
     def test_result_comment_separates_evidence_delivery_from_execution(self):
@@ -1248,19 +1254,24 @@ class GatewayBehaviorTests(unittest.TestCase):
             "GITHUB_RUN_ID": "12345", "GITHUB_RUN_ATTEMPT": "1",
             "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": g.REPOSITORY,
         }):
+            with patch.object(client, "status", side_effect=RuntimeError("Summary publication failed")):
+                with self.assertRaisesRegex(RuntimeError, "Summary publication failed"):
+                    g.begin_checks(client, self.task)
+            # Retrying initialization repairs Summary without duplicating Basic.
             g.begin_checks(client, self.task)
-            self.assertEqual([row["context"] for _, _, row in client.writes], [g.CHECK_NAMES["basic"]])
+            self.assertEqual([row["context"] for _, _, row in client.writes], [g.CHECK_NAMES["basic"], g.SUMMARY_CONTEXT])
             client.fail_next_status = True
             with self.assertRaisesRegex(RuntimeError, "Status publication"):
                 g.sync_preflight(client, self.task, {"basic": "success"})
             g.sync_preflight(client, self.task, {"basic": "success"})
             for key in ("api", "security"):
+                self.assertEqual(client.latest_summary(self.task)["state"], "pending")
                 g.sync_preflight(client, self.task, {key: "success"})
             client.check(self.task, "approve", "in_progress", None, "Awaiting approval", "Awaiting approval", g.workflow_url())
             approval = client.status_rows[self.head][0]
             self.assertEqual(approval["state"], "pending")
             self.assertTrue(approval["target_url"].startswith(g.workflow_url() + "#"))
-            self.assertNotIn(g.SUMMARY_CONTEXT, [row["context"] for _, _, row in client.writes])
+            self.assertEqual(client.latest_summary(self.task)["state"], "pending")
             for key in ("approve", "dispatch"):
                 client.check(self.task, key, "completed", "success", "Passed", "Passed", g.workflow_url())
             client.status(self.task, "pending", "Waiting for worker", "https://gitee.com/report")
@@ -1324,7 +1335,7 @@ class GatewayBehaviorTests(unittest.TestCase):
         by_context = {row["context"]: row for _, _, row in client.writes if "context" in row}
         self.assertEqual(by_context[g.CHECK_NAMES["basic"]]["state"], "pending")
         self.assertEqual(by_context["local-ci/summary"]["state"], "error")
-        self.assertNotIn(g.SUMMARY_CONTEXT, by_context)
+        self.assertEqual(by_context[g.SUMMARY_CONTEXT]["state"], "pending")
         self.assertNotIn("external/build", by_context)
         self.assertEqual(client.check_rows[self.tested][0]["conclusion"], "cancelled")
         self.assertFalse(any(path == "check-runs" for path, _, _ in client.writes))
@@ -1385,7 +1396,7 @@ class GatewayBehaviorTests(unittest.TestCase):
                 patch.object(g, "load_task", return_value=self.task), patch.object(g, "output"), \
                 patch.dict(g.os.environ, {"GITHUB_STEP_SUMMARY": ""}):
             g.begin_checks(self.gh, self.task)
-            self.assertEqual(events, [("basic", "queued")])
+            self.assertEqual(events, [("basic", "queued"), ("summary", "pending")])
             for stage, visible in (("basic", ["basic", "api"]),
                                    ("api", ["basic", "api", "security"]),
                                    ("security", ["basic", "api", "security"])):
@@ -1393,7 +1404,7 @@ class GatewayBehaviorTests(unittest.TestCase):
                 self.assertEqual(list(dict.fromkeys(key for key, _ in events if key != "summary")), visible)
             with patch.object(g.sys, "argv", ["gateway.py", "card", "--stages", json.dumps(stages)]):
                 self.assertEqual(g.main(), 0)
-            self.assertEqual(events[-1], ("approve", "in_progress"))
+            self.assertEqual(events[-2:], [("approve", "in_progress"), ("summary", "pending")])
             self.assertEqual(list(dict.fromkeys(key for key, _ in events if key != "summary")), ["basic", "api", "security", "approve"])
             with patch.object(g.sys, "argv", ["gateway.py", "approval"]):
                 self.assertEqual(g.main(), 0)
@@ -1474,7 +1485,7 @@ class GatewayBehaviorTests(unittest.TestCase):
             self.assertEqual(latest[g.CHECK_NAMES["basic"]]["state"], "pending")
             for key in ("api", "dispatch"):
                 self.assertEqual(latest[g.ALL_CHECK_NAMES[key]]["state"], "error")
-            self.assertEqual(latest[g.SUMMARY_CONTEXT]["state"], "error")
+            self.assertEqual(latest[g.SUMMARY_CONTEXT]["state"], "pending")
             self.assertNotIn(g.CHECK_NAMES["security"], latest)
         before = len(client.writes)
         with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "100", "GITHUB_RUN_ATTEMPT": "1"}):
@@ -1547,6 +1558,17 @@ class GatewayBehaviorTests(unittest.TestCase):
             self.assertEqual(g.receive_result(client, str(self.remote), self.task["task_id"]), "obsolete")
         self.assertNotIn(f"statuses/{self.head}", [path for path, _, _ in client.writes])
 
+    def test_superseded_preflight_finishes_only_its_pending_summary(self):
+        for state in ("pending", "success"):
+            with self.subTest(state=state), patch.dict(g.os.environ, {"GITHUB_RUN_ID": "12345", "GITHUB_RUN_ATTEMPT": "1"}):
+                client = RecordingGitHub(self.gh)
+                g.begin_checks(client, self.task)
+                if state == "success":
+                    client.status(self.task, "success", "Local CI: pass")
+                with patch.object(g, "is_current", return_value=False):
+                    g.finalize_preflight(client, self.task, {"prepare": "success", "basic": "cancelled"})
+                self.assertEqual(client.latest_summary(self.task)["state"], "error" if state == "pending" else "success")
+
     def test_rejected_approval_notifies_contributor_with_commit_and_review(self):
         stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
         stages.update(card="success", approval="failure", enqueue="skipped")
@@ -1559,8 +1581,11 @@ class GatewayBehaviorTests(unittest.TestCase):
         with patch.dict(g.os.environ, {
             "GITHUB_RUN_ID": "12345", "GITHUB_REPOSITORY": g.REPOSITORY,
             "GITHUB_SERVER_URL": "https://github.com",
+        }), patch.object(self.gh, "latest_summary", return_value={
+            "state": "pending", "target_url": "https://github.com/run#local-ci-task=" + self.task["task_id"],
         }):
             g.finalize_preflight(self.gh, self.task, stages)
+        self.assertEqual(self.gh.statuses[-1], (self.task["task_id"], "failure"))
         comment = self.gh.comments[0]
         self.assertTrue(comment.startswith("@contributor"))
         self.assertIn(f"PR 提交：`{self.head}`", comment)

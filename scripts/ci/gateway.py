@@ -564,11 +564,6 @@ class GitHub:
             return row
         return {"status": "not_started"} if start else {}
 
-    def reset_existing_summary(self, task: dict) -> None:
-        """Invalidate a prior verdict without creating a status before dispatch."""
-        self.status(task, "error", "Local CI: previous result superseded; new task not dispatched yet",
-                    workflow_url(), existing_only=True)
-
     def finish_inactive_pr(self, pr_number: int) -> bool:
         pr = self.request(f"pulls/{pr_number}")
         if pr["state"] == "open" and not pr.get("draft"):
@@ -1517,24 +1512,27 @@ def begin_checks(gh: GitHub, task: dict) -> None:
     # can briefly return the previous output immediately after that write.
     if not claimed and not gh.owns_task(task, workflow=True):
         raise ValueError("A newer workflow owns this task")
-    if not claimed:
+    if not claimed and gh.stage_status(task, "basic").get("status") == "completed":
         return
+    gh.status(task, "pending", "Local CI: preflight checks in progress", workflow_url())
     gh.retire_open_checks(task, superseded=True)
-    gh.reset_existing_summary(task)
 
 
 def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
     if not gh.owns_task(task, workflow=True):
         return
+    previous = gh.latest_summary(task) or {}
+    pending = (previous.get("state") == "pending" and
+               status_identity(previous).get("local-ci-task") == task["task_id"])
     if not is_current(gh, task):
         gh.retire_open_checks(task)
+        if pending:
+            gh.status(task, "error", "Local CI: task superseded; verification stopped", workflow_url(),
+                      existing_only=True, expected_pending_id=previous.get("id"))
         return
     if stages.get("enqueue") == "success":
         # The receiver owns summary after dispatch, possibly already completed.
         return
-    previous = gh.latest_summary(task) or {}
-    pending = (previous.get("state") == "pending" and
-               urlparse(previous.get("target_url") or "").fragment == f"local-ci-task={task['task_id']}")
     dispatch = gh.latest_dispatch(task)
     if dispatch.get("status") == "completed" and dispatch.get("conclusion") == "success":
         # Delivery succeeded; a receiver startup error must not overwrite a result
@@ -1547,7 +1545,10 @@ def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
     gh.retire_open_checks(task)
     if not preflight_passed(stages):
         if pending:
-            gh.status(task, "error", "Local CI: preflight checks failed; task not dispatched", workflow_url())
+            failed = next((name for key, name in CHECK_NAMES.items() if stages.get(key) == "failure"), None)
+            description = (f"Local CI: {failed} failed; subsequent verification not run" if failed else
+                           "Local CI: preflight interrupted; task not dispatched")
+            gh.status(task, "failure" if failed else "error", description, workflow_url())
         return  # Only the reached prerequisite checks are completed above.
     if task.get("external_fork") and stages.get("card", "success") != "success":
         description = "Local CI: approval card publication failed; worker verification not started"
@@ -1593,7 +1594,7 @@ def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
             },
         )
     if pending:
-        gh.status(task, "error", description, workflow_url())
+        gh.status(task, "failure" if review else "error", description, workflow_url())
 
 
 def current_task(gh: GitHub, control: GitStore, task: dict) -> bool:
@@ -2059,6 +2060,7 @@ def main() -> int:
         if errors:
             gh.check(task, "basic", "completed", "failure", "PR information incomplete",
                      "Update the PR information before Basic CI can start.", workflow_url())
+            gh.status(task, "failure", "Local CI: PR information incomplete; subsequent verification not run", workflow_url())
             gh.comment(task, pr_info_comment(errors))
         else:
             gh.check(task, "basic", "in_progress", None, f"{CHECK_NAMES['basic']}: running",
@@ -2113,9 +2115,11 @@ def main() -> int:
         detail = description
         if workflow_url():
             detail += f"\n\n[Open approval controls and workflow evidence]({workflow_url()})"
-        gh.check(task, "approve", "in_progress" if waiting else "completed",
-                 None if waiting else "success" if eligible else "failure",
-                 description, detail, workflow_url())
+        published = gh.check(task, "approve", "in_progress" if waiting else "completed",
+                             None if waiting else "success" if eligible else "failure",
+                             description, detail, workflow_url())
+        if published and waiting:
+            gh.status(task, "pending", description, workflow_url())
         output("eligible", eligible)
         return 0
     if args.command == "api":

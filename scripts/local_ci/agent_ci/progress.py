@@ -131,7 +131,7 @@ class ReceiverProgress:
         try:
             before = gh.latest_summary(task)
             if not pending_for(before, task):
-                return  # Do not create a summary before successful dispatch.
+                return  # Progress only updates an existing pending summary.
             snapshot = read_health(self.config)
             description = self.description(snapshot, task, datetime.now(timezone.utc).timestamp())
             if not description or description == before.get("description"):

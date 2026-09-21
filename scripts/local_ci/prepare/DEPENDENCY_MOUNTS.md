@@ -92,36 +92,3 @@ Only fixed read-only directory binds are accepted; recursive nested mounts are
 disabled. Host credentials, Docker sockets, task roots and home directories are
 not dependency mounts. Management recovery uses task/session volumes so missing
 toolchains do not prevent evidence export or cleanup.
-
-## Validation
-
-Use the runtime preparation and `preflight.py --probe-runtime` commands in
-[README.md](README.md#部署验收) to verify the installed image and container mounts.
-Then use real tasks or applicable existing evidence to validate source builds.
-These checks establish different facts:
-
-| Check | Evidence |
-| --- | --- |
-| Each configured Triton version | Frontend build, install and smoke results for its frozen source |
-| Triton 3.0 backend | Backend smoke/JIT with the configured PPL and FlagGems dependencies |
-| 3.0 → 3.1 | Same LLVM, distinct profiles; backend enabled only for 3.0; separate venvs and output |
-| 3.0 → 3.2 / 3.4 / 3.5.1 / 3.8 | Both contexts match their own source SHA, LLVM, profile, environment and fingerprint; actual builds on both sides |
-| Same version and LLVM | Shared read-only dependencies with isolated writable build state |
-
-Dispatch through the [GitHub gateway](../../ci/README.md#手动派发与接收), preserving
-the GitHub → Gitee → server path. Full acceptance uses `full=true`; ordinary tasks
-select checks based on the actual diff.
-
-For PR tasks, base is the target commit and candidate is the frozen merge/tested
-commit. For branch tasks, base is HEAD's first parent and candidate is HEAD.
-Check source declarations instead of inferring versions from branch names.
-
-Base execution depends on the task's comparison needs. For cross-version acceptance,
-ask the task Agent to run `frontend_build`, `frontend_install` and `frontend_smoke`
-with the respective `base-context.json` and `candidate-context.json`, using the
-[tool entry points](../tools/README.md). Different performance environments produce
-`not_comparable`, not a claimed code regression or a claim of no regression.
-
-Record control SHA, task/run IDs, source SHAs, profile identities, actual commands
-and evidence paths. Reuse valid evidence for unchanged source/environment
-combinations.
