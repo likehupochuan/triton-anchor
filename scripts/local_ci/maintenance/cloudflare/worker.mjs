@@ -42,6 +42,8 @@ const LABELS = Object.freeze({
 });
 const CODEX_ERRORS = new Set(['connection_error', 'auth_error', 'session_invalid', 'rate_limited', 'timeout', 'failed']);
 const CODEX_OK = new Set(['running', 'succeeded']);
+const READ_ERRORS = {timeout: '请求超时', network_error: '网络请求失败', http_error: 'HTTP 请求失败',
+  rate_limited: '访问被限流', invalid_document: '健康数据格式无效', identity_mismatch: '快照身份或时间无效'};
 
 const rows = value => Array.isArray(value) ? value : [];
 const identity = row => row?.task_id && row?.run_id ? `${row.task_id}:${row.run_id}` : '';
@@ -157,13 +159,22 @@ function faults(snapshot, previous, references, now) {
   return { codes: [...result].sort(), detected: [...detected], references: nextReferences, finishedFailed };
 }
 
-async function readDocument(fetcher, filename, branch, schema) {
+async function readDocument(fetcher, filename, branch, schema, read) {
   const ref = encodeURIComponent(branch);
   const response = await fetcher(`${API}/repos/${CONFIG.owner}/${CONFIG.repository}/contents/${filename}?ref=${ref}`, {
     headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000),
   });
-  if (!response.ok) throw new Error('Health data unavailable');
-  const envelope = await response.json();
+  read.http_status = response.status;
+  if (!response.ok) {
+    read.error_code = 'http_error';
+    // Only a specific rate-limit response proves that a 403 is throttling.
+    if (response.status === 429 || response.status === 403
+        && /rate limit exceeded/i.test((await response.text()).slice(0, 4096))) read.error_code = 'rate_limited';
+    throw new Error('Health data unavailable');
+  }
+  const body = await response.text();
+  read.error_code = 'invalid_document';
+  const envelope = JSON.parse(body);
   if (envelope.encoding !== 'base64' || typeof envelope.content !== 'string') throw new Error('Invalid health document');
   const bytes = Uint8Array.from(atob(envelope.content.replace(/\s/g, '')), character => character.charCodeAt(0));
   const value = JSON.parse(new TextDecoder().decode(bytes));
@@ -171,8 +182,9 @@ async function readDocument(fetcher, filename, branch, schema) {
   return value;
 }
 
-async function snapshot(fetcher, now) {
-  const value = await readDocument(fetcher, 'worker-health.json', `snapshot/${CONFIG.worker}`, 'triton-anchor-worker-health');
+async function snapshot(fetcher, now, read) {
+  const value = await readDocument(fetcher, 'worker-health.json', `snapshot/${CONFIG.worker}`, 'triton-anchor-worker-health', read);
+  read.error_code = 'identity_mismatch';
   if (value.worker_id !== CONFIG.worker
       || !Number.isFinite(Date.parse(value.collected_at))
       || Date.parse(value.collected_at) > now + 60000) throw new Error('Invalid health identity');
@@ -243,6 +255,12 @@ function issueBody(state, at, recovered = false) {
       : '更新且有效的健康快照确认此前异常已结束。', '', '此前异常：');
   else lines.push('当前异常（缺少明确恢复证据的原有异常继续保留）：');
   for (const code of state.codes) lines.push(`- ${LABELS[code]}`);
+  if (!recovered && state.codes.includes('source_unreadable') && state.health_read?.status === 'error') {
+    const read = state.health_read;
+    lines.push('', `Cloudflare → Gitee 健康快照读取：${READ_ERRORS[read.error_code] || '错误详情未上报'}`
+      + (read.http_status ? `（HTTP ${read.http_status}）` : '') + `；耗时 ${read.duration_ms} ms。`,
+    `连续失败：${read.consecutive_failures} 次；最近成功读取：${beijingTime(read.last_success_at)}。`);
+  }
   const events = rows(state.events).filter(event => Date.parse(event.at) >= Date.parse(state.first_seen)).slice(0, 20).reverse();
   if (events.length) lines.push('', '近期异常与恢复过程：', ...events.map(event => `- ${beijingTime(event.at)} · ${eventText(event)}`));
   lines.push('', '仅依据公开健康快照；Cloudflare 不执行服务器恢复。原始错误、认证信息和服务器日志不在此发布。');
@@ -261,7 +279,7 @@ function resetIncident(state) {
   state.finished_failed = false;
 }
 
-async function runMonitor(env, { fetcher, now, current }) {
+async function runMonitor(env, { fetcher, now, current, read }) {
   const state = await env.ALERT_STATE.get(KEY, 'json') || {
     first_seen: null, issue_number: null, signature: '', codes: [], read_failures: 0,
   };
@@ -276,6 +294,8 @@ async function runMonitor(env, { fetcher, now, current }) {
   };
   try {
     state.read_failures = current ? 0 : state.read_failures + 1;
+    state.health_read = { ...read, consecutive_failures: state.read_failures,
+      last_success_at: current ? at : state.health_read?.last_success_at || null };
     if (!state.issue_number) {
       const existing = await findOpenIssue(fetcher, env.GITEE_TOKEN);
       if (existing) {
@@ -323,7 +343,8 @@ async function runMonitor(env, { fetcher, now, current }) {
       if (codes.join(',') !== prior.join(',')) record('fault', codes);
       const recoveryEvents = rows(state.events).filter(event => Date.parse(event.at) >= Date.parse(state.first_seen)
         && event.kind !== 'phase' && event.kind !== 'progress');
-      const signature = JSON.stringify([codes, recoveryEvents.map(event => event.id)]);
+      const signature = JSON.stringify([codes, recoveryEvents.map(event => event.id),
+        ...(codes.includes('source_unreadable') ? [[read.error_code, read.http_status]] : [])]);
       const title = `[Local CI 告警] ${CONFIG.worker} ${codes.length}项异常`;
       if (!state.issue_number) {
         const created = await issueRequest(fetcher, env.GITEE_TOKEN, `/repos/${CONFIG.owner}/issues`, 'POST', {
@@ -358,6 +379,7 @@ async function refreshCache(env, { fetcher, now, current }) {
     schema: 'triton-anchor-worker-health-cache', worker_id: CONFIG.worker,
     updated_at: now.toISOString(), worker: current && !older ? current : previous?.worker || null,
     events: mergeEvents(state?.events, [], now.getTime()), alerts: previous?.alerts || [],
+    health_read: state?.health_read,
     errors: { worker: !current ? 'Cloudflare 未能读取 Gitee 健康快照' : older ? 'Gitee 返回较旧快照，保留最后已知数据' : '', alerts: '' },
   };
   try {
@@ -375,9 +397,21 @@ async function refreshCache(env, { fetcher, now, current }) {
 
 async function runScheduled(env, now) {
   const fetcher = fetch;
-  const current = await snapshot(fetcher, now.getTime()).catch(() => null);
+  const started = Date.now();
+  const read = { status: 'error', error_code: 'network_error', http_status: null,
+    duration_ms: 0, checked_at: now.toISOString() };
+  let current = null;
   try {
-    await runMonitor(env, { fetcher, now, current });
+    current = await snapshot(fetcher, now.getTime(), read);
+    read.status = 'ok';
+    read.error_code = null;
+  } catch (error) {
+    if (['TimeoutError', 'AbortError'].includes(error?.name)) read.error_code = 'timeout';
+  }
+  read.duration_ms = Math.max(0, Date.now() - started);
+  if (!current) console.warn(JSON.stringify({ event: 'health_read_failed', ...read }));
+  try {
+    await runMonitor(env, { fetcher, now, current, read });
   } finally {
     // Preserve display updates when Issue delivery fails, and cache the latest Issue state.
     await refreshCache(env, { fetcher, now, current });

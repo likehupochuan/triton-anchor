@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { normalize, business, blockerGroups } = require('../../../dashboard/data.js');
-const { assess: assessHealth, readSnapshot, readAlerts, readHealth, source: healthSource, taskFacts, historyEvents, eventText } = require('../../../dashboard/health.js');
+const { assess: assessHealth, readSnapshot, readAlerts, readHealth, monitorReading, source: healthSource, taskFacts, historyEvents, eventText } = require('../../../dashboard/health.js');
 const task = (id, date) => ({task_id:id, repository:'example/repo',pr_number:7,target_branch:'main',head_sha:('f'+id).repeat(20),tested_sha:id.repeat(40),captured_at:date});
 
 const healthNow = Date.parse('2026-09-17T10:00:00Z');
@@ -123,10 +123,18 @@ test('health uses Gitee first, falls back once, and observes rate-limit cooldown
   assert.equal(calls.length,3);assert.ok(calls.includes(healthSource.cacheUrl),'read-only cache supplies external history');
   assert.equal(result.results[0].value,worker,'Gitee remains primary');
   assert.equal(result.monitor.events[0].id,'external');
+  cache.errors.worker='Cloudflare 未能读取 Gitee 健康快照';
+  cache.health_read={status:'error',error_code:'http_error',http_status:403,duration_ms:240,consecutive_failures:13};
+  result=await readHealth();
+  assert.match(monitorReading(result.monitor).text,/HTTP 403/);
+  assert.equal(result.pageRead,'读取成功'); assert.equal(result.dataSource,'Gitee 直读');
+  assert.equal(assessHealth(result.results[0].value,[],{now,workerError:result.results[0].error}).current,true);
+  cache.errors.worker=''; delete cache.health_read;
   limited=true; calls.length=0;
   result=await readHealth();
   assert.equal(calls.length,3);assert.equal(calls.at(-1),healthSource.cacheUrl);
   assert.equal(result.retryAt,now+900000); assert.match(result.notice,/Cloudflare/);
+  assert.equal(result.pageRead,'访问被限流'); assert.equal(result.dataSource,'Cloudflare 备用缓存');
   assert.equal(result.results[0].value.collected_at,worker.collected_at);
   calls.length=0; now+=300000;
   result=await readHealth(result.retryAt);
@@ -134,6 +142,25 @@ test('health uses Gitee first, falls back once, and observes rate-limit cooldown
   limited=false; calls.length=0; now+=600001;
   result=await readHealth(result.retryAt);
   assert.equal(calls.length,3); assert.equal(result.notice,'');
+});
+
+test('monitor reading distinguishes failed reads, stale snapshots and unknown monitor state', () => {
+  const monitor={updated_at:new Date(healthNow).toISOString(),source_at:new Date(healthNow-3600000).toISOString(),
+    readError:'',read:{status:'ok'}};
+  assert.match(monitorReading(monitor,healthNow).text,/读取成功.*快照已过期/);
+  monitor.source_at=new Date(healthNow).toISOString();
+  assert.equal(monitorReading(monitor,healthNow).tone,'good');
+  monitor.read={status:'error',error_code:'rate_limited',http_status:403};
+  assert.match(monitorReading(monitor,healthNow).text,/限流.*HTTP 403/);
+  monitor.error='网页无法读取 Cloudflare 缓存';
+  assert.match(monitorReading(monitor,healthNow).text,/状态未知/);
+  delete monitor.error; monitor.updated_at=new Date(healthNow-1201000).toISOString();
+  assert.match(monitorReading(monitor,healthNow).text,/缓存已过期.*状态未知/);
+  monitor.updated_at=new Date(healthNow).toISOString(); delete monitor.read;
+  monitor.readError='Cloudflare 未能读取 Gitee 健康快照';
+  assert.match(monitorReading(monitor,healthNow).text,/错误详情未上报/);
+  delete monitor.readError;
+  assert.equal(monitorReading(monitor,healthNow).text,'读取结果未上报');
 });
 
 test('cache only fills failed reads and never presents stale or failed collection as current', async t => {

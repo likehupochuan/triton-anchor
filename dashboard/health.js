@@ -8,7 +8,7 @@
     cacheUrl: 'https://local-ci-alert.2272640910.workers.dev/health',
   };
   const incidents = {
-    source_unreadable: ['数据读取异常', '健康数据读取失败（不能据此判断服务器宕机）'],
+    source_unreadable: ['Cloudflare 读取异常', 'Cloudflare 读取 Gitee 健康快照失败（不能据此判断服务器宕机）'],
     service_failed: ['服务异常', '服务器侧维护服务失败'],
     poller_unavailable: ['服务异常', 'Worker 已停止或心跳异常'],
     runtime_unavailable: ['服务异常', 'Docker 容器运行环境不可用'],
@@ -62,7 +62,7 @@
     const cards = [
       {name: 'Worker 服务', text: '状态未知', tone: 'muted'},
       {name: 'Docker 服务', text: '状态未知', tone: 'muted'},
-      {name: 'Gitee 中转', text: '状态未知', tone: 'muted'},
+      {name: '服务器 → Gitee', text: '状态未知', tone: 'muted'},
       {name: 'Codex', text: '状态未知', tone: 'muted'},
     ];
     if (current) {
@@ -75,7 +75,7 @@
       cards[1] = {name: 'Docker 服务', text: runtimeOk === true ? '可用' : runtimeOk === false ? '不可用' : '未上报', tone: runtimeOk === true ? 'good' : runtimeOk === false ? 'bad' : 'muted'};
       if (runtimeOk === false) incident('runtime_unavailable');
       const pollStatus = poller.last_poll_status;
-      cards[2] = {name: 'Gitee 中转', text: pollStatus === 'error' ? '访问失败' : pollStatus === 'success' ? '最近轮询成功' : '未上报', tone: pollStatus === 'error' ? 'bad' : pollStatus === 'success' ? 'good' : 'muted'};
+      cards[2] = {name: '服务器 → Gitee', text: pollStatus === 'error' ? '任务仓库访问失败' : pollStatus === 'success' ? '任务仓库最近轮询成功' : '未上报', tone: pollStatus === 'error' ? 'bad' : pollStatus === 'success' ? 'good' : 'muted'};
       if (pollStatus === 'error') incident('relay_poll_failed');
       const codex = codexStates[active?.codex_status];
       const codexIdle = !active ? '空闲' : active.stage === 'preparing' ? '准备任务环境' : ['sealing', 'publish_pending', 'published'].includes(active.stage) ? '任务已结束' : '连接状态未上报';
@@ -115,7 +115,7 @@
     }
     const history = historyEvents([...rows(worker?.events), ...rows(events)], now);
     return {current, cards, issues, history,
-      title: !worker || workerError ? '健康数据不可用' : !current ? '心跳快照已过期' : issues.length ? '发现异常或待确认项' : '已上报状态正常',
+      title: !worker || workerError ? '健康数据不可用' : !current ? '心跳快照已过期' : issues.length ? '发现异常或待确认项' : '服务器已上报状态正常',
       tone: issues.some(row => row.tone === 'bad') ? 'bad' : issues.length ? 'warn' : 'good'};
   }
 
@@ -172,6 +172,9 @@
       readCache().then(value => ({value}), error => ({error})),
     ]);
     let results = gitee, notice = '';
+    const pageRead = gitee[0].status === 'fulfilled' ? '读取成功' : cooling ? '限流冷却中，暂未请求'
+      : gitee[0].reason?.rateLimited ? '访问被限流' : '读取失败';
+    let dataSource = gitee[0].status === 'fulfilled' ? 'Gitee 直读' : '上次读取的数据';
     if (results.some(result => result.status === 'rejected' && result.reason?.rateLimited))
       retryAt = Date.now() + 15 * 60 * 1000;
     const cache = cached.value;
@@ -182,6 +185,7 @@
           const name = names[index], value = cache[name];
           if (result.status === 'fulfilled' || value == null) return result;
           used.push(index === 0 ? '健康快照' : '告警记录');
+          if (index === 0) dataSource = 'Cloudflare 备用缓存';
           return {status: 'fulfilled', value,
             error: cache.errors?.[name] || (stale ? 'Cloudflare 缓存已过期，当前状态无法确认' : '')};
         });
@@ -189,10 +193,34 @@
           + '。缓存更新：' + date(cache.updated_at) : 'Cloudflare 尚无可用的备用数据。';
       } else notice = 'Cloudflare 备用数据也无法读取；保留最后读取的数据，当前状态待确认。';
     }
-    if (results[0].status === 'fulfilled' && Date.parse(results[0].value?.collected_at) < Date.parse(previous.worker?.collected_at))
+    if (results[0].status === 'fulfilled' && Date.parse(results[0].value?.collected_at) < Date.parse(previous.worker?.collected_at)) {
       results[0] = {status: 'fulfilled', value: previous.worker, error: '来源返回较旧快照，保留较新数据，当前状态待确认'};
-    return {results, retryAt, notice, monitor: cache ? {updated_at: cache.updated_at, events: rows(cache.events),
-      error: fresh(cache.updated_at, Date.now()) ? '' : '外部监测缓存已过期'} : {error: '外部监测记录暂不可用'}};
+      dataSource = '上次较新的快照';
+    }
+    return {results, retryAt, notice, pageRead, dataSource, monitor: cache ? {
+      updated_at: cache.updated_at, source_at: cache.worker?.collected_at, events: rows(cache.events),
+      read: cache.health_read, readError: cache.errors?.worker,
+      error: fresh(cache.updated_at, Date.now()) ? '' : 'Cloudflare 监测缓存已过期'}
+      : {error: '网页无法读取 Cloudflare 缓存'}};
+  }
+
+  function monitorReading(monitor, now = Date.now()) {
+    if (monitor.error || !fresh(monitor.updated_at, now))
+      return {text: (monitor.error || 'Cloudflare 监测缓存已过期') + '；当前监测状态未知', tone: 'warn'};
+    const read = monitor.read || {};
+    if (read.status === 'error') {
+      const labels = {timeout:'请求超时', network_error:'网络请求失败', http_error:'HTTP 请求失败',
+        rate_limited:'访问被限流', invalid_document:'健康数据格式无效', identity_mismatch:'快照身份或时间无效'};
+      return {text: ['读取 Gitee 失败：' + (labels[read.error_code] || '错误详情未上报'),
+        Number.isInteger(read.http_status) && 'HTTP ' + read.http_status,
+        Number.isInteger(read.duration_ms) && '耗时 ' + read.duration_ms + ' ms',
+        Number.isInteger(read.consecutive_failures) && '连续失败 ' + read.consecutive_failures + ' 次'].filter(value => value !== false).join(' · '), tone:'bad'};
+    }
+    if (monitor.readError) return {text: monitor.readError + (read.status ? '' : '；错误详情未上报'), tone:'warn'};
+    if (read.status !== 'ok' && monitor.readError !== '') return {text:'读取结果未上报', tone:'muted'};
+    return {text: !Number.isFinite(Date.parse(monitor.source_at)) ? '读取成功，源快照时间未上报'
+      : fresh(monitor.source_at, now) ? '读取成功，源快照新鲜' : '读取成功，源快照已过期',
+      tone: fresh(monitor.source_at, now) ? 'good' : 'warn'};
   }
 
   const stages = {preparing:'准备环境', running:'执行中', sealing:'汇总结果', publish_pending:'等待上传', published:'已发布'};
@@ -249,9 +277,9 @@
     const detail = row.detail || {};
     const historicalStates = {retry_wait:'当时等待重试', waiting_dependency:'当时等待依赖恢复', recovering:'当时恢复中'};
     return [...new Set([...(includeHeading ? [date(row.at), row.task_id
-      ? 'Head SHA ' + (validHead(row.head_sha) ? row.head_sha.slice(0, 12) : '未上报') : '外部监测'] : []),
+      ? 'Head SHA ' + (validHead(row.head_sha) ? row.head_sha.slice(0, 12) : '未上报') : 'Cloudflare 监测'] : []),
       row.kind === 'recovered' ? '确认恢复' : row.kind === 'fault' ? '发现异常' : row.kind === 'finished_failed' ? '恢复失败，任务已结束' : '',
-      rows(row.codes).map(code => row.kind === 'recovered' && code === 'source_unreadable' ? '健康数据读取已恢复'
+      rows(row.codes).map(code => row.kind === 'recovered' && code === 'source_unreadable' ? 'Cloudflare 读取 Gitee 健康快照已恢复'
         : incidents[code]?.[1] || codexStates[code.replace(/^codex_/, '')]?.[0] || controlUpdateStates[code.replace(/^control_update_/, '')] || failureNames[code] || code).join('；'),
       detail.phase && describe(detail.phase, stages), detail.state && detail.state !== 'unknown' && (historicalStates[detail.state] || describe(detail.state, recoveryStates)), detail.failure_code && describe(detail.failure_code, failureNames),
       detail.action && describe(detail.action, recoveryActions), Number.isInteger(detail.attempt) ? '第 ' + detail.attempt + ' 次' : '',
@@ -310,7 +338,7 @@
     const eventLine = row => {
       const line = node('span', '', date(row.at) + ' · ');
       if (row.task_id) line.append(document.createTextNode('Head SHA '), headLink(row));
-      else line.append(document.createTextNode('外部监测'));
+      else line.append(document.createTextNode('Cloudflare 监测'));
       const text = eventText(row, false);
       if (text) line.append(document.createTextNode(' · ' + text));
       return line;
@@ -323,7 +351,7 @@
     root.append(heading, content);
     let worker = null, workerError = '', loading = false, renderedState = '', monitor = {events: []};
     let showAllEvents = false;
-    let alerts = [], alertsError = '', retryAt = 0, sourceNotice = '';
+    let alerts = [], alertsError = '', retryAt = 0, sourceNotice = '', pageRead = '未上报', dataSource = '未上报';
 
     function render() {
       const cooling = Date.now() < retryAt;
@@ -331,7 +359,8 @@
       refresh.textContent = loading ? '读取中…' : cooling ? '刷新备用数据' : '刷新健康状态';
       if (loading && !worker) { renderedState = ''; content.replaceChildren(node('p', 'health-muted', '正在读取健康数据…')); return; }
       const model = assess(worker, monitor.events, {workerError});
-      const viewState = JSON.stringify([model, worker, monitor, alerts, alertsError, sourceNotice, cooling, showAllEvents]);
+      const monitoring = monitorReading(monitor);
+      const viewState = JSON.stringify([model, worker, monitor, monitoring, pageRead, dataSource, alerts, alertsError, sourceNotice, cooling, showAllEvents]);
       if (viewState === renderedState) return;
       renderedState = viewState;
       const expanded = new Set([...content.querySelectorAll('details[open][data-history-key]')].map(item => item.dataset.historyKey));
@@ -348,13 +377,30 @@
         item.append(node('span', 'health-muted', card.name), node('strong', 'health-badge ' + card.tone, card.text)); cards.append(item);
       }
       content.append(cards);
+      const readings = node('section', 'health-section'), readingFacts = node('dl', 'health-facts');
+      readings.append(node('h3', '', '数据来源与监测'));
+      for (const [label, value] of [
+        ['网页 → Gitee 健康快照', pageRead],
+        ['当前健康数据来源', worker ? dataSource : '尚无可用数据'],
+        ['Cloudflare → Gitee 健康快照', monitoring.text],
+        ['Cloudflare 最近检测', date(monitor.read?.checked_at || monitor.updated_at)],
+        ['Cloudflare 最近成功读取', date(monitor.read?.last_success_at)],
+        ['Cloudflare 留存快照采集时间', date(monitor.source_at)
+          + (Number.isFinite(Date.parse(monitor.source_at)) && !fresh(monitor.source_at, Date.now()) ? '（已过期）' : '')],
+      ]) {
+        const valueNode = node('dd');
+        valueNode.append(node('span', label.startsWith('Cloudflare →') ? 'health-badge ' + monitoring.tone : '', value));
+        readingFacts.append(node('dt', '', label), valueNode);
+      }
+      readings.append(readingFacts, node('p', 'health-muted', 'Cloudflare 检测或刷新缓存，不代表已取得新快照；网页与 Cloudflare 的读取结果分别判断。'));
+      content.append(readings);
       const concerns = node('section', 'health-section');
       concerns.append(node('h3', '', '当前异常'));
       if (model.issues.length) {
         const list = node('ul', 'health-issues');
         for (const issue of model.issues) { const item = node('li'); item.append(node('strong', '', issue.category + '：'), document.createTextNode(issue.text)); list.append(item); }
         concerns.append(list);
-      } else concerns.append(node('p', 'health-muted', '未发现已上报的异常。'));
+      } else concerns.append(node('p', 'health-muted', '健康快照中没有已上报的服务器异常。'));
       if (model.current && worker.active_task?.stage === 'running' && !worker.active_task.codex_status)
         concerns.append(node('p', 'health-muted', '当前服务器尚未上报 Codex 连接状态，无法据此判断模型服务是否可用。'));
       content.append(concerns);
@@ -364,7 +410,6 @@
       if (!model.current) details.append(node('p', 'health-muted', '以下为最后读取的快照，不能确认当前状态。'));
       const facts = node('dl', 'health-facts');
       for (const [label, value] of [
-        ['外部监测缓存', date(monitor.updated_at)],
         ['可用磁盘', rows(worker?.storage).map(row => typeof row.filesystem_free_bytes === 'number' ? (row.filesystem_free_bytes / 1024 ** 3).toFixed(1) + ' GiB' : '未上报').join(' / ') || '未上报'],
       ]) facts.append(node('dt', '', label), node('dd', '', value));
       for (const service of rows(worker?.services)) {
@@ -484,6 +529,7 @@
       render();
       const response = await readHealth(retryAt, {worker}), results = response.results;
       monitor = response.monitor.events ? response.monitor : {...monitor, error: response.monitor.error};
+      pageRead = response.pageRead; dataSource = response.dataSource;
       retryAt = response.retryAt; sourceNotice = response.notice;
       const error = result => result.status === 'fulfilled' ? result.error || '' : result.reason instanceof TypeError || ['TimeoutError', 'AbortError'].includes(result.reason?.name)
         ? '浏览器未能读取 Gitee（可能是网络、跨域限制或请求超时），当前状态无法确认'
@@ -501,7 +547,7 @@
     setInterval(() => { if (!document.hidden) render(); }, 60000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
   }
-  if (typeof module !== 'undefined') module.exports = {assess, readSnapshot, readAlerts, readHealth, source, taskFacts, historyEvents, eventText};
+  if (typeof module !== 'undefined') module.exports = {assess, readSnapshot, readAlerts, readHealth, monitorReading, source, taskFacts, historyEvents, eventText};
   if (typeof document !== 'undefined') {
     const root = document.getElementById('serverHealth');
     if (root) mount(root);

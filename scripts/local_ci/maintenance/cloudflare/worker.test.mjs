@@ -47,6 +47,7 @@ function fixture() {
       h.healthReads++;
       assert.equal(parsed.searchParams.get('ref'), `snapshot/${ID}`);
       assert.equal(options.headers.Authorization, undefined);
+      if (h.healthResponse) return h.healthResponse();
       if (h.readFailure) throw new Error('PRIVATE network failure');
       return json({ encoding: 'base64', content: Buffer.from(JSON.stringify(h.health)).toString('base64') });
     }
@@ -151,12 +152,29 @@ test('control update faults are distinct, unknown status preserves them, and idl
 
 test('two read failures trigger an observation alert; unreadable or stale data never clears service faults', async () => {
   const h = fixture();
+  await h.run();
+  const lastSuccess = new Date(h.now).toISOString();
   h.readFailure = true;
+  h.advance();
   await h.run();
   assert.equal(h.issues.length, 0);
   h.advance();
   await h.run();
   assert.ok(h.issues[0].body.includes('不能据此判断服务器宕机'));
+  assert.equal(JSON.parse(h.cached).health_read.last_success_at, lastSuccess);
+  assert.equal(JSON.parse(h.cached).health_read.consecutive_failures, 2);
+  const history = JSON.parse(h.stored).events.length;
+  h.advance();
+  await h.run();
+  assert.equal(h.writes.length, 1, 'time and failure count changes do not update the Issue');
+  h.healthResponse = () => new Response('PRIVATE: denied', { status: 403 });
+  h.advance();
+  await h.run();
+  assert.equal(h.writes.length, 2, 'changed diagnostic updates the existing Issue');
+  assert.equal(h.issues.length, 1);
+  assert.equal(JSON.parse(h.stored).events.length, history, 'diagnostic changes do not create new incidents');
+  assert.ok(h.issues[0].body.includes('HTTP 403'));
+  h.healthResponse = null;
   h.readFailure = false;
   h.health.runtime.available = false;
   h.advance();
@@ -176,6 +194,36 @@ test('two read failures trigger an observation alert; unreadable or stale data n
   h.advance();
   await h.run();
   assert.equal(h.issues[0].state, 'closed');
+  assert.equal(JSON.parse(h.cached).health_read.status, 'ok');
+  assert.equal(JSON.parse(h.cached).health_read.consecutive_failures, 0);
+});
+
+test('health read failures publish only bounded diagnostics, never raw errors or response bodies', async t => {
+  const warning = t.mock.method(console, 'warn', () => {});
+  const cases = [
+    ['network_error', null, () => { throw new Error('PRIVATE network details'); }],
+    ['timeout', null, () => { throw new DOMException('PRIVATE timeout details', 'TimeoutError'); }],
+    ['http_error', 403, () => new Response('PRIVATE forbidden', { status: 403 })],
+    ['rate_limited', 403, () => new Response('PRIVATE: Rate Limit Exceeded', { status: 403 })],
+    ['rate_limited', 429, () => new Response('PRIVATE limited', { status: 429 })],
+    ['invalid_document', 200, () => new Response('PRIVATE invalid JSON')],
+    ['identity_mismatch', 200, null],
+  ];
+  for (const [code, status, response] of cases) {
+    const h = fixture();
+    h.healthResponse = response;
+    if (!response) h.health.worker_id = 'another-worker';
+    await h.run();
+    const read = JSON.parse(h.cached).health_read;
+    assert.equal(read.error_code, code);
+    assert.equal(read.http_status, status);
+    assert.equal(read.status, 'error');
+    assert.equal(read.last_success_at, null);
+    assert.ok(Number.isInteger(read.duration_ms) && read.duration_ms >= 0);
+    assert.ok(!JSON.stringify(read).includes('PRIVATE'));
+  }
+  assert.equal(warning.mock.callCount(), cases.length);
+  assert.ok(!JSON.stringify(warning.mock.calls).includes('PRIVATE'));
 });
 
 test('missing or idle Codex telemetry cannot clear a known connection fault', async () => {
