@@ -1260,20 +1260,33 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
         "", "### 变更意图与审查结论", "", feedback_text(result["summary"]),
     ]
     findings = []
-    finding_summaries = set()
+    has_blocking_findings = False
+    limitations = [feedback_text(item) for item in result.get("limitations", [])]
+    for item in records:
+        if item.get("status") in {"infra_error", "cancelled"} and "limitations" not in result:
+            name = item.get("tool_id", item.get("kind", ""))
+            limitations.append(feedback_text(f"{DISPLAY_CHECKS.get(name, name)}：{item.get('summary') or display_state(item['status'])}"))
     for finding in result["findings"]:
         text = feedback_text(finding.get("summary", ""))
         if text:
-            finding_summaries.add(text)
             risk = {"critical": "严重", "high": "高", "medium": "中", "low": "低", "info": "提示"}.get(finding.get("severity"), "未标注")
-            label = "合入阻塞" if finding.get("blocking") or finding.get("severity") in {"high", "critical"} else f"风险：{risk}"
+            blocking = finding.get("blocking") or finding.get("severity") in {"high", "critical"}
+            has_blocking_findings |= bool(blocking)
+            label = "合入阻塞" if blocking else f"风险：{risk}"
+            if analysis := finding.get("qualification"):
+                text += " 分析：" + feedback_text(analysis)
             evidence = feedback_evidence({
                 "kind": "finding",
                 "evidence": [*finding.get("code_evidence", []), *finding.get("evidence", [])],
             }, task, artifact_urls or {})
             findings.append(f"【{label}】{text}" + (f" · {evidence}" if evidence else ""))
-    findings.extend(f"【合入阻塞】{feedback_text(reason)}" for reason in result["blocking_reasons"]
-                    if feedback_text(reason) not in finding_summaries)
+    # Findings are the reviewed issue list; failed checks are evidence, not extra defects.
+    if not has_blocking_findings:
+        reasons = [feedback_text(reason) for reason in result["blocking_reasons"]]
+        if result["status"] == "fail":
+            findings.extend(f"【合入阻塞】{reason}" for reason in reasons if reason not in limitations)
+        else:
+            limitations.extend(reasons)
     if findings:
         lines.extend(["", "### 需要关注的发现", "", *(f"- {x}" for x in dict.fromkeys(findings))])
     lines.extend(["", "### 查看审查详情"])
@@ -1293,7 +1306,6 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
     dashboard = dashboard_url(task)
     if dashboard:
         lines.extend(["", f"[在 Dashboard 查看本次任务详情]({dashboard})"])
-    limitations = []
     delivery = result.get("evidence_delivery") or {}
     if delivery.get("status") == "incomplete":
         limitations.append(

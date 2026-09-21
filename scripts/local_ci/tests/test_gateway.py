@@ -1397,15 +1397,20 @@ class GatewayBehaviorTests(unittest.TestCase):
     def test_result_comment_puts_blockers_and_code_links_in_findings(self):
         result = self.result()
         result["status"] = "fail"
-        result["checks"][0].update(status="skipped", summary="执行被中断")
+        result["checks"][0].update(status="infra_error", summary="工具拒绝仓内符号链接，不影响独立复现的缺陷结论")
         result["checks"].append({"tool_id": "frontend_build", "status": "not_selected", "summary": "无需构建"})
         result["blocking_reasons"] = [
-            "最低必检未通过：control_plane — 执行被中断",
-            "性能结果不可比：两次测量使用的 LLVM 版本不同",
+            "最低必检未通过：change_validation — 插件发现回归",
+            "必要审查未通过：architecture — 插件发现回归",
+            "control_plane：工具拒绝仓内符号链接，不影响独立复现的缺陷结论",
         ]
         result["findings"] = [
             {"summary": "架构契约遭到破坏", "blocking": True,
+             "qualification": "目录扫描遗漏独立安装的插件，导致后端无法注册",
              "code_evidence": [{"path": "src/file.py", "line": 17}]},
+            {"summary": "异常路径丢失资源释放", "blocking": True,
+             "qualification": "初始化失败后未关闭句柄，与插件发现是独立问题",
+             "code_evidence": ["src/file.py:31"]},
             {"summary": "可以改进错误提示", "blocking": False, "severity": "low",
              "evidence": ["src/file.py:23", "../secret", "/absolute/path", "https://evil.invalid"]},
         ]
@@ -1413,16 +1418,43 @@ class GatewayBehaviorTests(unittest.TestCase):
         rendered = g.result_comment(result)
         findings = rendered.split("### 需要关注的发现", 1)[1].split("### 查看审查详情", 1)[0]
         limitations = rendered.split("### 限制说明", 1)[1]
-        for reason in [*result["blocking_reasons"], result["findings"][0]["summary"]]:
-            self.assertIn(g.feedback_text(reason), findings)
-            self.assertNotIn(g.feedback_text(reason), limitations)
+        for reason in result["blocking_reasons"][:-1]:
+            self.assertNotIn(g.feedback_text(reason), findings)
+        self.assertEqual(findings.count("【合入阻塞】"), 2)
         self.assertEqual(findings.count("架构契约遭到破坏"), 1)
-        for line in (17, 23):
+        self.assertIn("目录扫描遗漏独立安装的插件", findings)
+        self.assertIn("异常路径丢失资源释放", findings)
+        self.assertNotIn("工具拒绝仓内符号链接", findings)
+        self.assertIn("工具拒绝仓内符号链接", limitations)
+        for line in (17, 23, 31):
             self.assertIn(f"/blob/{self.tested}/src/file.py#L{line}", findings)
         self.assertNotIn("secret", findings)
         self.assertNotIn("evil.invalid", findings)
         self.assertNotIn("/absolute/path", findings)
         self.assertNotIn("前端构建", rendered)
+
+    def test_result_comment_preserves_failure_without_findings_and_nonblocking_limits(self):
+        result = self.result()
+        result["status"] = "fail"
+        result["blocking_reasons"] = ["独立回归失败"]
+        result["limitations"] = ["性能基线不可比，不影响正确性审查"]
+        rendered = g.result_comment(result)
+        self.assertIn("【合入阻塞】独立回归失败", rendered)
+        self.assertIn("### 限制说明\n\n- 性能基线不可比，不影响正确性审查", rendered)
+        result["status"] = "pass"
+        result["blocking_reasons"] = []
+        rendered = g.result_comment(result)
+        self.assertNotIn("【合入阻塞】", rendered)
+        self.assertIn("本次要求的检查已通过", rendered)
+        self.assertIn("性能基线不可比，不影响正确性审查", rendered)
+        del result["limitations"]
+        result["blocking_reasons"] = ["必要验证因环境异常未完成"]
+        for status in ("infra_error", "cancelled"):
+            with self.subTest(status=status):
+                result["status"] = status
+                rendered = g.result_comment(result)
+                self.assertNotIn("【合入阻塞】", rendered)
+                self.assertIn("必要验证因环境异常未完成", rendered.split("### 限制说明", 1)[1])
 
     def test_checks_appear_only_as_their_stage_is_reached(self):
         control = self.store(g.CONTROL_BRANCH)

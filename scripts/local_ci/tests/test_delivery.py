@@ -85,7 +85,8 @@ def test_incomplete_minimum_or_review_cannot_claim_pass(tmp_path, missing, event
     result = seal(tmp_path, value, event_kind)
     required = missing != "pr_info" or event_kind == "pull_request"
     assert result["status"] == ("infra_error" if required else "pass")
-    assert bool(result["blocking_reasons"]) == required
+    assert not result["blocking_reasons"]
+    assert bool(result["limitations"]) == required
 
 
 @pytest.mark.parametrize("location", ["top", "review", "both"])
@@ -210,7 +211,40 @@ def test_change_validation_requires_reasoning_and_evidence(tmp_path, missing):
     )
     assert result["status"] == "infra_error"
     assert result["checks"][0]["status"] == "pass"
-    assert result["blocking_reasons"]
+    assert not result["blocking_reasons"]
+    assert result["limitations"]
+
+
+def test_code_failure_and_tool_limitations_have_separate_explanations(tmp_path):
+    value = answer()
+    value["checks"][0].update(status="fail", summary="Plugin discovery regression reproduced")
+    value["checks"].append({"tool_id": "control_plane", "status": "infra_error",
+                            "summary": "Checker rejects an in-tree symlink"})
+    value["findings"] = [{"severity": "high", "blocking": True,
+                           "summary": "Installed plugins are not discovered",
+                           "qualification": "Directory scanning omits entry-point plugins",
+                           "code_evidence": ["src/backends.py:17"]}]
+    value["limitations"] = ["The checker limitation does not affect the independently reproduced regression"]
+    result = seal(tmp_path, value)
+    assert result["status"] == "fail"
+    assert len([reason for reason in result["blocking_reasons"] if "frontend_tests" in reason]) == 1
+    assert not any("control_plane" in reason for reason in result["blocking_reasons"])
+    assert any("control_plane" in reason for reason in result["limitations"])
+    assert value["limitations"][0] in result["limitations"]
+    assert result["findings"] == value["findings"]
+
+
+def test_limitations_do_not_turn_a_completed_review_into_a_code_failure(tmp_path):
+    value = answer()
+    value["limitations"] = ["Optional performance comparison unavailable; correctness verified independently"]
+    result = seal(tmp_path, value)
+    assert result["status"] == "pass"
+    assert result["limitations"] == value["limitations"]
+    value["checks"][0].update(status="infra_error", summary="Required test dependency unavailable")
+    result = seal(tmp_path, value)
+    assert result["status"] == "infra_error"
+    assert not result["blocking_reasons"]
+    assert any("Required test dependency" in reason for reason in result["limitations"])
 
 
 def test_only_selected_files_are_published_and_text_is_redacted(tmp_path):

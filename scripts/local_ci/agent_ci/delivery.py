@@ -119,28 +119,32 @@ def seal_result(
     if not isinstance(reasons, list):
         raise ContractError("Blocking reasons must be a list")
     reasons = [str(reason) for reason in reasons]
+    limitations = agent_result.get("limitations", [])
+    if not isinstance(limitations, list) or any(not isinstance(item, str) for item in limitations):
+        raise ContractError("Limitations must be a list of explanations")
+    limitations = list(limitations)
     incomplete = False
     failed = False
     selected = {check["tool_id"]: check for check in checks}
     for tool_id in policy.get("required_checks", []):
         check = selected.get(tool_id, {})
-        if check.get("status") != "pass":
-            reasons.append(
+        if check.get("status") not in {"pass", "fail"}:
+            limitations.append(
                 f"最低必检未通过：{tool_id}"
                 + (f" — {check['summary']}" if check.get("summary") else "")
             )
-            incomplete |= check.get("status") != "fail"
-            failed |= check.get("status") == "fail"
-        elif tool_id == "change_validation" and (
+            incomplete = True
+        elif check.get("status") == "pass" and tool_id == "change_validation" and (
             not check["summary"].strip() or not check["evidence"]
         ):
-            reasons.append("变更验证必须说明影响范围、选测理由并提供实际证据文件")
+            limitations.append("变更验证必须说明影响范围、选测理由并提供实际证据文件")
             incomplete = True
     for check in checks:
         if check["status"] in {"fail", "infra_error", "cancelled"}:
             reason = f"{check['tool_id']}：{check['summary'] or check['status']}"
-            if reason not in reasons:
-                reasons.append(reason)
+            destination_reasons = reasons if check["status"] == "fail" else limitations
+            if check["status"] == "fail" or check["tool_id"] not in policy.get("required_checks", []):
+                destination_reasons.append(reason)
             failed |= check["status"] == "fail"
             incomplete |= check["status"] != "fail"
     reviewed = {review["kind"]: review for review in reviews}
@@ -148,12 +152,15 @@ def seal_result(
     for kind in required_reviews:
         review = reviewed.get(kind, {})
         if review.get("status") != "pass":
-            reasons.append(
+            (reasons if review.get("status") == "fail" else limitations).append(
                 f"必要审查未通过：{kind}"
                 + (f" — {review['summary']}" if review.get("summary") else "")
             )
             failed |= review.get("status") == "fail"
             incomplete |= review.get("status") != "fail"
+    for review in reviews:
+        if review["kind"] not in required_reviews and review["status"] in {"infra_error", "cancelled"}:
+            limitations.append(f"{review['kind']}：{review['summary'] or review['status']}")
     for finding in findings:
         if finding.get("blocking") is True or finding.get("severity") in {
             "high",
@@ -173,8 +180,10 @@ def seal_result(
     else:
         status = "infra_error" if incomplete else "pass"
     summary = str(agent_result.get("summary", ""))
-    if status != "pass" and not reasons:
+    if status == "fail" and not reasons:
         reasons.append(summary or status)
+    elif status in {"infra_error", "cancelled"} and not limitations:
+        limitations.append(summary or status)
 
     source = Path(source_dir) / "artifacts"
     destination = Path(destination)
@@ -235,7 +244,7 @@ def seal_result(
                 "required": path in required_paths,
             })
             if path in required_paths:
-                reasons.append(
+                limitations.append(
                     f"必传检查证据未完整发布，整体结论待确认：{path}（{row['omitted']}）"
                 )
                 if status == "pass":
@@ -251,6 +260,7 @@ def seal_result(
         "reviews": reviews,
         "findings": findings,
         "blocking_reasons": list(dict.fromkeys(reasons)),
+        "limitations": list(dict.fromkeys(limitations)),
         "artifacts": artifacts,
         "evidence_delivery": {
             "status": "incomplete" if omitted_evidence else "complete",

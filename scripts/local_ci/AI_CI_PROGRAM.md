@@ -135,6 +135,16 @@ ops 或 categories 展开后超过上限会报错，不自动截断。空 impact
 最终问题清单只写在顶层 `findings`；各项 `reviews` 保留结论和证据，不另存 `findings`。
 汇总时按根因、代码位置和实际行为合并同一问题的说明与证据，避免总体和专项审查重复记录。
 同一文件中的不同问题仍分别保留；无法确认是否同一问题时不要强行合并。
+每个独立阻塞结论对应一项 finding，不把同一根因造成的 change_validation、测试和架构审查失败
+分别列成多个问题。`summary` 写简短问题结论，`qualification` 说明原因、触发条件及影响，
+`code_evidence` 给出相关代码路径和行号；多个不同缺陷须分别列出，不能因同文件或同检查而合并。
+`blocking_reasons` 只复用阻塞 findings 的简短结论，不再用另一种措辞重复解释。
+
+环境、工具、证据发布和不可比测量造成的检查限制写入 `limitations`，不要冒充代码缺陷写入
+findings 或 blocking_reasons。检查本身仍如实记录状态和诊断，封存时自动补充未完成检查的限制；
+limitations 补充对审查结论的影响，不重复抄写检查记录。必要验证未完成仍不能报告通过。
+若已有独立证据足以确认缺陷，简短说明限制不影响该阻塞结论；非必要的补充观察受限且不影响
+整体判断时也简短说明，不凭限制推断产品失败，也不借限制忽略已确认缺陷。
 
 可以补测试、尝试修复、创建独立实验目录，但要区分原始 PR 与修改后实验。
 产品源码修复后通过不能抹去原始代码失败；环境修复后可重新验证原始源码，保留异常与修复记录。
@@ -174,13 +184,16 @@ PR 和 push 任务生成的 `ai_custom_tools/validation.md`，标题、正文、
   ],
   "findings": [],
   "blocking_reasons": [],
+  "limitations": [],
   "artifacts": ["ai_custom_tools/validation.md"]
 }
 ```
 
 示例为 PR 任务；分支任务的 `pr_info` 使用 `not_applicable`。实际 checks 必须覆盖当前任务最低范围。检查状态使用 `pass`、`fail`、
 `infra_error`、`cancelled`、`not_applicable` 或 `not_selected`；最低必检未完成不能通过。
-findings 每项提供 `severity`、`summary`、`blocking` 和可选 `evidence`。
+findings 每项提供 `severity`、`summary`、`blocking`，可用 `qualification` 补充分析，
+用 `code_evidence`（如 `src/file.py:17`）和 `evidence` 引用代码与复现证据。
+`limitations` 为中文说明字符串列表；无独立限制说明时留空。
 检查的 `details` 可直接保留基础工具结果中的业务数据，供页面展示算子、后端与性能。
 
 checks.evidence 和 artifacts 是相对 `/task/artifacts` 的实际文件路径；reviews.evidence

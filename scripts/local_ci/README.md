@@ -122,6 +122,9 @@ state_dir/
 必传证据优先使用预算。缺失或无法上传时保留检查实际状态，但整体通过结论改为
 `infra_error`；选传文件超限保留在本机，不改变结论。省略原因写入 `evidence_delivery`。
 报告沿用任务实际文件名，文件从 `sealed/` 与结果一起发布。
+`findings` 按独立问题保存结论、分析及代码证据；`blocking_reasons` 保留失败诊断，
+不在 PR 评论中重复追加为缺陷。`limitations` 单独保存环境、工具或证据不足的限制说明，
+不改变检查的实际状态和最低验证要求。
 
 GitHub 阶段状态及 `Summary` 使用 Commit Status，PR 写入 `head_sha`，
 实际验证对应冻结的 `tested_sha`。Basic → API → Security 按成功依赖推进；
