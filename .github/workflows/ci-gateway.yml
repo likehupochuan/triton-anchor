@@ -11,6 +11,7 @@ on:
       pr_number: {type: string, default: '0'}
       source_branch: {type: string, default: ''}
       requested_sha: {type: string, default: ''}
+      request_id: {type: string, default: '', description: 'CI Request run and attempt; leave empty for direct dispatch'}
       worker_revision_sha: {type: string, default: ''}
       action: {type: string, default: ''}
       full: {type: boolean, default: false}
@@ -68,6 +69,7 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
           SOURCE_BRANCH: ${{ inputs.source_branch }}
           REQUESTED_SHA: ${{ inputs.requested_sha }}
+          LOCAL_CI_REQUEST_ID: ${{ inputs.request_id }}
           FULL: ${{ inputs.full }}
           GITEE_SUBMODULE_MIRRORS: ${{ vars.GITEE_SUBMODULE_MIRRORS || '{}' }}
           EVENT_KIND: ${{ inputs.action == 'manual' && 'manual' || 'push' }}
@@ -239,6 +241,33 @@ jobs:
           EXPECTED_TASK_DIGEST: ${{ needs.prepare.outputs.task_digest }}
           STAGES: '{"prepare":"${{ needs.prepare.result }}","basic":"${{ needs.basic.result }}","api":"${{ needs.api.result }}","security":"${{ needs.security.result }}","card":"${{ needs.security-result.outputs.card_result }}","approval":"${{ needs.approve-external-fork.result }}","enqueue":"${{ needs.enqueue.result }}"}'
         run: python3 scripts/ci/gateway.py finalize
+  finish-request:
+    name: Finish interrupted request initialization
+    needs: [validate-worker, cancel-obsolete, prepare]
+    if: ${{ always() && inputs.request_id != '' && needs.prepare.result != 'success' }}
+    runs-on: ubuntu-latest
+    permissions: {statuses: write}
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          REQUEST_ID: ${{ inputs.request_id }}
+          REQUESTED_SHA: ${{ inputs.requested_sha }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const sha = process.env.REQUESTED_SHA;
+            const rows = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
+              owner, repo, ref: sha, per_page: 100
+            });
+            const current = rows.find(row => row.context === 'Summary');
+            const identity = new URLSearchParams((current?.target_url || '').split('#')[1]);
+            if (current?.state !== 'pending' || current.creator?.login !== 'github-actions[bot]' ||
+                identity.get('local-ci-request') !== process.env.REQUEST_ID || identity.has('local-ci-task')) return;
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha, context: 'Summary', state: 'error',
+              description: 'Local CI: Gateway initialization failed or was cancelled; see workflow',
+              target_url: `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${context.runId}#local-ci-request=${process.env.REQUEST_ID}`
+            });
   validate-worker:
     name: Validate control revision
     if: >-

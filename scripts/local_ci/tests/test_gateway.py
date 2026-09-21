@@ -112,7 +112,7 @@ class FakeGitHub:
             return self.source_files.get(ref, {}).get(path, b"__version__ = '3.0.0'\n")
         return self.source_files.get(ref, self.cmake_files)[path]
 
-    def status(self, task, state, description, url=""):
+    def status(self, task, state, description, url="", **kwargs):
         self.statuses.append((task["task_id"], state))
         self.latest_statuses[task["task_id"]] = (state, description)
         self.writes.append("status")
@@ -1287,6 +1287,44 @@ class GatewayBehaviorTests(unittest.TestCase):
         self.assertEqual(client.check_rows[self.head], [])
         self.assertEqual(client.status_rows[self.tested], [])
 
+    def test_request_handoff_blocks_old_writers_and_preserves_request_identity(self):
+        client = RecordingGitHub(self.gh)
+        client.seed_status(self.head, g.CHECK_NAMES["basic"], "success", self.task["task_id"], "100")
+        client.seed_status(self.head, "Local CI Summary", "pending", self.task["task_id"], "100")
+        target = f"https://github.com/{g.REPOSITORY}/actions/runs/200#local-ci-request=200:1"
+        client.seed_status(self.head, g.SUMMARY_CONTEXT, "pending", "", target_url=target)
+        self.assertEqual(client.latest_summary(self.task)["target_url"], target)
+        self.assertFalse(client.owns_task(self.task))
+        client.status(self.task, "success", "Old result")
+        # Also guard a request arriving after the receiver's ownership read.
+        with patch.object(client, "owns_task", return_value=True), patch.dict(g.os.environ, {"LOCAL_CI_REQUEST_ID": ""}):
+            client.status(self.task, "success", "Late old result")
+            client.status(self.task, "pending", "Late direct dispatch", claim_request=True)
+        self.assertEqual(client.writes, [])
+        with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "201", "GITHUB_RUN_ATTEMPT": "1", "LOCAL_CI_REQUEST_ID": "199:1"}):
+            with self.assertRaisesRegex(ValueError, "newer workflow"):
+                g.begin_checks(client, self.task)
+        self.assertEqual(client.writes, [])
+        with patch.dict(g.os.environ, {"GITHUB_RUN_ID": "201", "GITHUB_RUN_ATTEMPT": "1", "LOCAL_CI_REQUEST_ID": "200:1"}):
+            g.begin_checks(client, self.task)
+            self.assertTrue(client.owns_task(self.task, workflow=True))
+            row = client.latest_summary(self.task)
+            self.assertEqual(g.status_identity(row), {"local-ci-task": self.task["task_id"], "local-ci-request": "200:1"})
+            self.assertEqual(row["state"], "pending")
+            g.finalize_preflight(client, self.task, {"prepare": "success", "basic": "failure"})
+            self.assertEqual(client.latest_summary(self.task)["state"], "failure")
+            self.assertEqual(g.status_identity(client.latest_summary(self.task))["local-ci-request"], "200:1")
+        self.assertEqual(client.commit_statuses(self.head)["Local CI Summary"]["state"], "error")
+
+    def test_renamed_summary_finishes_pending_aliases_without_rewriting_completed_history(self):
+        client = RecordingGitHub(self.gh)
+        client.seed_status(self.head, "Local CI Summary", "pending", self.task["task_id"])
+        client.seed_status(self.tested, "local-ci/summary", "success", self.task["task_id"])
+        client.status(self.task, "success", "Local CI: pass")
+        self.assertEqual({row["context"] for _, _, row in client.writes}, {"Summary", "Local CI Summary"})
+        self.assertTrue(all(row["state"] == "success" for _, _, row in client.writes))
+        self.assertEqual(client.commit_statuses(self.tested)["local-ci/summary"]["state"], "success")
+
     def test_legacy_result_ownership_and_checks_survive_name_and_commit_migration(self):
         client = g.GitHub(g.REPOSITORY, token="fixture")
         names = {key: g.CHECK_ALIASES[key][0] for key in (*g.CHECK_NAMES, "dispatch")}
@@ -1391,7 +1429,7 @@ class GatewayBehaviorTests(unittest.TestCase):
         stages = {key: "success" for key in ("prepare", *g.CHECK_NAMES)}
         events = []
         with patch.object(self.gh, "check", side_effect=lambda *args, **kwargs: events.append((args[1], args[2])) or True) as check, \
-                patch.object(self.gh, "status", side_effect=lambda *args: events.append(("summary", args[1]))), \
+                patch.object(self.gh, "status", side_effect=lambda *args, **kwargs: events.append(("summary", args[1]))), \
                 patch.object(g, "GitHub", return_value=self.gh), \
                 patch.object(g, "load_task", return_value=self.task), patch.object(g, "output"), \
                 patch.dict(g.os.environ, {"GITHUB_STEP_SUMMARY": ""}):

@@ -13,7 +13,7 @@ def fixture():
            "stage": "running", "budget": {"codex_attempts_used": 3},
            "recovery": {"state": "recovering", "action": "resume"}}
     snapshot = {"worker_id": "worker-1", "collected_at": now, "tasks": [row]}
-    status = {"id": 1, "context": "Local CI Summary", "state": "pending",
+    status = {"id": 1, "context": "Summary", "state": "pending",
               "creator": {"login": "github-actions[bot]"}, "description": "waiting",
               "target_url": "https://github.com/org/repo/actions/runs/1#local-ci-task=task-1"}
     reader = p.ReceiverProgress({"worker_id": "worker-1", "health_stale_seconds": 1200})

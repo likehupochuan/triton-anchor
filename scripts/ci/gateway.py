@@ -65,7 +65,8 @@ CHECK_NAMES = {
     "api": "API Compatibility",
     "security": "Security Gate",
 }
-SUMMARY_CONTEXT = "Local CI Summary"
+SUMMARY_CONTEXT = "Summary"
+SUMMARY_ALIASES = ("Local CI Summary", "local-ci/summary")
 HEAD_CHECK_PREFIX = "triton-anchor-local-ci-head:"
 # Approval is conditional: only external-fork PRs enter the protected
 # environment.  Keeping it as a repository-wide required context would leave
@@ -96,7 +97,7 @@ RETIRED_CHECK_NAMES = frozenset({
     "local-ci/soghgo-cmodel",
     "local-ci/sophgp-cmodel/routing",
 })
-RETIRED_STATUS_CONTEXTS = RETIRED_CHECK_NAMES | {"local-ci/summary"}
+RETIRED_STATUS_CONTEXTS = RETIRED_CHECK_NAMES | set(SUMMARY_ALIASES)
 CHECK_CONCLUSIONS = {
     "success",
     "failure",
@@ -300,14 +301,24 @@ class GitHub:
         return True
 
     def status(self, task: dict, state: str, description: str, url: str = "", *,
-               existing_only: bool = False, expected_pending_id: int | None = None) -> None:
-        if not self.owns_task(task):
+               existing_only: bool = False, expected_pending_id: int | None = None,
+               claim_request: bool = False) -> None:
+        if not self.owns_task(task, workflow=claim_request, claim_request=claim_request):
             return
         if state != "error" and not is_current(self, task):
             return
         url = url or workflow_url() or f"https://github.com/{self.repository}/commit/{github_sha(task)}"
         url = url.split("#", 1)[0] + f"#local-ci-task={task['task_id']}"
         for sha, context, previous in self.summary_targets(task, existing_only=existing_only, state=state):
+            identity = status_identity(previous or {})
+            request_id = os.getenv("LOCAL_CI_REQUEST_ID", "") if claim_request else identity.get("local-ci-request", "")
+            if identity.get("local-ci-request") and (
+                (claim_request and request_id and request_id != identity["local-ci-request"])
+                or (claim_request and not request_id and not identity.get("local-ci-task")
+                    and previous.get("state") == "pending")
+                or (not claim_request and identity.get("local-ci-task") != task["task_id"])
+            ):
+                return  # A newer request may arrive after the ownership check.
             # Progress must recheck the actual last-read row, not an earlier poll.
             if expected_pending_id is not None and (
                 not previous or previous.get("id") != expected_pending_id
@@ -315,12 +326,25 @@ class GitHub:
                 or status_identity(previous).get("local-ci-task") != task["task_id"]
             ):
                 continue
+            target = url + (f"&local-ci-request={request_id}" if request_id else "")
             self.post_status(sha, {"state": state, "context": context,
-                                  "description": description[:140], "target_url": url}, previous)
+                                  "description": description[:140], "target_url": target}, previous)
 
     def summary_statuses(self, sha: str) -> dict:
         return {key: row for key, row in self.commit_statuses(sha).items()
-                if key in (SUMMARY_CONTEXT, "local-ci/summary")}
+                if key in (SUMMARY_CONTEXT, *SUMMARY_ALIASES)}
+
+    def request_allows(self, task: dict, *, claim: bool = False) -> bool:
+        row = self.summary_statuses(github_sha(task)).get(SUMMARY_CONTEXT) or {}
+        identity = status_identity(row)
+        owner = identity.get("local-ci-request")
+        if not owner or (row.get("creator") or {}).get("login") != "github-actions[bot]":
+            return True
+        request_id = os.getenv("LOCAL_CI_REQUEST_ID", "")
+        if claim and request_id:
+            return owner == request_id
+        # A routed request invalidates the previous task before freezing its successor.
+        return bool(identity.get("local-ci-task")) or (claim and row.get("state") != "pending")
 
     def summary_targets(self, task: dict, *, existing_only: bool = False, state: str = ""):
         sha = github_sha(task)
@@ -346,7 +370,9 @@ class GitHub:
         candidates = []
         for revision in dict.fromkeys((sha,) if sha else (github_sha(task), task["tested_sha"])):
             rows = self.summary_statuses(revision)
-            for context in (SUMMARY_CONTEXT, "local-ci/summary"):
+            if revision == github_sha(task) and rows.get(SUMMARY_CONTEXT):
+                return rows[SUMMARY_CONTEXT]
+            for context in (SUMMARY_CONTEXT, *SUMMARY_ALIASES):
                 row = rows.get(context)
                 if row:
                     if status_identity(row).get("local-ci-task") == task["task_id"]:
@@ -388,6 +414,8 @@ class GitHub:
         ):
             raise ValueError("Invalid CI stage conclusion")
         if not is_current(self, task):
+            return False
+        if not self.request_allows(task, claim=key == "basic" and restart):
             return False
         current_run = os.getenv("GITHUB_RUN_ID", "") if run_id is None else run_id
         attempt = os.getenv("GITHUB_RUN_ATTEMPT", "1")
@@ -474,7 +502,9 @@ class GitHub:
             return {}
         return self.stage_status(task, "basic") or self.legacy_stage(task, "basic")
 
-    def owns_task(self, task: dict, *, workflow: bool = False) -> bool:
+    def owns_task(self, task: dict, *, workflow: bool = False, claim_request: bool = False) -> bool:
+        if not self.request_allows(task, claim=claim_request):
+            return False
         start = self.task_start(task)
         if not start:
             start = self.stage_status(task, "dispatch") or self.legacy_stage(task, "dispatch") or self.legacy_stage(task, "preflight")
@@ -1510,11 +1540,11 @@ def begin_checks(gh: GitHub, task: dict) -> None:
                        workflow_url(), restart=True)
     # A successful status write is the ownership claim. GitHub's list API
     # can briefly return the previous output immediately after that write.
-    if not claimed and not gh.owns_task(task, workflow=True):
+    if not claimed and not gh.owns_task(task, workflow=True, claim_request=True):
         raise ValueError("A newer workflow owns this task")
     if not claimed and gh.stage_status(task, "basic").get("status") == "completed":
         return
-    gh.status(task, "pending", "Local CI: preflight checks in progress", workflow_url())
+    gh.status(task, "pending", "Local CI: preflight checks in progress", workflow_url(), claim_request=True)
     gh.retire_open_checks(task, superseded=True)
 
 

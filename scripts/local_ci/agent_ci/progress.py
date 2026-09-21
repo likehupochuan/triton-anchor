@@ -67,7 +67,7 @@ def read_health(config):
 
 def pending_for(row, task):
     identity = parse_qs(urlparse((row or {}).get("target_url", "")).fragment)
-    return bool(row and row.get("context") == "Local CI Summary"
+    return bool(row and row.get("context") == "Summary"
                 and row.get("state") == "pending" and isinstance(row.get("id"), int)
                 and (row.get("creator") or {}).get("login") == "github-actions[bot]"
                 and identity.get("local-ci-task") == [task["task_id"]])

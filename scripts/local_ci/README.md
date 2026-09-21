@@ -123,10 +123,10 @@ state_dir/
 `infra_error`；选传文件超限保留在本机，不改变结论。省略原因写入 `evidence_delivery`。
 报告沿用任务实际文件名，文件从 `sealed/` 与结果一起发布。
 
-GitHub 阶段状态及 `Local CI Summary` 使用 Commit Status，PR 写入 `head_sha`，
+GitHub 阶段状态及 `Summary` 使用 Commit Status，PR 写入 `head_sha`，
 实际验证对应冻结的 `tested_sha`。Basic → API → Security 按成功依赖推进；
 外部 fork 完成前置检查及回写后进入审批，同仓库任务直接投递。
-Summary 从可信任务初始化开始保持 pending，覆盖前置检查、审批、投递及服务器验证，
+Summary 从 CI Request 确认有效请求后保持 pending，覆盖 Gateway 初始化、前置检查、审批、投递及服务器验证，
 直到最终通过、失败或异常收尾；状态只允许当前任务及其工作流回写。
 
 PR 目标基线变化后需要重新派发，验证新的合并基线。
