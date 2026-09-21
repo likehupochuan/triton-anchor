@@ -1,16 +1,18 @@
 # 服务器 Codex 部署交接：LLVM 隔离与运维恢复
 
-本文合并 LLVM 隔离与运维恢复更新，作为此次部署的统一入口。四个新增 profile 已完成，不再重复安装或补建；LLVM 专项验收细节可参考 `VARIANT_LLVM_DEPLOYMENT.md`。
+本文只交接服务器上的 LLVM 隔离与运维恢复部署、检查和验收。Cloudflare 更新、Dashboard 发布及外部展示验收由桌面维护者完成，不属于服务器 Codex 的执行范围。
+
+四个新增 profile 已完成，不再重复安装或补建。`VARIANT_LLVM_DEPLOYMENT.md` 仅作为 LLVM 专项验收参考，其中补齐四个 profile 的旧步骤不再执行。
 
 ## 1. 已完成事项与部署目标
 
 - LLVM 隔离代码：`c58e53fed29aa048a6859ea65136619e39197ad9`。
 - 已整合 LLVM 更新并推送的运维恢复代码：`78f7675668d85438a587c6d1df5d31388acb886a`，GitHub 分支 `local-ci-unified`。
 - 同事完成的 Triton **3.2、3.4、3.5、3.8** LLVM/profile 配置已在 `ba7e5ea` 提交入库；本轮修复以该提交为基础。保留现有成果，不再安装 LLVM、重新创建这四个 profile。
-- 本轮还包含 Cloudflare 活动 Issue 查询分页上限、恢复原因保留与页面记录折叠。部署请选择包含这些修改的本轮最终完整 SHA。
+- 本轮服务器修复保留连续恢复过程中的故障原因。已审核代码基线为 `70fa331bcda205b73436129434c3e13f70e79937`，包含上述 LLVM、完整配置与运维恢复更新。使用该精确版本；如维护者交接了更新的完整 SHA，应先确认它包含此基线。
 - 本文不是部署完成记录。服务器 Codex 应先核对实际状态，已经部署且有验证记录的部分不重复执行。
 
-入口仍为 GitHub PR/push → Gitee → 服务器 → Gitee 结果 → GitHub 回写。沿用单任务执行、检查名称、head 回写、现有健康仓库和 Cloudflare 资源。
+任务仍由 GitHub PR/push 经 Gitee 到达服务器，服务器执行后上传 Gitee 结果。沿用单任务执行和现有健康仓库。
 
 ## 2. 部署前先确认完整配置，避免覆盖同事成果
 
@@ -25,23 +27,9 @@
 - 已核验的 LLVM SHA、挂载路径、目录摘要、环境变量、共享镜像与后端能力。仅已验证的 3.0 开启后端。
 - 新的 `monitor_services`，不包含旧 watchdog；不再使用 `branch_profiles`。
 
-选择包含 `ba7e5ea` 和本轮修复的最终完整 SHA，确认已同步到配置指定的 Gitee 控制分支。如服务器还有未入库的配置差异，先私有备份并查明来源，再决定同步，不能直接覆盖。不要在 live 控制目录改文件，也不要整份使用旧运行 JSON 覆盖新增恢复配置。
+确认第 1 节的目标完整 SHA 已同步到配置指定的 Gitee 控制分支。如服务器还有未入库的配置差异，先私有备份并查明来源，再决定同步，不能直接覆盖。不要在 live 控制目录改文件，也不要整份使用旧运行 JSON 覆盖新增恢复配置。
 
-## 3. 先更新 Cloudflare 和页面
-
-已经更新的观察端只核对版本和执行记录。若服务器没有这些账户的既有授权，由维护者在原部署端执行并交接结果；不另建账户、Worker、KV 或凭据。
-
-1. 从包含本轮更新的 checkout 更新现有 Cloudflare `local-ci-alert`：
-
-   ```bash
-   wrangler deploy --config scripts/local_ci/maintenance/cloudflare/wrangler.jsonc
-   ```
-
-   保留 `ALERT_STATE` KV、现有 `GITEE_TOKEN`、每 5 分钟 Cron 和 Issue 历史。确认 scheduled 调用成功，只有一个监测程序维护告警。
-2. 使用 main 的 `CI Gateway` 手动发布：`mode=publish`，任务 ID 留空。它会解析并 checkout 控制分支代码；记录实际发布 SHA。无需修改 main YAML 或新增 Workflow。
-3. 查看 [Worker 页面](https://likehupochuan.github.io/triton-anchor/worker.html)及 [Cloudflare 缓存](https://local-ci-alert.2272640910.workers.dev/health)。页面仍 Gitee 主读、Cloudflare 备用；旧快照缺字段显示“未上报”，读取失败不等于服务器故障。
-
-## 4. 服务器准备
+## 3. 服务器准备
 
 使用普通 CI 用户 `jiwang_ci`、user systemd 和现有 Rootless Docker，不以 root 执行部署。以下路径先与服务器运行配置核对：
 
@@ -58,13 +46,13 @@
 
 凭据沿用已有私有注入方式，文件归 CI 用户所有且权限 600。安装器自行读取 `--credentials-env`；控制更新没有这个参数，需在既有私有环境中运行。不要输出 Token、完整 session 或凭据文件内容。
 
-## 5. 精确版本更新与首次服务迁移
+## 4. 精确版本更新与首次服务迁移
 
-将占位符替换为第 2 节确定的、包含完整配置的最终 40 位 SHA。从 live checkout 预览：
+以下使用第 1 节的已审核目标；如维护者已指定更新的完整 SHA，核对其包含此基线后替换。目标尚未出现在 Gitee 控制分支时先反馈，不改换来源或强制更新。从 live checkout 预览：
 
 ```bash
 cd /home/jiwang_ci/local_ci/control_anchor
-CI_DEPLOY_REVISION='<最终已审核且包含完整配置的40位SHA>'
+CI_DEPLOY_REVISION='70fa331bcda205b73436129434c3e13f70e79937'
 CI_PYTHON=/home/jiwang_ci/local_ci/local-ci-control-venv/bin/python
 "$CI_PYTHON" scripts/local_ci/prepare/control_update.py \
   --config /home/jiwang_ci/local_ci/config/local-ci.json \
@@ -84,7 +72,7 @@ systemctl --user stop triton-anchor-local-ci.service
 
 返回 `state: updated` 或 `current` 后核对实际 HEAD 和配置。`deferred-active-task` 即便退出码为 0 也表示未完成部署，应查明占用、等待后再试。失败时检查实际代码/配置是否已经切换，不盲目继续或启动旧版本。
 
-**首次迁移还要运行新版安装器。** 旧更新器已经加载的 Python 不会随 checkout 自动更新，首次切换不能保证执行了新版 watchdog 清理。控制更新可能已启动 Worker；再次确认空闲，如果已接收新任务，等它完成后再停：
+**首次迁移还要运行新版安装器；已完成并验证过此次服务迁移则跳过本段。** 旧更新器已经加载的 Python 不会随 checkout 自动更新，首次切换不能保证执行了新版 watchdog 清理。控制更新可能已启动 Worker；再次确认空闲，如果已接收新任务，等它完成后再停：
 
 ```bash
 systemctl --user stop triton-anchor-local-ci.service
@@ -105,7 +93,7 @@ systemctl --user stop triton-anchor-local-ci.service
 
 这一步复用现有 LLVM 与共享镜像。runtime 验证不等于全部版本真实 build/install/smoke 通过。首次“控制更新 + 新版安装器”可能重启 Worker 两次；后续新版控制更新已含幂等清理，不必每次重装。
 
-## 6. 检查部署结果
+## 5. 检查部署结果
 
 确认实际 HEAD、最终提交配置与运行 JSON 一致，八个 profile 全部保留。使用以下命令核对服务：
 
@@ -126,15 +114,15 @@ systemctl --user is-active triton-anchor-local-ci-watchdog.service triton-anchor
 systemctl --user start triton-anchor-local-ci-health.service
 ```
 
-等待新上报与至少一轮 Cloudflare 检测，核对采集时间和身份，避免误用旧缓存：
+检查本次 health unit 的执行结果、生成的本地快照及上传记录；必要时读取 Gitee 中的 `worker-health.json` 确认上传内容。记录采集时间、Worker 身份和上报结果，避免用旧文件当作本次验证：
 
-- 有任务时显示阶段、恢复动作、次数、下次尝试、截止时间；空闲或缺字段不制造故障。
-- 容器运行状态、退出码/OOM、systemd 子状态来自实际查询；查询失败显示未知。
-- 页面有独立上传等待区，以及近 7 天“异常与恢复记录”；同一运行的连续恢复过程折叠为摘要，默认展示 20 组，明细与更多记录可展开。已关闭告警默认折叠，不依赖旧 watchdog 数据。
-- 公开事件每任务最多 20 条、全局最多 100 条，不含原始异常、凭据、完整 session 或私有路径。
-- Cloudflare 只有获得更晚且新鲜、对应字段明确正常的快照才确认恢复。读取失败、过期、缺字段、旧快照不能误关 Issue；页面读取不写 KV。
+- 有任务时上报阶段、恢复动作、次数、下次尝试、截止时间；心跳、采集时间与任务有效进展分别记录。
+- 容器运行状态、退出码/OOM、systemd 子状态来自实际查询；查询失败标记未知，正常结束的 oneshot 不误报为常驻服务停止。
+- 上传等待按原 `task_id + run_id` 记录，保留近期终态和恢复事件；连续恢复的下一次尝试仍保留故障原因。
+- 公开事件每任务最多 20 条、全局最多 100 条，保留近 7 天；不含原始异常、凭据、完整 session 或私有路径。
+- 空闲或当前没有相应事件时，不伪造任务和恢复数据。上传失败应保留本地快照与错误类别并反馈。
 
-## 7. 部署时应保留的恢复行为
+## 6. 部署时应保留的恢复行为
 
 | 场景/预算 | 应有行为 |
 | --- | --- |
@@ -153,29 +141,20 @@ systemctl --user start triton-anchor-local-ci-health.service
 
 base/candidate 共用一个任务容器，但工作区、venv、LLVM 和环境变量独立，按各自冻结源码选 profile。新结果保留 `environment.variants.base/candidate`；续封存使用原宿主 checkpoint，旧版已封存结果不改写。
 
-## 8. 正常运行与恢复验收
+## 7. 正常运行与恢复验收
 
 复用同事已有的八个版本验收记录，不为本次部署重新安装或重跑全部版本。没有真实构建证据的版本标明“配置/runtime 已验证，真实构建待验证”。
 
-**正常链路：** 使用专用测试 PR/push，记录 task_id、run_id、head/tested SHA。前置检查、审批（如需）、派发正常；Summary 仍在成功派发后出现，pending 进度更新不增加检查项，终态不退回 pending。GitHub、Gitee 原结果与 Dashboard 一致。
+**正常任务：** 使用维护者派发的专用测试任务，或复用已有可验证的运行记录，不为部署自行新建 PR。记录 task_id、run_id、head/tested SHA；核对服务器按准备、执行、封存、上传推进，封存摘要和 Gitee 上传结果一致，任务运行期间 Worker 心跳仍持续更新。没有新任务时如实标明真实任务验收待执行。
 
 至少核验一次跨 LLVM 任务，可复用已有可验证记录。确认两侧实际构建及 `environment.variants` 没有混用 LLVM。3.0/3.1 虽共享 LLVM，profile/后端能力仍区分；性能环境不同为 `not_comparable`。未执行 base 时，不宣称已验证两侧构建。
 
 **恢复演练：** 使用独立演练状态与结果目标，不启动第二个生产 Worker。仅让演练结果上传失败，生产 health 保持可用；记录封存摘要、run_id、Codex 次数和截止时间。重启演练 Worker 后只补传原结果，不新建任务容器、不重新启动 Codex。恢复访问后确认同一结果上传，摘要、run_id 与预算保持。
 
-Issue 开关验收仅在已有隔离健康快照、监测配置和告警目标的演练环境进行；生产监测不会自动观察独立演练状态目录。没有这套条件时，使用现有 Cloudflare 自动测试验证告警逻辑，并将真实 Issue 恢复验收列为待执行。不为本次演练新增 Cloudflare 资源，不篡改生产快照伪造验收。
+没有独立演练状态与结果目标时，不修改生产环境凑验收，将恢复演练列为待执行并说明所缺条件。不通过停整机 Docker、破坏 LLVM 目录或终止静默存活任务演练。代码级测试已在桌面侧执行，服务器重点验证实际 Docker/systemd、健康上报、任务和原结果恢复，不要求重新运行 Cloudflare 或页面测试。
 
-不通过停整机 Docker、破坏 LLVM 目录或终止静默存活任务演练。其他崩溃边界可在开发/演练环境复验现有自动测试：
-
-```bash
-python3 -m pytest scripts/local_ci/tests -q
-node --test scripts/local_ci/maintenance/cloudflare/worker.test.mjs scripts/local_ci/tests/dashboard.test.cjs
-```
-
-`78f7675` 桌面整合时已通过 268 项 Python、48 项 JavaScript 测试及 Ruff 硬错误检查；不替代服务器 Docker/systemd 与真实任务验收。
-
-## 9. 失败处理与反馈
+## 8. 失败处理与反馈
 
 配置、依赖、锁或安装失败时保留已完成步骤与证据，不删 Journal、重置预算、清空 outbox 或强制 checkout。回退前停 Worker 并保存新版状态，先确认旧代码能理解未完成任务。安装器 `--rollback` 仅恢复 units，不是代码、配置和任务状态的整体回滚。
 
-最终反馈：实际完整控制 SHA；完整 profile 配置的来源与保留结论；Cloudflare 部署版本、Pages 运行链接；服务和 watchdog 清理结果、备份位置；新健康快照时间；正常/跨 LLVM 任务 ID；恢复演练的原摘要/run_id 和预算保持情况；尚未完成的外部部署或真实验收。只输出脱敏信息。
+最终反馈：实际完整控制 SHA；八个 profile 配置的来源与保留结论；服务和 watchdog 清理结果、私有备份位置；新健康快照的采集时间及上传结果；正常/跨 LLVM 任务 ID 和验证范围；恢复演练的原摘要/run_id 及预算保持情况；尚未完成的服务器步骤或真实验收。只输出脱敏信息。
