@@ -208,12 +208,19 @@
     configuration_invalid:'任务配置无效', delivery_failed:'结果上传失败', container_oom:'任务容器内存不足（OOM）', timeout:'执行超时', session_invalid:'session 无效', container_failed:'任务容器异常', runtime_unavailable:'Docker 不可用',
     budget_exhausted:'恢复预算耗尽', publication_failed:'结果上传失败', interrupted:'执行中断', no_progress:'长时间无进展'};
   const describe = (value, labels) => value ? labels[value] || value : '未上报';
+  const validHead = value => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value);
+  function taskIdentity(row, worker) {
+    const known = [...rows(worker?.tasks), ...rows(worker?.recent_tasks), worker?.active_task]
+      .find(task => task && row.task_id && row.task_id !== 'unknown' && row.run_id && row.run_id !== 'unknown'
+        && task.task_id === row.task_id && task.run_id === row.run_id);
+    return {...row, head_sha: validHead(row.head_sha) ? row.head_sha : known?.head_sha,
+      repository: row.repository || known?.repository};
+  }
   function taskFacts(task) {
     const budget = task.budget || {}, recovery = task.recovery || {};
     const attempts = (used, limit) => Number.isInteger(used) ? used + ' / ' + (Number.isInteger(limit) ? limit : '未上报') : '未上报';
     return [
       ['Head SHA', task.head_sha || '未上报'],
-      ['任务 ID', task.task_id || '未上报'], ['运行 ID', task.run_id || '未上报'],
       ['执行阶段', describe(task.stage, stages)], ['恢复状态', describe(recovery.state, recoveryStates)],
       ['异常原因', describe(recovery.failure_code, failureNames)], ['恢复动作', describe(recovery.action, recoveryActions)],
       ['Codex 尝试', attempts(budget.codex_attempts_used, budget.codex_attempts_limit)],
@@ -227,19 +234,22 @@
 
   function historyEvents(events, now) {
     const unique = new Map();
-    for (const row of rows(events)) if (typeof row.id === 'string' && age(row.at, now) >= 0 && age(row.at, now) <= 7 * 86400)
-      unique.set(row.id, row);
+    for (const row of rows(events)) if (typeof row.id === 'string' && age(row.at, now) >= 0 && age(row.at, now) <= 7 * 86400) {
+      const previous = unique.get(row.id);
+      unique.set(row.id, {...row, head_sha: validHead(row.head_sha) ? row.head_sha : previous?.head_sha,
+        repository: row.repository || previous?.repository});
+    }
     const counts = new Map();
     return [...unique.values()].sort((a,b) => Date.parse(b.at) - Date.parse(a.at)).filter(row => {
       if (!row.task_id) return true;
       const count = (counts.get(row.task_id) || 0) + 1; counts.set(row.task_id, count); return count <= 20;
     }).slice(0, 100);
   }
-  function eventText(row) {
+  function eventText(row, includeHeading = true) {
     const detail = row.detail || {};
     const historicalStates = {retry_wait:'当时等待重试', waiting_dependency:'当时等待依赖恢复', recovering:'当时恢复中'};
-    return [...new Set([date(row.at), row.task_id ? '任务 ' + row.task_id.slice(0, 12) : '外部监测',
-      row.run_id && row.run_id !== 'unknown' ? '运行 ' + row.run_id : '',
+    return [...new Set([...(includeHeading ? [date(row.at), row.task_id
+      ? 'Head SHA ' + (validHead(row.head_sha) ? row.head_sha.slice(0, 12) : '未上报') : '外部监测'] : []),
       row.kind === 'recovered' ? '确认恢复' : row.kind === 'fault' ? '发现异常' : row.kind === 'finished_failed' ? '恢复失败，任务已结束' : '',
       rows(row.codes).map(code => row.kind === 'recovered' && code === 'source_unreadable' ? '健康数据读取已恢复'
         : incidents[code]?.[1] || codexStates[code.replace(/^codex_/, '')]?.[0] || controlUpdateStates[code.replace(/^control_update_/, '')] || failureNames[code] || code).join('；'),
@@ -277,6 +287,34 @@
 
   function mount(root) {
     const node = (tag, className, text) => { const item = document.createElement(tag); if (className) item.className = className; if (text) item.textContent = text; return item; };
+    const headLink = row => {
+      if (!validHead(row.head_sha)) return node('span', 'health-muted', '未上报');
+      const linked = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(row.repository || '');
+      const link = node(linked ? 'a' : 'span', '', row.head_sha.slice(0, 12));
+      link.title = row.head_sha;
+      if (linked) link.href = 'https://github.com/' + row.repository + '/commit/' + row.head_sha;
+      return link;
+    };
+    const identityFacts = row => {
+      const facts = node('dl', 'health-facts');
+      for (const [label, value] of [['完整 Head SHA', validHead(row.head_sha) ? row.head_sha : '未上报'],
+        ['任务 ID', row.task_id || '未上报'], ['运行 ID', row.run_id || '未上报']])
+        facts.append(node('dt', '', label), node('dd', '', value));
+      return facts;
+    };
+    const identityDetails = row => {
+      const details = node('details');
+      details.append(node('summary', '', '查看完整 SHA 与排查编号'), identityFacts(row));
+      return details;
+    };
+    const eventLine = row => {
+      const line = node('span', '', date(row.at) + ' · ');
+      if (row.task_id) line.append(document.createTextNode('Head SHA '), headLink(row));
+      else line.append(document.createTextNode('外部监测'));
+      const text = eventText(row, false);
+      if (text) line.append(document.createTextNode(' · ' + text));
+      return line;
+    };
     const heading = node('div', 'health-heading'), title = node('div');
     title.append(node('h2', '', '运行概览'), node('p', 'health-muted', source.worker + ' · Gitee 健康快照 · 时间均为北京时间（UTC+8）'));
     const refresh = node('button', 'button secondary', '刷新健康状态'); refresh.type = 'button';
@@ -339,15 +377,16 @@
         || rows(worker?.tasks).some(task => task.task_id === row.task_id && task.run_id === row.run_id));
       if (containers.length) {
         details.append(node('h4', '', '任务容器'));
-        for (const row of containers) {
+        for (const container of containers) {
+          const row = taskIdentity(container, worker);
           const facts = node('dl', 'health-facts');
+          const head = node('dd'); head.append(headLink(row)); facts.append(node('dt', '', 'Head SHA'), head);
           const status = row.status === 'missing' ? '容器已丢失' : row.available !== true ? '未知（无法查询）'
             : row.running === true ? '运行中' : row.running === false ? '已停止' : '未上报';
-          for (const [label, value] of [['任务 / 运行', (row.task_id || '未上报') + ' / ' + (row.run_id || '未上报')],
-            ['容器状态', status], ['退出码', Number.isInteger(row.exit_code) ? String(row.exit_code) : '未上报'],
+          for (const [label, value] of [['容器状态', status], ['退出码', Number.isInteger(row.exit_code) ? String(row.exit_code) : '未上报'],
             ['内存溢出', typeof row.oom_killed === 'boolean' ? row.oom_killed ? '发生 OOM' : '未发生' : '未上报']])
             facts.append(node('dt', '', label), node('dd', '', value));
-          details.append(facts);
+          details.append(facts, identityDetails(row));
         }
       }
       const task = node('section', 'health-section');
@@ -357,8 +396,11 @@
       if (!model.current) task.append(node('p', 'health-muted', '最后快照中的任务，当前状态待确认。'));
       for (const active of activeTasks) {
         const facts = node('dl', 'health-facts');
-        for (const [label, value] of taskFacts(active)) facts.append(node('dt', '', label), node('dd', '', value));
-        task.append(facts);
+        for (const [label, value] of taskFacts(active)) {
+          const item = node('dd'); item.append(label === 'Head SHA' ? headLink(active) : document.createTextNode(value));
+          facts.append(node('dt', '', label), item);
+        }
+        task.append(facts, identityDetails(active));
       }
       if (!activeTasks.length) task.append(node('p', 'health-muted', worker?.tasks_available === false ? '任务状态采集异常，不能确认当前是否空闲。' : model.current ? '当前没有正在执行的任务。' : '当前任务状态未知。'));
       grid.append(details, task);
@@ -366,13 +408,14 @@
       const uploads = node('section', 'health-section');
       uploads.append(node('h3', '', '结果上传等待'), node('p', 'health-muted', '这里只重传已封存结果，不重新构建或测试。'));
       if (!model.current) uploads.append(node('p', 'health-muted', '以下为最后读取的上传状态。'));
-      for (const row of rows(worker?.uploads)) {
-        const facts = node('dl', 'health-facts health-upload');
-        for (const [label, value] of [['任务 / 运行', (row.task_id || '未上报') + ' / ' + (row.run_id || '未上报')],
-          ['等待开始', date(row.queued_at)], ['上传尝试', Number.isInteger(row.attempts) ? String(row.attempts) : '未上报'],
+      for (const upload of rows(worker?.uploads)) {
+        const row = taskIdentity(upload, worker);
+        const item = node('div', 'health-upload'), facts = node('dl', 'health-facts');
+        const head = node('dd'); head.append(headLink(row)); facts.append(node('dt', '', 'Head SHA'), head);
+        for (const [label, value] of [['等待开始', date(row.queued_at)], ['上传尝试', Number.isInteger(row.attempts) ? String(row.attempts) : '未上报'],
           ['下次重传', date(row.next_retry_at)], ['失败原因', describe(row.failure_code, failureNames)]])
           facts.append(node('dt', '', label), node('dd', '', value));
-        uploads.append(facts);
+        item.append(facts, identityDetails(row)); uploads.append(item);
       }
       if (!rows(worker?.uploads).length) uploads.append(node('p', 'health-muted', worker?.uploads_available === false ? '上传队列采集异常，不能确认结果是否已交付。' : Array.isArray(worker?.uploads) ? '没有等待上传的结果。' : '上传状态未上报。'));
       content.append(uploads);
@@ -405,21 +448,22 @@
       records.append(node('p', 'health-muted', '记录服务器恢复过程和 Cloudflare 外部监测事件；以下为事件发生时的状态，当前任务状态以上方“任务执行与恢复”为准。'));
       if (monitor.error) records.append(node('p', 'health-muted', monitor.error + '；服务器上报的记录仍会展示。'));
       const history = node('ul', 'health-history');
-      const groups = groupHistory(model.history);
+      const groups = groupHistory(model.history.map(row => taskIdentity(row, worker)));
       for (const group of groups.slice(0, showAllEvents ? 100 : 20)) {
         const item = node('li'), latest = group.events.at(-1);
-        if (group.events.length === 1) item.textContent = eventText(latest);
+        if (group.events.length === 1 && !latest.task_id) item.append(eventLine(latest));
         else {
           const details = node('details'), first = group.events[0];
           details.dataset.historyKey = first.id; details.open = expanded.has(first.id);
           const switches = new Set(group.events.filter(row => row.detail?.state === 'recovering'
             && ['new_session', 'new_codex_session'].includes(row.detail.action) && Number.isInteger(row.detail.attempt)).map(row => row.detail.attempt)).size;
-          details.append(node('summary', '', eventText(latest)
-            + (group.reason && !latest.detail?.failure_code ? ' · 本段原因：' + describe(group.reason, failureNames) : '')
+          const summary = node('summary'); summary.append(eventLine(latest), document.createTextNode(
+            (group.reason && !latest.detail?.failure_code ? ' · 本段原因：' + describe(group.reason, failureNames) : '')
             + (switches ? ' · 已记录新 session 启动 ' + switches + ' 次' : '') + ' · 展开 ' + group.events.length + ' 条过程记录'));
-          details.append(node('p', 'health-muted', '运行：' + latest.run_id + ' · 已记录时间：' + date(first.at) + ' — ' + date(latest.at)));
+          details.append(summary, identityFacts(latest));
+          details.append(node('p', 'health-muted', '已记录时间：' + date(first.at) + ' — ' + date(latest.at)));
           const entries = node('ul', 'health-history');
-          for (const row of [...group.events].reverse()) entries.append(node('li', '', eventText(row)));
+          for (const row of [...group.events].reverse()) { const entry = node('li'); entry.append(eventLine(row)); entries.append(entry); }
           details.append(entries); item.append(details);
         }
         history.append(item);

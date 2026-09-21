@@ -103,12 +103,14 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
                 if (isinstance(event, dict) and event.get("kind") in {"recovery", "phase"}
                         and type(event.get("at")) in (int, float)
                         and now - 7 * 86400 <= event["at"] <= now):
-                    events.append({**event, "task_id": task["task_id"], "run_id": event.get("run_id", task["run_id"])})
+                    events.append({**event, "task_id": task["task_id"], "run_id": event.get("run_id", task["run_id"]),
+                                   "head_sha": task["head_sha"], "repository": task["repository"]})
             if task["stage"] == "publish_pending":
                 delivery = record.get("delivery") or {}
                 recovery = record.get("recovery") or {}
                 uploads.append({
                     "task_id": task["task_id"], "run_id": task["run_id"],
+                    "head_sha": task["head_sha"], "repository": task["repository"],
                     "queued_at": delivery.get("queued_at", task["updated_at"]),
                     "attempts": delivery.get("attempts", 0),
                     "next_retry_at": delivery.get("next_retry_at", recovery.get("next_retry_at")),
@@ -338,6 +340,12 @@ def public_snapshot(snapshot):
     def code(value):
         return value if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", value) else None
 
+    def sha(value):
+        return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) else None
+
+    def repository(value):
+        return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value) else None
+
     def failure_code(value):
         return value if value in {
             "recovery_exhausted", "sealing_failed", "authentication", "connection", "rate_limit",
@@ -370,12 +378,9 @@ def public_snapshot(snapshot):
         return {
             "task_id": identifier(row.get("task_id")),
             "run_id": identifier(row.get("run_id")),
-            "repository": row.get("repository") if isinstance(row.get("repository"), str)
-            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", row["repository"]) else None,
-            "head_sha": row.get("head_sha") if isinstance(row.get("head_sha"), str)
-            and re.fullmatch(r"[0-9a-f]{40}", row["head_sha"]) else None,
-            "tested_sha": row.get("tested_sha") if isinstance(row.get("tested_sha"), str)
-            and re.fullmatch(r"[0-9a-f]{40}", row["tested_sha"]) else None,
+            "repository": repository(row.get("repository")),
+            "head_sha": sha(row.get("head_sha")),
+            "tested_sha": sha(row.get("tested_sha")),
             "pr_number": number(row.get("pr_number")),
             "budget": {**{k: number(budget.get(k)) for k in (
                 "codex_attempts_used", "execution_attempts_used", "session_switches",
@@ -427,6 +432,8 @@ def public_snapshot(snapshot):
         if detail.get("phase") in {"preparing", "running", "sealing", "publish_pending", "published"}:
             clean["detail"]["phase"] = detail["phase"]
         clean["id"] = hashlib.sha256(json.dumps(clean, sort_keys=True).encode()).hexdigest()[:16]
+        # Display metadata must not change the identity of previously published events.
+        clean.update(head_sha=sha(event.get("head_sha")), repository=repository(event.get("repository")))
         if clean["id"] in seen_events:
             continue
         seen_events.add(clean["id"])
@@ -511,6 +518,7 @@ def public_snapshot(snapshot):
         "uploads": [
             {
                 "task_id": identifier(r.get("task_id")), "run_id": identifier(r.get("run_id")),
+                "head_sha": sha(r.get("head_sha")), "repository": repository(r.get("repository")),
                 "queued_at": instant(r.get("queued_at")),
                 "attempts": number(r.get("attempts")),
                 "next_retry_at": instant(r.get("next_retry_at")),
@@ -546,6 +554,9 @@ def public_snapshot(snapshot):
         ],
         "task_containers": [
             {"task_id": identifier(r.get("task_id")), "run_id": identifier(r.get("run_id")),
+             "head_sha": sha(r.get("head_sha")),
+             "repository": repository(r.get("task", {}).get("repository")) if isinstance(r.get("task"), dict)
+             else repository(r.get("repository")),
              "attempt_id": identifier(r.get("attempt_id")),
              "expected_running": r.get("state") == "running" if "state" in r else flag(r.get("expected_running")),
              "available": flag(r.get("available")), "running": flag(r.get("running")),

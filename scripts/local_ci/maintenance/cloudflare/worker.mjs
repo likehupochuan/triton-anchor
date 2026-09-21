@@ -47,6 +47,8 @@ const rows = value => Array.isArray(value) ? value : [];
 const identity = row => row?.task_id && row?.run_id ? `${row.task_id}:${row.run_id}` : '';
 const recovering = new Set(['retry_wait', 'waiting_dependency', 'recovering']);
 const publicWord = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value) ? value : undefined;
+const publicSha = value => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value) ? value : undefined;
+const publicRepository = value => typeof value === 'string' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value) ? value : undefined;
 const instant = value => Number.isFinite(Date.parse(value));
 
 function mergeEvents(previous, incoming, now) {
@@ -59,9 +61,12 @@ function mergeEvents(previous, incoming, now) {
       if (publicWord(event.detail?.[key])) detail[key] = event.detail[key];
     }
     if (Number.isInteger(event.detail?.attempt) && event.detail.attempt >= 0) detail.attempt = event.detail.attempt;
+    const known = unique.get(event.id);
     unique.set(event.id, { id: event.id, at: event.at, kind: publicWord(event.kind) || 'recovery',
       ...(publicWord(event.task_id) ? { task_id: event.task_id } : {}),
       ...(publicWord(event.run_id) ? { run_id: event.run_id } : {}), detail,
+      head_sha: publicSha(event.head_sha) || known?.head_sha,
+      repository: publicRepository(event.repository) || known?.repository,
       ...(Array.isArray(event.codes) ? { codes: event.codes.filter(code => LABELS[code]) } : {}),
     });
   }
