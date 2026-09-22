@@ -1328,9 +1328,11 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
             has_blocking_findings |= bool(blocking)
             label = "合入阻塞" if blocking else f"风险：{risk}"
             if analysis := finding.get("qualification"):
-                text += " 分析：" + feedback_prose(analysis)
+                text += ("  \n  分析：" if blocking else " 分析：") + feedback_prose(analysis)
             evidence = feedback_evidence(finding, task, artifact_urls or {})
-            findings.append(f"【{label}】{text}" + (f" · {evidence}" if evidence else ""))
+            if evidence:
+                text += ("  \n  代码位置：" if blocking else " · ") + evidence
+            findings.append(f"【{label}】{text}")
     # Findings are the reviewed issue list; failed checks are evidence, not extra defects.
     if not has_blocking_findings:
         reasons = [feedback_prose(reason) for reason in result["blocking_reasons"]]

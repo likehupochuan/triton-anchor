@@ -1478,6 +1478,13 @@ class GatewayBehaviorTests(unittest.TestCase):
             self.assertNotIn(g.feedback_text(reason), findings)
         self.assertEqual(findings.count("【合入阻塞】"), 2)
         self.assertEqual(findings.count("架构契约遭到破坏"), 1)
+        self.assertEqual(sum(line.startswith("- ") for line in findings.splitlines()), 3)
+        for finding in result["findings"][:2]:
+            self.assertIn(
+                f"- 【合入阻塞】{finding['summary']}  \n  分析：{finding['qualification']}  \n  代码位置：",
+                findings,
+            )
+        self.assertIn("- 【风险：低】可以改进错误提示 · [src/file.py:23]", findings)
         self.assertIn("目录扫描遗漏独立安装的插件", findings)
         self.assertIn("异常路径丢失资源释放", findings)
         self.assertNotIn("工具拒绝仓内符号链接", findings)
@@ -1561,6 +1568,8 @@ class GatewayBehaviorTests(unittest.TestCase):
         result["limitations"] = ["性能基线不可比，不影响正确性审查"]
         rendered = g.result_comment(result)
         self.assertIn("【合入阻塞】独立回归失败", rendered)
+        self.assertNotIn("分析：", rendered)
+        self.assertNotIn("代码位置：", rendered)
         self.assertIn("### 限制说明\n\n- 性能基线不可比，不影响正确性审查", rendered)
         result["status"] = "pass"
         result["blocking_reasons"] = []
