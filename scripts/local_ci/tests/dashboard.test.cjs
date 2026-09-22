@@ -74,6 +74,8 @@ test('recovery facts separate phase, budget and progress; long silence only warn
   assert.deepEqual(model.issues.map(row=>row.code),['task_no_progress','task_stalled']);
   assert.equal(model.cards[3].text,'自动重连中 · 3 / 10');
   assert.ok(model.issues.every(row=>row.tone==='warn'));
+  current.recovery.failure_code='result_missing';
+  assert.equal(Object.fromEntries(taskFacts(current))['异常原因'],'最终执行报告缺失或不完整');
   current.recovery={state:'exhausted',failure_code:'recovery_exhausted',action:'publish_infra_error'};
   assert.ok(assessHealth(worker,[],{now:healthNow}).issues.some(row=>row.code==='task_recovery_exhausted'));
 });

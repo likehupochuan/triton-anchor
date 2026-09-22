@@ -9,7 +9,7 @@ function fixture() {
   const h = {
     now: Date.parse('2026-09-20T00:00:00Z'), stored: null, cached: null, puts: 0, cachePuts: 0, issues: [], writes: [],
     readFailure: false, alertsFailure: false, failCachePut: false,
-    failPatch: false, loseCreateResponse: false, healthReads: 0,
+    failPatch: false, loseCreateResponse: false, healthReads: 0, expectedHealthReads: 1,
     health: {
       schema: 'triton-anchor-worker-health', worker_id: ID, state: 'healthy',
       poller: { alive: true, heartbeat_stale: false, last_poll_status: 'success' },
@@ -46,7 +46,7 @@ function fixture() {
     if (parsed.pathname.endsWith('/contents/worker-health.json')) {
       h.healthReads++;
       assert.equal(parsed.searchParams.get('ref'), `snapshot/${ID}`);
-      assert.equal(options.headers.Authorization, undefined);
+      assert.equal(options.headers.Authorization, 'Bearer PRIVATE_TOKEN');
       if (h.healthResponse) return h.healthResponse();
       if (h.readFailure) throw new Error('PRIVATE network failure');
       return json({ encoding: 'base64', content: Buffer.from(JSON.stringify(h.health)).toString('base64') });
@@ -92,7 +92,7 @@ function fixture() {
       globalThis.fetch = original;
       assert.equal(h.puts, before + 1, 'one incident-state write per execution');
       assert.equal(h.cachePuts, beforeCache + 1, 'one combined cache write per execution');
-      assert.equal(h.healthReads, beforeReads + 1, 'monitor and cache share one health read');
+      assert.equal(h.healthReads, beforeReads + h.expectedHealthReads, 'monitor and cache share one health read');
     }
   };
   return h;
@@ -203,6 +203,7 @@ test('health read failures publish only bounded diagnostics, never raw errors or
   const cases = [
     ['network_error', null, () => { throw new Error('PRIVATE network details'); }],
     ['timeout', null, () => { throw new DOMException('PRIVATE timeout details', 'TimeoutError'); }],
+    ['authentication_error', 401, () => new Response('PRIVATE unauthorized', { status: 401 })],
     ['http_error', 403, () => new Response('PRIVATE forbidden', { status: 403 })],
     ['rate_limited', 403, () => new Response('PRIVATE: Rate Limit Exceeded', { status: 403 })],
     ['rate_limited', 429, () => new Response('PRIVATE limited', { status: 429 })],
@@ -224,6 +225,20 @@ test('health read failures publish only bounded diagnostics, never raw errors or
   }
   assert.equal(warning.mock.callCount(), cases.length);
   assert.ok(!JSON.stringify(warning.mock.calls).includes('PRIVATE'));
+});
+
+test('a missing Gitee secret is reported as a bounded configuration error', async t => {
+  const warning = t.mock.method(console, 'warn', () => {});
+  const h = fixture();
+  delete h.env.GITEE_TOKEN;
+  h.expectedHealthReads = 0;
+  await assert.rejects(h.run(), /GITEE_TOKEN is not configured/);
+  const read = JSON.parse(h.cached).health_read;
+  assert.equal(read.error_code, 'configuration_error');
+  assert.equal(read.http_status, null);
+  assert.equal(read.status, 'error');
+  assert.ok(!JSON.stringify(read).includes('GITEE_TOKEN'));
+  assert.ok(!JSON.stringify(warning.mock.calls).includes('GITEE_TOKEN'));
 });
 
 test('missing or idle Codex telemetry cannot clear a known connection fault', async () => {

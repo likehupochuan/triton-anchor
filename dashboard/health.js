@@ -229,7 +229,8 @@
     const read = monitor.read || {};
     if (read.status === 'error') {
       const labels = {timeout:'请求超时', network_error:'网络请求失败', http_error:'HTTP 请求失败',
-        rate_limited:'访问被限流', invalid_document:'健康数据格式无效', identity_mismatch:'快照身份或时间无效'};
+        rate_limited:'访问被限流', invalid_document:'健康数据格式无效', identity_mismatch:'快照身份或时间无效',
+        authentication_error:'读取凭据无效', configuration_error:'读取凭据未配置'};
       return {text: ['读取 Gitee 失败：' + (labels[read.error_code] || '错误详情未上报'),
         Number.isInteger(read.http_status) && 'HTTP ' + read.http_status,
         Number.isInteger(read.duration_ms) && '耗时 ' + read.duration_ms + ' ms',
@@ -251,7 +252,7 @@
     wait_dependency:'等待依赖', retry_sealing:'重新封存', retry_publish:'重传已封存结果', none:'无需恢复', no_retry:'不重试'};
   const failureNames = {connection:'Codex 连接中断', authentication:'Codex 认证失败', rate_limit:'Codex 限流',
     connection_error:'Codex 连接中断', auth_error:'Codex 认证失败', rate_limited:'Codex 限流',
-    cli_failed:'Codex 执行异常（未分类）', result_missing:'未生成有效执行报告', recovery_exhausted:'恢复预算耗尽', sealing_failed:'结果封存失败', disk_budget:'磁盘空间不足',
+    cli_failed:'Codex 执行异常（未分类）', result_missing:'最终执行报告缺失或不完整', recovery_exhausted:'恢复预算耗尽', sealing_failed:'结果封存失败', disk_budget:'磁盘空间不足',
     configuration_invalid:'任务配置无效', delivery_failed:'结果上传失败', container_oom:'任务容器内存不足（OOM）', timeout:'执行超时', session_invalid:'session 无效', container_failed:'任务容器异常', runtime_unavailable:'Docker 不可用',
     budget_exhausted:'恢复预算耗尽', publication_failed:'结果上传失败', interrupted:'执行中断', no_progress:'长时间无进展'};
   const describe = (value, labels) => value ? labels[value] || value : '未上报';

@@ -1,6 +1,6 @@
 # Cloudflare 外部告警与健康缓存
 
-一个定时 Worker、一份 KV、一个 Gitee Secret。即使 CI 服务器停止或无人打开 Dashboard，Cloudflare 仍会每五分钟读取 Gitee 的公开健康快照，并把异常写入健康仓库 Issues。同时保存一份健康展示缓存，供 Dashboard 在 Gitee 读取失败时使用。
+一个定时 Worker、一份 KV、一个 Gitee Secret。即使 CI 服务器停止或无人打开 Dashboard，Cloudflare 仍会每五分钟使用 Secret 读取 Gitee 的公开健康快照，并把异常写入健康仓库 Issues。同时保存一份健康展示缓存，供 Dashboard 在 Gitee 读取失败时使用。
 
 源码为 `worker.mjs`，不依赖 npm 包或服务器新增服务。监测对象集中在文件顶部的 `CONFIG`：
 
@@ -19,7 +19,7 @@ Cloudflare 读取服务器 health 采集发布的 `worker-health.json`，负责�
 
 1. 在 Cloudflare 的 **Workers & Pages** 创建 Worker，名称建议 `local-ci-alert`。把 `worker.mjs` 完整内容放入代码编辑器并部署。`GET /health` 提供缓存；其他路径返回 404，告警仍只通过定时入口工作。
 2. 在 Worker 的 **Bindings** 中绑定 KV，变量名必须为 **`ALERT_STATE`**。当前账户复用 `wrangler.jsonc` 中已创建的 namespace；仅在其他账户首次部署时新建。
-3. 在 Worker 的 **Settings → Variables and Secrets** 添加 **Secret**，名称为 **`GITEE_TOKEN`**。令牌需要能读取、创建、更新健康仓库的 Issues。由维护者直接在 Cloudflare 输入，不放入仓库、Dashboard、聊天或普通明文变量。
+3. 在 Worker 的 **Settings → Variables and Secrets** 添加 **Secret**，名称为 **`GITEE_TOKEN`**。令牌需要能读取健康仓库内容，以及读取、创建、更新该仓库的 Issues。由维护者直接在 Cloudflare 输入，不放入仓库、Dashboard、聊天或普通明文变量。健康快照请求通过 `Authorization` header 携带 Secret，不把令牌放入 URL、日志或公开缓存。
 4. 最后在 **Settings → Triggers → Cron Triggers** 添加 `*/5 * * * *`。只配置这一条定时器，也不要另部署第二个 Worker 同时维护这些 Issues。
 5. 查看 Worker 的执行记录，确认 scheduled 调用成功。定时配置传播可能需要最多 15 分钟。此项目无需接入 GitHub Actions。
 

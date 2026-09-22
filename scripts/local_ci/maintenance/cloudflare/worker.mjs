@@ -43,7 +43,8 @@ const LABELS = Object.freeze({
 const CODEX_ERRORS = new Set(['connection_error', 'auth_error', 'session_invalid', 'rate_limited', 'timeout', 'failed']);
 const CODEX_OK = new Set(['running', 'succeeded']);
 const READ_ERRORS = {timeout: '请求超时', network_error: '网络请求失败', http_error: 'HTTP 请求失败',
-  rate_limited: '访问被限流', invalid_document: '健康数据格式无效', identity_mismatch: '快照身份或时间无效'};
+  rate_limited: '访问被限流', invalid_document: '健康数据格式无效', identity_mismatch: '快照身份或时间无效',
+  authentication_error: '读取凭据无效', configuration_error: '读取凭据未配置'};
 
 const rows = value => Array.isArray(value) ? value : [];
 const identity = row => row?.task_id && row?.run_id ? `${row.task_id}:${row.run_id}` : '';
@@ -183,16 +184,21 @@ function faults(snapshot, previous, references, now) {
   return { codes: [...result].sort(), detected: [...detected], references: nextReferences, finishedFailed };
 }
 
-async function readDocument(fetcher, filename, branch, schema, read) {
+async function readDocument(fetcher, token, filename, branch, schema, read) {
+  if (!token) {
+    read.error_code = 'configuration_error';
+    throw new Error('GITEE_TOKEN is not configured');
+  }
   const ref = encodeURIComponent(branch);
   const response = await fetcher(`${API}/repos/${CONFIG.owner}/${CONFIG.repository}/contents/${filename}?ref=${ref}`, {
-    headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000),
+    headers: { Accept: 'application/json', Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000),
   });
   read.http_status = response.status;
   if (!response.ok) {
     read.error_code = 'http_error';
+    if (response.status === 401) read.error_code = 'authentication_error';
     // Only a specific rate-limit response proves that a 403 is throttling.
-    if (response.status === 429 || response.status === 403
+    else if (response.status === 429 || response.status === 403
         && /rate limit exceeded/i.test((await response.text()).slice(0, 4096))) read.error_code = 'rate_limited';
     throw new Error('Health data unavailable');
   }
@@ -206,8 +212,8 @@ async function readDocument(fetcher, filename, branch, schema, read) {
   return value;
 }
 
-async function snapshot(fetcher, now, read) {
-  const value = await readDocument(fetcher, 'worker-health.json', `snapshot/${CONFIG.worker}`, 'triton-anchor-worker-health', read);
+async function snapshot(fetcher, token, now, read) {
+  const value = await readDocument(fetcher, token, 'worker-health.json', `snapshot/${CONFIG.worker}`, 'triton-anchor-worker-health', read);
   read.error_code = 'identity_mismatch';
   if (value.worker_id !== CONFIG.worker
       || !Number.isFinite(Date.parse(value.collected_at))
@@ -427,7 +433,7 @@ async function runScheduled(env, now) {
     duration_ms: 0, checked_at: now.toISOString() };
   let current = null;
   try {
-    current = await snapshot(fetcher, now.getTime(), read);
+    current = await snapshot(fetcher, env.GITEE_TOKEN, now.getTime(), read);
     read.status = 'ok';
     read.error_code = null;
   } catch (error) {
