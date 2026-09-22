@@ -8,14 +8,14 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
   <a href="../../actions/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-GitHub_Actions-2088FF?logo=githubactions&logoColor=white" alt="CI"></a>
-  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10%2B-3776ab.svg" alt="Python 3.9+"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10%2B-3776ab.svg" alt="Python 3.10+"></a>
   <a href="ROADMAP.md"><img src="https://img.shields.io/badge/Status-v0.1-orange.svg" alt="Status"></a>
 </p>
 
 > **项目定位**：面向多款芯片的共性编译前端，在统一的 Triton 编译前端中同时支持 **RISC-V Matrix 扩展指令集**（**AME）**、**RISC-V Tensor 扩展指令集**和 **SIMT 扩展指令集（GPGPU）** 的插件化架构。
 
 > [!IMPORTANT]
-> **AnchorIR**（锚点中间表示）是 triton-anchor 定义的 **双轨统一输出契约**——所有 TTIR 到硬件感知 IR 的转换，无论走 Linalg 路径还是 TritonGPU 路径，其输出都被纳入 AnchorIR 契约管理。
+> **AnchorIR**（锚点中间表示）是 triton-anchor 定义的 **双轨统一输出契约**。核心 Wheel 只内置 TTIR 与 Linalg 路径；TritonGPU 路径由 OOT 后端插件提供，并可复用同一套契约验证。
 
 📋 **[路线图](ROADMAP.md)** · 📖 **[构建指南](docs/build.md)** · 🔌 **[后端接入指南](docs/custom_backend.md)** · 🔒 **[安全策略](SECURITY.md)** · 💬 **[报告问题](../../issues/new/choose)**
 
@@ -86,7 +86,7 @@ flowchart LR
 
 *   **输入**：`@triton.jit` Python 函数
     
-*   **输出**：硬件感知但非硬件特定的 IR（TritonGPU IR 或 Linalg+Extensions IR）
+*   **输出**：核心内置 Linalg+Extensions IR；OOT GPU 插件可输出 TritonGPU IR
     
 *   **职责**：DSL 解析、TTIR 生成/优化、指针分析、Tiling 决策、计算原语匹配
     
@@ -166,7 +166,7 @@ y = torch.softmax(x, dim=-1)  # 实际执行 FlagGems 的 Triton softmax kernel
 
 # 编译路径：
 # FlagGems softmax kernel (@triton.jit)
-#   → triton-anchor (TTIR → AnchorIR → Linalg/TritonGPU)
+#   → triton-anchor (TTIR → AnchorIR → Linalg)
 #     → 硬件后端 (Linalg → binary)
 ```
 
@@ -177,14 +177,14 @@ y = torch.softmax(x, dim=-1)  # 实际执行 FlagGems 的 Triton softmax kernel
 triton-anchor 将编译流程前端化，分离了与具体硬件无关的公共优化与转换逻辑，整体架构分为三个核心层级：
 
 ```
-Layer 1    — TTIR Pipeline        (7 mandatory passes)
+Layer 1    — TTIR Pipeline        (8 mandatory passes)
 Layer 2    — Linalg Adapters      (ILinalgOptAdapter / ILinalgPybindAdapter)
 Layer 2.5  — AnchorIR Spec        (dual-track whitelist + two-phase validation)
 ```
 
 ### 3.1 核心设计特性
 
-- **双轨 AnchorIR**：为不同的计算硬件提供两条标准路径——Linalg Track（面向 Tensor Processor 与 AME Matrix）与 TritonGPU Track（面向 gpGPU），每条路径拥有独立的 Op 白名单。
+- **双轨 AnchorIR**：Linalg Track 由核心 Wheel 提供；TritonGPU Track 仅保留契约，由 gpGPU OOT 插件实现。两条路径拥有独立的 Op 白名单。
 - **两阶段验证**：AnchorIR 的合法性会经历 `validate_pre_hook()` → Hook 注入 → `validate_post_hook()` 两阶段检查，确保底层硬件后端注入的扩展 Op 也严格受契约约束。
 - **ABI 隔离**：提供 `ILinalgOptAdapter`（基于子进程调用 `opt` 的模式）与 `ILinalgPybindAdapter`（基于 Pybind 绑定的模式），在类型层面隔离 C++ ABI，避免多后端带来的符号冲突。
 - **Paradigm / Track 解耦**：`ComputeParadigm`（计算范式）与 `AnchorIRTrack`（IR 轨道）独立声明，硬件后端可根据自身特性自由组合。
@@ -224,11 +224,11 @@ flowchart TD
 
 | 依赖 | 最低版本 | 说明 |
 |------|---------|------|
-| Python | 3.9+ | 推荐 3.10 |
+| Python | 3.10+ | 与 Triton 3.8 主线一致 |
 | CMake | 3.20+ | C++ 扩展构建 |
-| Ninja | 1.10+ | 构建系统 |
-| LLVM/MLIR | 见 `triton/cmake/llvm-hash.txt` | 完整构建必需 |
-| pybind11 | 2.10+ | Python ↔ C++ 绑定 |
+| Ninja | 1.11.1+ | 构建系统 |
+| LLVM/MLIR | 见 `triton/cmake/llvm-info.json` | 完整构建必需 |
+| nanobind | 2.10.2 | Python ↔ C++ 绑定 |
 
 ### 4.2 快速安装
 
@@ -247,7 +247,7 @@ pip install uv
 # 创建、激活虚拟环境
 uv venv /opt/venv
 source /opt/venv/bin/activate
-uv pip install setuptools wheel ninja pybind11
+uv pip install setuptools wheel 'cmake>=3.20,<4.0' 'ninja>=1.11.1' nanobind==2.10.2
 
 
 # 二、安装 triton-anchor
@@ -293,7 +293,7 @@ triton-anchor/
         ├── __init__.py          # 公共 API: HWCapability, ComputeParadigm, AnchorIRTrack
         ├── hw_capability.py     # HWCapability 硬件能力声明
         ├── anchor_ir.py         # AnchorIR 双轨规范白名单 + 两阶段验证器
-        ├── pipeline.py          # 统一 TTIR Pipeline (7 pass)
+        ├── pipeline.py          # 统一 TTIR Pipeline (8 pass)
         │
         ├── adapters/            # Layer 2: Linalg Adapters
         │   ├── base.py                      # ILinalgOptAdapter / ILinalgPybindAdapter 基类
@@ -312,18 +312,18 @@ triton-anchor/
 
 ## 6 编译流程
 
-triton-anchor 负责统一管线的前半部分（TTIR → Linalg / TritonGPU），后半部分（Linalg → 硬件二进制）由各硬件后端独立完成。
+triton-anchor 核心负责统一管线的前半部分（TTIR → Linalg）；TritonGPU 及所有硬件代码生成由各 OOT 后端独立完成。
 
 ```
 AST → TTIR
   │
-  ├── Layer 1: build_ttir_pipeline (7 pass)
-  │     ├── inliner → combine → canonicalizer → reorder_broadcast → cse → licm → symbol_dce
-  │     └── [GPU] _require_pass(add_rewrite_tensor_pointer)
+  ├── Layer 1: build_ttir_pipeline (8 pass)
+  │     └── inliner → rewrite_tensor_descriptor_to_pointer → combine → canonicalizer
+  │         → reorder_broadcast → cse → licm → symbol_dce
   │
   ├── Layer 2: Adapter.convert()
   │     ├── Linalg Track: TritonLinalgAdapter (pybind) / TritonSharedAdapter (subprocess)
-  │     └── TritonGPU Track: 直通后端
+  │     └── TritonGPU Track: 由 OOT 后端插件完整提供
   │
   ├── Layer 2.5: AnchorIR 验证
   │     ├── validate_pre_hook()  ← 基础白名单
@@ -348,7 +348,7 @@ AST → TTIR
 | `GPGPUCapability` | `triton_anchor.hw_capability` | GPGPU 能力描述（warp 大小、共享内存等） |
 | `AnchorIRTrack` | `triton_anchor.anchor_ir` | 枚举：`LINALG` / `TRITON_GPU` |
 | `AnchorIRValidator` | `triton_anchor.anchor_ir` | 两阶段 AnchorIR 合法性验证器 |
-| `build_ttir_pipeline()` | `triton_anchor.pipeline` | 构建 7-pass TTIR 优化管线 |
+| `build_ttir_pipeline()` | `triton_anchor.pipeline` | 构建 8-pass TTIR 规范化管线 |
 | `make_ttir()` | `triton_anchor.pipeline` | 便捷函数：构建管线 + 运行 |
 
 ### 7.2 使用示例
@@ -430,7 +430,7 @@ driver_cls = MyDeviceDriver      # 继承 triton.backends.driver.DriverBase
 |------|------|------|------|
 | **Tensor Processor** | `triton-sophgo-backend` | Linalg | 面向具备独立 Tensor Core/NPU 的专用加速器 |
 | **AME Matrix** | `ongoing` | Linalg | 面向带矩阵扩展指令集的 RISC-V 架构 |
-| **gpGPU** | `ongoing` | TritonGPU | 面向 SIMT 架构 GPU |
+| **gpGPU** | `ongoing` | TritonGPU（OOT 插件） | 面向 SIMT 架构 GPU |
 
 
 ## 9 测试
@@ -462,7 +462,7 @@ pytest tests/ -v
 | Job | 内容 | 矩阵 |
 |-----|------|------|
 | **lint** | `ruff check` + `ruff format --check` | Python 3.10 |
-| **unit-test** | 纯 Python 单元测试 + 覆盖率 | Python 3.9 / 3.10 / 3.11 / 3.12 |
+| **unit-test** | 纯 Python 单元测试 + 覆盖率 | Python 3.10 / 3.11 / 3.12 / 3.13 |
 
 ## 10 参与贡献
 
@@ -524,7 +524,7 @@ triton-anchor 在上游 Triton 的基础上扩展了编译前端，使其支持�
 <details>
 <summary><b>Q: 我的硬件后端使用 Linalg Track 还是 TritonGPU Track？</b></summary>
 
-- 如果你的硬件是 **SIMT 架构 GPU**（线程 / warp / shared memory），使用 **TritonGPU Track**
+- 如果你的硬件是 **SIMT 架构 GPU**（线程 / warp / shared memory），由独立后端包提供完整 **TritonGPU Track**
 - 如果你的硬件是 **Tensor Processor** 或 **RISC-V 矩阵扩展**，使用 **Linalg Track**
 - `ComputeParadigm` 和 `AnchorIRTrack` 是解耦的，你可以根据硬件特性自由组合
 </details>

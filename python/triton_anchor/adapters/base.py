@@ -15,7 +15,7 @@ Both adapters must produce output that conforms to the **AnchorIR** spec.
 ABI Isolation Strategy (v0.1.3):
   Two adapter base classes provide clean ABI separation:
   - ``ILinalgOptAdapter``:     subprocess-based, calls external MLIR opt tools
-  - ``ILinalgPybindAdapter``:  in-process, calls pybind11-bound MLIR passes
+  - ``ILinalgPybindAdapter``:  in-process, calls native-bound MLIR passes
 
   This prevents C++ ABI collisions between different MLIR builds — e.g.,
   triton-shared's opt tool uses its own libMLIR, while triton_race's passes
@@ -130,7 +130,7 @@ class ILinalgOptAdapter(ITritonToLinalgAdapter, ABC):
 
 
 class ILinalgPybindAdapter(ITritonToLinalgAdapter, ABC):
-    """Adapter variant using in-process pybind11-bound MLIR passes.
+    """Adapter variant using in-process native-bound MLIR passes.
 
     ABI Safety:  The passes must be compiled into the same libtriton.so
     as the host Triton runtime.  Cross-backend .so loading is NOT safe.

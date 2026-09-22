@@ -28,5 +28,6 @@ inline void registerTritonLinalgDialects(mlir::DialectRegistry &registry) {
 
 inline void registerTritonLinalgPasses() {
   ::mlir::triton::registerTritonLinalgConversionPasses();
-  ::mlir::triton::registerTritonTransformsExtendPasses();
+  ::mlir::triton::registerExtractLikeMoveBackwardPass();
+  ::mlir::triton::registerWrapFuncBodyWithSingleBlock();
 }

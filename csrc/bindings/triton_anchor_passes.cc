@@ -4,9 +4,9 @@
 #include "triton-linalg/Dialect/Triton/Transforms/Passes.h"
 #include "triton-linalg/Pipelines/Pipelines.h"
 #include "triton-linalg/RegisterTritonLinalgDialects.h"
-#include <pybind11/pybind11.h>
+#include <nanobind/nanobind.h>
 
-namespace py = pybind11;
+namespace py = nanobind;
 
 #define ADD_PASS_WRAPPER_0(name, builder)                                      \
   m.def(name, [](mlir::PassManager &pm) { pm.addPass(builder()); })
@@ -16,17 +16,14 @@ void init_triton_anchor_passes_triton_to_linalg(py::module_ &m) {
   ADD_PASS_WRAPPER_0("add_triton_to_linalg", createTritonToLinalgPass);
   ADD_PASS_WRAPPER_0("add_arith_to_linalg", createArithToLinalgPass);
   ADD_PASS_WRAPPER_0("add_math_to_linalg", createMathToLinalgPass);
-  ADD_PASS_WRAPPER_0("add_canonicalize_triton", createCanonicalizeTritonPass);
   ADD_PASS_WRAPPER_0("add_wrap_func_body_with_single_block",
                      createWrapFuncBodyWithSingleBlockPass);
-  ADD_PASS_WRAPPER_0("add_pointer_strength_reduction",
-                     createPointerStrengthReductionPass);
   m.def("add_extract_like_move_backward", [](mlir::PassManager &pm) {
     pm.addNestedPass<mlir::func::FuncOp>(createExtractLikeMoveBackwardPass());
   });
 }
 
-void init_triton_anchor(py::module &&m) {
+void init_triton_anchor(py::module_ &m) {
   m.def("load_dialects", [](mlir::MLIRContext &context) {
     mlir::DialectRegistry registry;
     registerTritonLinalgDialects(registry);

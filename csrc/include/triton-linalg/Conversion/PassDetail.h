@@ -67,8 +67,14 @@ class LinalgExtDialect;
 } // namespace linalg_ext
 
 // IWYU pragma: end_keep
-#define GEN_PASS_CLASSES
+#define GEN_PASS_DEF_ARITHTOLINALGPASS
+#define GEN_PASS_DEF_MATHTOLINALGPASS
 #include "triton-linalg/Conversion/Passes.h.inc"
+
+template <typename DerivedT>
+using ArithToLinalgPassBase = impl::ArithToLinalgPassBase<DerivedT>;
+template <typename DerivedT>
+using MathToLinalgPassBase = impl::MathToLinalgPassBase<DerivedT>;
 
 } // namespace triton
 } // namespace mlir

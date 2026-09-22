@@ -182,7 +182,8 @@ struct LinalgOpTilingInterface
   FailureOr<TilingResult>
   getTiledImplementation(Operation *op, OpBuilder &b,
                          ArrayRef<OpFoldResult> offsets,
-                         ArrayRef<OpFoldResult> sizes) const {
+                         ArrayRef<OpFoldResult> sizes,
+                         ArrayRef<InnerTileAlignment> = {}) const {
     // Leave the `sizeBounds` value empty. That is only needed when the `sizes`
     // specified could lead to out of bounds accesses.
     Location loc = op->getLoc();
@@ -234,7 +235,8 @@ struct LinalgOpTilingInterface
   FailureOr<TilingResult>
   generateResultTileValue(Operation *op, OpBuilder &b, unsigned resultNumber,
                           ArrayRef<OpFoldResult> offsets,
-                          ArrayRef<OpFoldResult> sizes) const {
+                          ArrayRef<OpFoldResult> sizes,
+                          ArrayRef<InnerTileAlignment> = {}) const {
     auto linalgOp = cast<linalg::LinalgOp>(op);
 
     // Check that the indexing map used for the output is a projected

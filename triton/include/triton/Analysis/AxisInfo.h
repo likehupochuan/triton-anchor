@@ -5,13 +5,11 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include "mlir/Support/LLVM.h"
+#include "triton/Analysis/CallGraph.h"
 #include "triton/Analysis/Utility.h"
-#include "triton/Dialect/Triton/IR/Dialect.h"
-#include "triton/Dialect/Triton/IR/Utility.h"
-#include "triton/Dialect/TritonGPU/IR/Dialect.h"
 
+#include <algorithm>
 #include <optional>
-#include <type_traits>
 
 namespace mlir::triton {
 
@@ -27,15 +25,19 @@ public:
 public:
   AxisInfo() : AxisInfo({}, {}, {}) {}
 
-  AxisInfo(DimVectorT contiguity, DimVectorT divisibility, DimVectorT constancy)
+  AxisInfo(ArrayRef<int64_t> contiguity, ArrayRef<int64_t> divisibility,
+           ArrayRef<int64_t> constancy)
       : AxisInfo(contiguity, divisibility, constancy, std::nullopt) {}
 
-  AxisInfo(DimVectorT contiguity, DimVectorT divisibility, DimVectorT constancy,
-           std::optional<int64_t> constantValue)
+  AxisInfo(ArrayRef<int64_t> contiguity, ArrayRef<int64_t> divisibility,
+           ArrayRef<int64_t> constancy, std::optional<int64_t> constantValue)
       : contiguity(contiguity), divisibility(divisibility),
         constancy(constancy), constantValue(constantValue) {
     assert(divisibility.size() == contiguity.size());
     assert(constancy.size() == contiguity.size());
+    int64_t globalDivisibility = getGlobalDivisibility();
+    for (int64_t &dimDivisibility : this->divisibility)
+      dimDivisibility = std::max(dimDivisibility, globalDivisibility);
   }
 
   // contiguity[d] is the length of the shortest sequence of contiguous integers
@@ -88,6 +90,16 @@ public:
   int64_t getDivisibility(size_t dim) const { return divisibility[dim]; }
   const DimVectorT &getDivisibility() const { return divisibility; }
 
+  // Unit contiguity makes every element a group base, so divisibility from
+  // such a dimension applies globally.
+  int64_t getGlobalDivisibility() const {
+    int64_t globalDivisibility = 1;
+    for (int dim = 0; dim < getRank(); ++dim)
+      if (getContiguity(dim) == 1)
+        globalDivisibility = std::max(globalDivisibility, getDivisibility(dim));
+    return globalDivisibility;
+  }
+
   // constancy[d] is the length of the shortest sequence of repeating integers
   // along dimension d.
   //
@@ -111,10 +123,13 @@ public:
 
   std::optional<int64_t> getConstantValue() const { return constantValue; }
 
-  template <class T>
-  static void
-  initPessimisticStateFromFunc(int argNumber, T funcOp, DimVectorT *contiguity,
-                               DimVectorT *divisibility, DimVectorT *constancy);
+  static void initPessimisticStateFromFunc(int argNumber,
+                                           FunctionOpInterface funcOp,
+                                           DimVectorT *contiguity,
+                                           DimVectorT *divisibility,
+                                           DimVectorT *constancy);
+
+  static void initDimVectorFromHint(Attribute attr, DimVectorT *vec);
 
   bool operator==(const AxisInfo &other) const {
     return contiguity == other.contiguity &&
@@ -152,6 +167,75 @@ private:
   std::optional<int64_t> constantValue;
 };
 
+class AxisInfoVisitor {
+public:
+  AxisInfoVisitor() = default;
+  virtual ~AxisInfoVisitor() = default;
+
+  bool isContiguousDim(const AxisInfo &info, ArrayRef<int64_t> shape, int dim) {
+    return info.getContiguity(dim) == shape[dim];
+  }
+
+  bool isConstantDim(const AxisInfo &info, ArrayRef<int64_t> shape, int dim) {
+    return info.getConstancy(dim) == shape[dim];
+  }
+
+  virtual AxisInfo
+  getAxisInfo(Operation *op,
+              ArrayRef<const dataflow::Lattice<AxisInfo> *> operands) = 0;
+
+  virtual bool match(Operation *op) = 0;
+};
+
+class AxisInfoVisitorList {
+public:
+  template <typename... Ts, typename = std::enable_if_t<sizeof...(Ts) != 0>>
+  void append() {
+    (visitors.emplace_back(std::make_unique<Ts>()), ...);
+  }
+
+  AxisInfo apply(Operation *op,
+                 ArrayRef<const dataflow::Lattice<AxisInfo> *> operands) {
+    for (auto &visitor : visitors)
+      if (visitor->match(op))
+        return visitor->getAxisInfo(op, operands);
+    return AxisInfo();
+  }
+
+private:
+  std::vector<std::unique_ptr<AxisInfoVisitor>> visitors;
+};
+
+class AxisInfoAnalysis : public dataflow::SparseForwardDataFlowAnalysis<
+                             dataflow::Lattice<AxisInfo>> {
+protected:
+  AxisInfoVisitorList visitors;
+
+  void setToEntryState(dataflow::Lattice<AxisInfo> *lattice) override;
+
+  void visitNonControlFlowArguments(
+      Operation *op, const RegionSuccessor & /*successor*/,
+      ValueRange /*nonSuccessorInputs*/,
+      ArrayRef<dataflow::Lattice<AxisInfo> *> argLattices) override;
+
+  void
+  visitForOpInductionVar(scf::ForOp op,
+                         ArrayRef<dataflow::Lattice<AxisInfo> *> argLattices);
+
+public:
+  AxisInfoAnalysis(DataFlowSolver &solver);
+  using dataflow::SparseForwardDataFlowAnalysis<
+      dataflow::Lattice<AxisInfo>>::getLatticeElement;
+
+  LogicalResult
+  visitOperation(Operation *op,
+                 ArrayRef<const dataflow::Lattice<AxisInfo> *> operands,
+                 ArrayRef<dataflow::Lattice<AxisInfo> *> results) override;
+
+  static AxisInfoAnalysis *loadDefaultAnalysis(DataFlowSolver *solver);
+  using LoadCallback = decltype(&AxisInfoAnalysis::loadDefaultAnalysis);
+};
+
 // Module level axis info analysis based on the call graph, assuming that we do
 // not have recursive functions.
 //
@@ -162,26 +246,29 @@ private:
 using AxisInfoMapT = DenseMap<Value, AxisInfo>;
 class ModuleAxisInfoAnalysis : public CallGraph<AxisInfoMapT> {
 public:
-  explicit ModuleAxisInfoAnalysis(ModuleOp moduleOp)
+  // AxisInfoAnalysis::LoadCallback loads the per-function analysis pass into
+  // the DataFlowSolver. This allows passes derived from AxisInfoAnalysis to
+  // re-use the module level analysis framework.
+  explicit ModuleAxisInfoAnalysis(ModuleOp moduleOp,
+                                  AxisInfoAnalysis::LoadCallback loadAnalysis =
+                                      AxisInfoAnalysis::loadDefaultAnalysis)
       : CallGraph<AxisInfoMapT>(moduleOp) {
     SmallVector<FunctionOpInterface> funcs;
-    for (auto root : getRoots()) {
-      walk<WalkOrder::PreOrder, WalkOrder::PostOrder>(
-          // Pre-order edge walk callback
-          [](CallOpInterface callOp, FunctionOpInterface funcOp) {},
-          // Post-order node walk callback
-          [&](FunctionOpInterface funcOp) {
-            funcs.push_back(funcOp);
-            funcMap.try_emplace(funcOp, AxisInfoMapT{});
-          });
-    }
+    walk<WalkOrder::PreOrder, WalkOrder::PostOrder>(
+        // Pre-order edge walk callback
+        [](CallOpInterface callOp, FunctionOpInterface funcOp) {},
+        // Post-order node walk callback
+        [&](FunctionOpInterface funcOp) {
+          funcs.push_back(funcOp);
+          funcMap.try_emplace(funcOp, AxisInfoMapT{});
+        });
     SetVector<FunctionOpInterface> sortedFuncs(funcs.begin(), funcs.end());
     SymbolTableCollection symbolTable;
     for (auto funcOp : llvm::reverse(sortedFuncs)) {
-      initialize(funcOp);
+      initialize(funcOp, loadAnalysis);
       funcOp.walk([&](CallOpInterface callOp) {
-        auto callee =
-            dyn_cast<FunctionOpInterface>(callOp.resolveCallable(&symbolTable));
+        auto callee = dyn_cast<FunctionOpInterface>(
+            callOp.resolveCallableInTable(&symbolTable));
         update(callOp, callee);
       });
     }
@@ -201,15 +288,28 @@ public:
     return &(it->second);
   }
 
-  unsigned getPtrContiguity(Value ptr);
-  unsigned getPtrAlignment(Value ptr);
+  unsigned getContiguity(Value value);
+  unsigned getAlignment(Value value);
+
+  // Overloads of the above methods but have separated elementBitWidth to
+  // calculate the contiguity. These are useful for computing axis info when
+  // lowering to hardware intrinsics that require a scalar/warp-uniform base ptr
+  // with separate per lane offsets like AMD buffer operations.
+  //
+  // As a concrete example, instead of a single tensor<128x64x!tt.ptr<f16>>
+  // value, now we have two separate values: !tt.ptr<f16> for the base pointer
+  // and tensor<128x64xi32> for the offset. For such cases, we want to compute
+  // the contiguity on the offsets but use the pointee element type bit width
+  // instead of the offset element type bit width for alignment
+  unsigned getContiguity(Value offsetsValue, unsigned elementBitWidth);
+  unsigned getAlignment(Value offsetsValue, unsigned elementBitWidth);
+
   unsigned getMaskAlignment(Value mask);
 
 private:
-  void initialize(FunctionOpInterface funcOp);
+  void initialize(FunctionOpInterface funcOp, AxisInfoAnalysis::LoadCallback);
   void update(CallOpInterface callOp, FunctionOpInterface funcOp);
 };
-
 } // namespace mlir::triton
 
 #endif

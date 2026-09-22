@@ -821,8 +821,8 @@ static void extractSliceFromCollapseShapeOp(tensor::CollapseShapeOp op,
   }
 
   auto srcTy = mlir::cast<RankedTensorType>(op.getResultType());
-  auto resultTy = tensor::ExtractSliceOp::inferResultType(
-      srcTy, state.offsets, state.sizes, state.strides);
+  auto resultTy =
+      tensor::ExtractSliceOp::inferResultType(srcTy, state.sizes);
   ExtractAnalysis::visitOperand(collapseSrc, operandState, op, loc, rewriter);
   rewriter.setInsertionPointAfterValue(operandState.extractedVal);
   state.extractedVal = rewriter.create<tensor::CollapseShapeOp>(
@@ -945,8 +945,8 @@ static void extractSliceFromExpandShapeOp(tensor::ExpandShapeOp op,
     return;
   }
   auto srcTy = mlir::cast<RankedTensorType>(op.getResultType());
-  auto resultTy = tensor::ExtractSliceOp::inferResultType(
-      srcTy, state.offsets, state.sizes, state.strides);
+  auto resultTy =
+      tensor::ExtractSliceOp::inferResultType(srcTy, state.sizes);
   ExtractAnalysis::visitOperand(expandSrc, operandState, op, loc, rewriter);
   rewriter.setInsertionPointAfterValue(operandState.extractedVal);
   state.extractedVal = rewriter.create<tensor::ExpandShapeOp>(
@@ -997,8 +997,7 @@ void ExtractAnalysis::visitOperandFromOp(Operation *op, ExtractState &state,
   Type newResTy =
       (state.type == ExtractType::EXTRACT)
           ? resultTy.getElementType()
-          : tensor::ExtractSliceOp::inferResultType(resultTy, state.offsets,
-                                                    state.sizes, state.strides);
+          : tensor::ExtractSliceOp::inferResultType(resultTy, state.sizes);
 
   auto opName = op->getName().getIdentifier();
   state.extractedVal = rewriter
@@ -1576,14 +1575,14 @@ struct ExtractLikeMoveBackwardPass
                       SCFRearrangementPattern<tensor::ExtractSliceOp>>(context);
 
       bool extractChanged = false;
-      if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                              std::move(extractPatterns),
-                                              config, &extractChanged)))
+      if (failed(applyPatternsGreedily(getOperation(),
+                                       std::move(extractPatterns), config,
+                                       &extractChanged)))
         return signalPassFailure();
 
       bool scfChanged = false;
-      if (failed(applyPatternsAndFoldGreedily(
-              getOperation(), std::move(scfPatterns), config, &scfChanged)))
+      if (failed(applyPatternsGreedily(getOperation(), std::move(scfPatterns),
+                                       config, &scfChanged)))
         return signalPassFailure();
 
       changed = extractChanged && scfChanged;

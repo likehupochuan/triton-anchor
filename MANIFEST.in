@@ -1,5 +1,41 @@
-recursive-include triton *.h *.cpp *.cc *.td *.txt *.cmake
-recursive-include csrc *.h *.cpp *.cc *.td *.txt
+include CMakeLists.txt
+recursive-include triton *.h *.hpp *.cpp *.cc *.td *.txt *.cmake *.json *.py *.pyi
+recursive-include csrc *.h *.cpp *.cc *.td *.inc *.yaml *.txt
+prune triton/third_party/f2reduce
+exclude triton/cmake/nvidia-toolchain-version.json
+exclude triton/include/CMakeLists.txt
+exclude triton/include/triton/CMakeLists.txt
+exclude triton/include/triton/Dialect/CMakeLists.txt
+exclude triton/include/triton/Tools/GenericSwizzling.h
+exclude triton/include/triton/Tools/LayoutUtils.h
+exclude triton/include/triton/Tools/LinearLayout.h
+exclude triton/lib/Tools/CMakeLists.txt
+exclude triton/lib/CMakeLists.txt
+exclude triton/lib/Dialect/CMakeLists.txt
+exclude triton/lib/Tools/GenericSwizzling.cpp
+exclude triton/lib/Tools/LayoutUtils.cpp
+exclude triton/lib/Tools/LinearLayout.cpp
+exclude triton/python/src/gluon_ir.cc
+exclude triton/python/src/linear_layout.cc
+prune triton/include/triton/Analysis
+prune triton/include/triton/Conversion
+prune triton/include/triton/Dialect/Gluon
+prune triton/include/triton/Dialect/TritonGPU
+prune triton/include/triton/Dialect/TritonInstrument
+prune triton/include/triton/Dialect/TritonNvidiaGPU
+prune triton/include/triton/Target
+prune triton/lib/Analysis
+prune triton/lib/Conversion
+prune triton/lib/Dialect/Gluon
+prune triton/lib/Dialect/TritonGPU
+prune triton/lib/Dialect/TritonInstrument
+prune triton/lib/Dialect/TritonNvidiaGPU
+prune triton/lib/Target
+prune triton/python/triton/experimental/gluon
+prune triton/python/triton/experimental/gsan
+prune triton/python/triton/tools/triton_to_gluon_translator
+exclude triton/python/triton/_filecheck.py
+exclude triton/python/triton/tools/gsan.py
+exclude triton/python/triton/tools/ragged_tma.py
+exclude triton/python/triton/_C/libtriton/linear_layout.pyi
 include triton/TRITON_VERSION
-include triton/tools/compile.h
-include triton/tools/compile.c

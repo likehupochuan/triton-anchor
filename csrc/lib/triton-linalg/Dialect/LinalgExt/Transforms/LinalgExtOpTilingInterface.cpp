@@ -265,11 +265,19 @@ tileByWindowSlice(OpBuilder &b, Location loc, Value data, Value window,
 }
 
 namespace {
+template <typename ConcreteModel, typename OpTy>
+struct TilingExternalModelCompat
+    : public TilingInterface::ExternalModel<ConcreteModel, OpTy> {
+  using Base = TilingInterface::ExternalModel<ConcreteModel, OpTy>;
+  using Base::generateResultTileValue;
+  using Base::getTiledImplementation;
+};
+
 template <typename OpTy> struct LinalgExtOpTilingInterface {};
 
 template <>
 struct LinalgExtOpTilingInterface<triton::linalg_ext::ScatterOp>
-    : public TilingInterface::ExternalModel<
+    : public TilingExternalModelCompat<
           LinalgExtOpTilingInterface<triton::linalg_ext::ScatterOp>,
           triton::linalg_ext::ScatterOp> {
   /// Return the destination operands.
@@ -317,7 +325,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::ScatterOp>
   FailureOr<TilingResult>
   getTiledImplementation(Operation *op, OpBuilder &b,
                          ArrayRef<OpFoldResult> offsets,
-                         ArrayRef<OpFoldResult> sizes) const {
+                         ArrayRef<OpFoldResult> sizes,
+                         ArrayRef<InnerTileAlignment> = {}) const {
     // Leave the `sizeBounds` value empty. That is only needed when the `sizes`
     // specified could lead to out of bounds accesses.
     triton::linalg_ext::ScatterOp concreteOp =
@@ -392,7 +401,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::ScatterOp>
   FailureOr<TilingResult>
   generateResultTileValue(Operation *op, OpBuilder &b, unsigned resultNumber,
                           ArrayRef<OpFoldResult> offsets,
-                          ArrayRef<OpFoldResult> sizes) const {
+                          ArrayRef<OpFoldResult> sizes,
+                          ArrayRef<InnerTileAlignment> = {}) const {
     // Now, we still haven't implemented tiling init, so this function can't
     // work.
     return {};
@@ -458,7 +468,7 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::ScatterOp>
 
 template <>
 struct LinalgExtOpTilingInterface<triton::linalg_ext::GatherOp>
-    : public TilingInterface::ExternalModel<
+    : public TilingExternalModelCompat<
           LinalgExtOpTilingInterface<triton::linalg_ext::GatherOp>,
           triton::linalg_ext::GatherOp> {
   SmallVector<Value> getDestinationOperands(Operation *op, OpBuilder &b) const {
@@ -491,7 +501,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::GatherOp>
   FailureOr<TilingResult>
   getTiledImplementation(Operation *op, OpBuilder &b,
                          ArrayRef<OpFoldResult> offsets,
-                         ArrayRef<OpFoldResult> sizes) const {
+                         ArrayRef<OpFoldResult> sizes,
+                         ArrayRef<InnerTileAlignment> = {}) const {
     triton::linalg_ext::GatherOp concreteOp =
         cast<triton::linalg_ext::GatherOp>(op);
     SmallVector<int64_t> dimensionMap =
@@ -558,7 +569,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::GatherOp>
   FailureOr<TilingResult>
   generateResultTileValue(Operation *op, OpBuilder &b, unsigned resultNumber,
                           ArrayRef<OpFoldResult> offsets,
-                          ArrayRef<OpFoldResult> sizes) const {
+                          ArrayRef<OpFoldResult> sizes,
+                          ArrayRef<InnerTileAlignment> = {}) const {
     return getTiledImplementation(op, b, offsets, sizes);
   }
 
@@ -622,7 +634,7 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::GatherOp>
 
 template <>
 struct LinalgExtOpTilingInterface<triton::linalg_ext::AtomicCASOp>
-    : public TilingInterface::ExternalModel<
+    : public TilingExternalModelCompat<
           LinalgExtOpTilingInterface<triton::linalg_ext::AtomicCASOp>,
           triton::linalg_ext::AtomicCASOp> {
   SmallVector<Value> getDestinationOperands(Operation *op, OpBuilder &b) const {
@@ -656,7 +668,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::AtomicCASOp>
   FailureOr<TilingResult>
   getTiledImplementation(Operation *op, OpBuilder &b,
                          ArrayRef<OpFoldResult> offsets,
-                         ArrayRef<OpFoldResult> sizes) const {
+                         ArrayRef<OpFoldResult> sizes,
+                         ArrayRef<InnerTileAlignment> = {}) const {
     triton::linalg_ext::AtomicCASOp atomicCASOp =
         cast<triton::linalg_ext::AtomicCASOp>(op);
     Location loc = atomicCASOp.getLoc();
@@ -694,7 +707,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::AtomicCASOp>
   FailureOr<TilingResult>
   generateResultTileValue(Operation *op, OpBuilder &b, unsigned resultNumber,
                           ArrayRef<OpFoldResult> offsets,
-                          ArrayRef<OpFoldResult> sizes) const {
+                          ArrayRef<OpFoldResult> sizes,
+                          ArrayRef<InnerTileAlignment> = {}) const {
     auto tilingInterfaceOp = cast<TilingInterface>(op);
     FailureOr<TilingResult> tilingResult =
         tilingInterfaceOp.getTiledImplementation(b, offsets, sizes);
@@ -744,7 +758,7 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::AtomicCASOp>
 
 template <>
 struct LinalgExtOpTilingInterface<triton::linalg_ext::GatherAtomicCASOp>
-    : public TilingInterface::ExternalModel<
+    : public TilingExternalModelCompat<
           LinalgExtOpTilingInterface<triton::linalg_ext::GatherAtomicCASOp>,
           triton::linalg_ext::GatherAtomicCASOp> {
   SmallVector<Value> getDestinationOperands(Operation *op, OpBuilder &b) const {
@@ -778,7 +792,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::GatherAtomicCASOp>
   FailureOr<TilingResult>
   getTiledImplementation(Operation *op, OpBuilder &b,
                          ArrayRef<OpFoldResult> offsets,
-                         ArrayRef<OpFoldResult> sizes) const {
+                         ArrayRef<OpFoldResult> sizes,
+                         ArrayRef<InnerTileAlignment> = {}) const {
     triton::linalg_ext::GatherAtomicCASOp gatherAtomicCASOp =
         cast<triton::linalg_ext::GatherAtomicCASOp>(op);
     Location loc = gatherAtomicCASOp.getLoc();
@@ -820,7 +835,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::GatherAtomicCASOp>
   FailureOr<TilingResult>
   generateResultTileValue(Operation *op, OpBuilder &b, unsigned resultNumber,
                           ArrayRef<OpFoldResult> offsets,
-                          ArrayRef<OpFoldResult> sizes) const {
+                          ArrayRef<OpFoldResult> sizes,
+                          ArrayRef<InnerTileAlignment> = {}) const {
     auto tilingInterfaceOp = cast<TilingInterface>(op);
     FailureOr<TilingResult> tilingResult =
         tilingInterfaceOp.getTiledImplementation(b, offsets, sizes);
@@ -879,7 +895,7 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::GatherAtomicCASOp>
 // Contiguous atomicRMW
 template <>
 struct LinalgExtOpTilingInterface<triton::linalg_ext::AtomicRMWOp>
-    : public TilingInterface::ExternalModel<
+    : public TilingExternalModelCompat<
           LinalgExtOpTilingInterface<triton::linalg_ext::AtomicRMWOp>,
           triton::linalg_ext::AtomicRMWOp> {
   /// Return the destination operands.
@@ -916,7 +932,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::AtomicRMWOp>
   FailureOr<TilingResult>
   getTiledImplementation(Operation *op, OpBuilder &b,
                          ArrayRef<OpFoldResult> offsets,
-                         ArrayRef<OpFoldResult> sizes) const {
+                         ArrayRef<OpFoldResult> sizes,
+                         ArrayRef<InnerTileAlignment> = {}) const {
     triton::linalg_ext::AtomicRMWOp atomicRMWOp =
         cast<triton::linalg_ext::AtomicRMWOp>(op);
     auto loc = op->getLoc();
@@ -981,7 +998,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::AtomicRMWOp>
   FailureOr<TilingResult>
   generateResultTileValue(Operation *op, OpBuilder &b, unsigned resultNumber,
                           ArrayRef<OpFoldResult> offsets,
-                          ArrayRef<OpFoldResult> sizes) const {
+                          ArrayRef<OpFoldResult> sizes,
+                          ArrayRef<InnerTileAlignment> = {}) const {
     assert((resultNumber == 1) && "only support tile dst now.");
     auto tilingInterfaceOp = cast<TilingInterface>(op);
     FailureOr<TilingResult> tilingResult =
@@ -1029,7 +1047,7 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::AtomicRMWOp>
 // Discrete atomicRMW.
 template <>
 struct LinalgExtOpTilingInterface<triton::linalg_ext::GatherAtomicRMWOp>
-    : public TilingInterface::ExternalModel<
+    : public TilingExternalModelCompat<
           LinalgExtOpTilingInterface<triton::linalg_ext::GatherAtomicRMWOp>,
           triton::linalg_ext::GatherAtomicRMWOp> {
   /// Return the destination operands.
@@ -1066,7 +1084,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::GatherAtomicRMWOp>
   FailureOr<TilingResult>
   getTiledImplementation(Operation *op, OpBuilder &b,
                          ArrayRef<OpFoldResult> offsets,
-                         ArrayRef<OpFoldResult> sizes) const {
+                         ArrayRef<OpFoldResult> sizes,
+                         ArrayRef<InnerTileAlignment> = {}) const {
     triton::linalg_ext::GatherAtomicRMWOp atomicRMWOp =
         cast<triton::linalg_ext::GatherAtomicRMWOp>(op);
     auto loc = op->getLoc();
@@ -1184,7 +1203,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::GatherAtomicRMWOp>
   FailureOr<TilingResult>
   generateResultTileValue(Operation *op, OpBuilder &b, unsigned resultNumber,
                           ArrayRef<OpFoldResult> offsets,
-                          ArrayRef<OpFoldResult> sizes) const {
+                          ArrayRef<OpFoldResult> sizes,
+                          ArrayRef<InnerTileAlignment> = {}) const {
     if (resultNumber != 1) {
       return op->emitOpError("only support tile window now.");
     }
@@ -1250,7 +1270,7 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::GatherAtomicRMWOp>
 
 template <>
 struct LinalgExtOpTilingInterface<triton::linalg_ext::PadOp>
-    : public TilingInterface::ExternalModel<
+    : public TilingExternalModelCompat<
           LinalgExtOpTilingInterface<triton::linalg_ext::PadOp>,
           triton::linalg_ext::PadOp> {
   SmallVector<Value> getDestinationOperands(Operation *op, OpBuilder &b) const {
@@ -1370,7 +1390,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::PadOp>
   FailureOr<TilingResult>
   getTiledImplementation(Operation *op, OpBuilder &b,
                          ArrayRef<OpFoldResult> offsets,
-                         ArrayRef<OpFoldResult> sizes) const {
+                         ArrayRef<OpFoldResult> sizes,
+                         ArrayRef<InnerTileAlignment> = {}) const {
     Location loc = op->getLoc();
     triton::linalg_ext::PadOp concreteOp = cast<triton::linalg_ext::PadOp>(op);
     auto oneAttr = b.getI64IntegerAttr(1);
@@ -1565,7 +1586,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::PadOp>
   FailureOr<TilingResult>
   generateResultTileValue(Operation *op, OpBuilder &b, unsigned resultNumber,
                           ArrayRef<OpFoldResult> offsets,
-                          ArrayRef<OpFoldResult> sizes) const {
+                          ArrayRef<OpFoldResult> sizes,
+                          ArrayRef<InnerTileAlignment> = {}) const {
     auto tilingInterfaceOp = cast<TilingInterface>(op);
     return tilingInterfaceOp.getTiledImplementation(b, offsets, sizes);
   }
@@ -1615,7 +1637,7 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::PadOp>
 
 template <>
 struct LinalgExtOpTilingInterface<triton::linalg_ext::AssertOp>
-    : public TilingInterface::ExternalModel<
+    : public TilingExternalModelCompat<
           LinalgExtOpTilingInterface<triton::linalg_ext::AssertOp>,
           triton::linalg_ext::AssertOp> {
   SmallVector<Value> getDestinationOperands(Operation *op, OpBuilder &b) const {
@@ -1648,7 +1670,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::AssertOp>
   FailureOr<TilingResult>
   getTiledImplementation(Operation *op, OpBuilder &b,
                          ArrayRef<OpFoldResult> offsets,
-                         ArrayRef<OpFoldResult> sizes) const {
+                         ArrayRef<OpFoldResult> sizes,
+                         ArrayRef<InnerTileAlignment> = {}) const {
     triton::linalg_ext::AssertOp assertOp =
         cast<triton::linalg_ext::AssertOp>(op);
     Location loc = assertOp.getLoc();
@@ -1680,7 +1703,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::AssertOp>
   FailureOr<TilingResult>
   generateResultTileValue(Operation *op, OpBuilder &b, unsigned resultNumber,
                           ArrayRef<OpFoldResult> offsets,
-                          ArrayRef<OpFoldResult> sizes) const {
+                          ArrayRef<OpFoldResult> sizes,
+                          ArrayRef<InnerTileAlignment> = {}) const {
     auto tilingInterfaceOp = cast<TilingInterface>(op);
     return tilingInterfaceOp.getTiledImplementation(b, offsets, sizes);
   }
@@ -1694,7 +1718,7 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::AssertOp>
 
 template <>
 struct LinalgExtOpTilingInterface<triton::linalg_ext::LibdeviceCallOp>
-    : public TilingInterface::ExternalModel<
+    : public TilingExternalModelCompat<
           LinalgExtOpTilingInterface<triton::linalg_ext::LibdeviceCallOp>,
           triton::linalg_ext::LibdeviceCallOp> {
   SmallVector<Value> getDestinationOperands(Operation *op, OpBuilder &b) const {
@@ -1728,7 +1752,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::LibdeviceCallOp>
   FailureOr<TilingResult>
   getTiledImplementation(Operation *op, OpBuilder &b,
                          ArrayRef<OpFoldResult> offsets,
-                         ArrayRef<OpFoldResult> sizes) const {
+                         ArrayRef<OpFoldResult> sizes,
+                         ArrayRef<InnerTileAlignment> = {}) const {
     triton::linalg_ext::LibdeviceCallOp libdeviceCallOp =
         cast<triton::linalg_ext::LibdeviceCallOp>(op);
     Location loc = libdeviceCallOp.getLoc();
@@ -1769,7 +1794,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::LibdeviceCallOp>
   FailureOr<TilingResult>
   generateResultTileValue(Operation *op, OpBuilder &b, unsigned resultNumber,
                           ArrayRef<OpFoldResult> offsets,
-                          ArrayRef<OpFoldResult> sizes) const {
+                          ArrayRef<OpFoldResult> sizes,
+                          ArrayRef<InnerTileAlignment> = {}) const {
     auto tilingInterfaceOp = cast<TilingInterface>(op);
     return tilingInterfaceOp.getTiledImplementation(b, offsets, sizes);
   }
@@ -1784,7 +1810,7 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::LibdeviceCallOp>
 
 template <>
 struct LinalgExtOpTilingInterface<triton::linalg_ext::ScanOp>
-    : public TilingInterface::ExternalModel<
+    : public TilingExternalModelCompat<
           LinalgExtOpTilingInterface<triton::linalg_ext::ScanOp>,
           triton::linalg_ext::ScanOp> {
 
@@ -1825,7 +1851,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::ScanOp>
   FailureOr<TilingResult>
   getTiledImplementation(Operation *op, OpBuilder &builder,
                          ArrayRef<OpFoldResult> offsets,
-                         ArrayRef<OpFoldResult> sizes) const {
+                         ArrayRef<OpFoldResult> sizes,
+                         ArrayRef<InnerTileAlignment> = {}) const {
     triton::linalg_ext::ScanOp concreteOp =
         cast<triton::linalg_ext::ScanOp>(op);
     int64_t rank = concreteOp.getOperandRank();
@@ -1896,7 +1923,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::ScanOp>
   FailureOr<TilingResult>
   generateResultTileValue(Operation *op, OpBuilder &builder,
                           unsigned resultNumber, ArrayRef<OpFoldResult> offsets,
-                          ArrayRef<OpFoldResult> sizes) const {
+                          ArrayRef<OpFoldResult> sizes,
+                          ArrayRef<InnerTileAlignment> = {}) const {
     triton::linalg_ext::ScanOp scanOp = cast<triton::linalg_ext::ScanOp>(op);
     SmallVector<OpFoldResult> domainOffsets, domainSizes;
     domainOffsets.assign(offsets.begin(), offsets.end());
@@ -2019,7 +2047,7 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::ScanOp>
 
 template <>
 struct LinalgExtOpTilingInterface<triton::linalg_ext::HistogramOp>
-    : public TilingInterface::ExternalModel<
+    : public TilingExternalModelCompat<
           LinalgExtOpTilingInterface<triton::linalg_ext::HistogramOp>,
           triton::linalg_ext::HistogramOp> {
 
@@ -2031,7 +2059,7 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::HistogramOp>
 
 template <>
 struct LinalgExtOpTilingInterface<triton::linalg_ext::FlipOp>
-    : public TilingInterface::ExternalModel<
+    : public TilingExternalModelCompat<
           LinalgExtOpTilingInterface<triton::linalg_ext::FlipOp>,
           triton::linalg_ext::FlipOp> {
 
@@ -2043,7 +2071,7 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::FlipOp>
 
 template <>
 struct LinalgExtOpTilingInterface<triton::linalg_ext::TriOp>
-    : public TilingInterface::ExternalModel<
+    : public TilingExternalModelCompat<
           LinalgExtOpTilingInterface<triton::linalg_ext::TriOp>,
           triton::linalg_ext::TriOp> {
 
@@ -2075,7 +2103,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::TriOp>
   FailureOr<TilingResult>
   getTiledImplementation(Operation *op, OpBuilder &b,
                          ArrayRef<OpFoldResult> offsets,
-                         ArrayRef<OpFoldResult> sizes) const {
+                         ArrayRef<OpFoldResult> sizes,
+                         ArrayRef<InnerTileAlignment> = {}) const {
     triton::linalg_ext::TriOp triOp = cast<triton::linalg_ext::TriOp>(op);
     Location loc = triOp.getLoc();
     int64_t rank = triOp.getInitType().getRank();
@@ -2109,7 +2138,8 @@ struct LinalgExtOpTilingInterface<triton::linalg_ext::TriOp>
   FailureOr<TilingResult>
   generateResultTileValue(Operation *op, OpBuilder &b, unsigned resultNumber,
                           ArrayRef<OpFoldResult> offsets,
-                          ArrayRef<OpFoldResult> sizes) const {
+                          ArrayRef<OpFoldResult> sizes,
+                          ArrayRef<InnerTileAlignment> = {}) const {
     auto tilingInterfaceOp = cast<TilingInterface>(op);
     return tilingInterfaceOp.getTiledImplementation(b, offsets, sizes);
   }

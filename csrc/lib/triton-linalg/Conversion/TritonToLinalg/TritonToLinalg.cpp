@@ -21,7 +21,6 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Math/IR/Math.h"
@@ -477,7 +476,7 @@ struct TritonAddPtrPattern : public OpConversionPattern<triton::AddPtrOp> {
       // by the byte width of the data pointed to by the pointer.
       offset = rewriter.create<arith::MulIOp>(
           loc, offset,
-          rewriter.create<arith::ConstantIntOp>(loc, bytesPerElement, type));
+          rewriter.create<arith::ConstantIntOp>(loc, type, bytesPerElement));
       return rewriter.create<arith::AddIOp>(loc, ptr, offset);
     };
 
@@ -534,9 +533,9 @@ struct TritonMakeRangePattern
                                                    resultTy.getElementType());
 
     auto start = rewriter.create<arith::ConstantIntOp>(
-        loc, op.getStart(), op.getStartAttr().getType());
-    auto end = rewriter.create<arith::ConstantIntOp>(loc, op.getEnd(),
-                                                     op.getEndAttr().getType());
+        loc, op.getStartAttr().getType(), op.getStart());
+    auto end = rewriter.create<arith::ConstantIntOp>(
+        loc, op.getEndAttr().getType(), op.getEnd());
 
     rewriter.replaceOpWithNewOp<triton::linalg_ext::MakeRangeOp>(
         op, op.getType(), ValueRange{start, end}, ValueRange{initOp});
@@ -996,17 +995,6 @@ public:
   }
 };
 
-struct GPUBarrierOpPattern : public OpConversionPattern<gpu::BarrierOp> {
-  using OpConversionPattern<gpu::BarrierOp>::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(gpu::BarrierOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    rewriter.eraseOp(op);
-    return success();
-  }
-};
-
 struct TritonTransPattern : public OpConversionPattern<triton::TransOp> {
   using OpConversionPattern<triton::TransOp>::OpConversionPattern;
 
@@ -1197,8 +1185,8 @@ public:
     auto rank = srcType.getRank();
     SmallVector<OpFoldResult> offsets = llvm::to_vector(tracker.getStarts());
     SmallVector<OpFoldResult> strides(rank, rewriter.getIndexAttr(1));
-    auto dstType = tensor::ExtractSliceOp::inferResultType(
-        srcType, offsets, tracker.getSizes(), strides);
+    auto dstType =
+        tensor::ExtractSliceOp::inferResultType(srcType, tracker.getSizes());
     auto srcSlice = rewriter.create<tensor::ExtractSliceOp>(
         loc, dstType, trueValue, offsets, tracker.getSizes(), strides);
     // Replace with pad or insert_slice op.
@@ -1298,9 +1286,7 @@ public:
     auto condVal = op.getCondition();
     auto valType = condVal.getType();
 
-    auto assertMessage =
-        llvm::formatv("{0}:{1}: {2} Assertion `{3}` failed", op.getFile(),
-                      op.getLine(), op.getFunc(), op.getMessage());
+    auto assertMessage = llvm::formatv("Assertion `{0}` failed", op.getMessage());
     auto rankType = cast<RankedTensorType>(valType);
 
     // Only supports int type.
@@ -1470,52 +1456,6 @@ struct TritonScanReturnPattern
 /// %2 = tensor.insert_slice %arg1 into %inserted_slice[%c32_0] [32] [1] :
 ///  tensor<32xf32> into tensor<64xf32>
 /// ```
-struct TritonCatPattern : public OpConversionPattern<triton::CatOp> {
-  using OpConversionPattern<triton::CatOp>::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(triton::CatOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto type = typeConverter->convertType(op.getResult().getType());
-    if (!type)
-      return failure();
-
-    auto resultTy = cast<RankedTensorType>(type);
-
-    Location loc = op.getLoc();
-    Value init = rewriter.create<tensor::EmptyOp>(loc, resultTy.getShape(),
-                                                  resultTy.getElementType());
-
-    auto rank = resultTy.getRank();
-    // Insert slice params.
-    auto zero = rewriter.getIndexAttr(0);
-    auto one = rewriter.getIndexAttr(1);
-    SmallVector<OpFoldResult> offsets(rank, zero);
-    SmallVector<OpFoldResult> strides(rank, one);
-    SmallVector<OpFoldResult> sizes;
-
-    Value lhs = op.getOperand(0);
-    Value rhs = op.getOperand(1);
-    // Consider 0-rank tensor as tensor with one element.
-    if (cast<RankedTensorType>(lhs.getType()).getRank() == 0) {
-      sizes = {one};
-    } else {
-      sizes = getDims(rewriter, loc, lhs);
-    }
-
-    auto firstInsert = rewriter.createOrFold<tensor::InsertSliceOp>(
-        loc, lhs, init, offsets, sizes, strides);
-    // The tt.cat op always concatenate two tensors along the highest dimension.
-    offsets[0] = rewriter.createOrFold<arith::AddIOp>(
-        loc, materializeOpFoldResult(rewriter, loc, offsets[0]),
-        materializeOpFoldResult(rewriter, loc, sizes[0]));
-    auto secondInsert = rewriter.createOrFold<tensor::InsertSliceOp>(
-        loc, rhs, firstInsert, offsets, sizes, strides);
-    rewriter.replaceOp(op, secondInsert);
-    return success();
-  }
-};
-
 /// Convert an `tt.join` operation to `tensor.insert_slice`
 /// operation.
 ///
@@ -1721,7 +1661,7 @@ populateTritonToLinalgPatterns(RewritePatternSet &patterns,
       TritonIntToPtrPattern, TritonTransPattern, TritonReturnOpConversion,
       TritonCallOpPattern, TritonViewPattern, TritonPrintPattern,
       TritonAssertOpPattern, TritonScanPattern, TritonScanReturnPattern,
-      TritonCatPattern, TritonJoinPattern, TritonMulhiuiPattern,
+      TritonJoinPattern, TritonMulhiuiPattern,
       TritonSplitPattern, TritonClampFOpPattern, TritonPreciseSqrtOpPattern,
       TritonPreciseDivFOpPattern, TritonHistogramPattern>(converter, context);
 }
@@ -1769,13 +1709,10 @@ void triton::TritonToLinalgPass::runOnOperation() {
   // Step2: convert other ttir to linalgir
   ConversionTarget target(*context);
   target.addLegalDialect<BuiltinDialect, func::FuncDialect>();
-  target.addIllegalDialect<triton::TritonDialect, gpu::GPUDialect>();
-  // Mark MakeTensorOp and AdvanceOp as legal op, it will be erased by cse.
-  target.addDynamicallyLegalOp<triton::MakeTensorPtrOp, triton::AdvanceOp>(
-      [](Operation *op) { return !op->getUsers().empty(); });
+  target.addIllegalDialect<triton::TritonDialect>();
   target.addLegalOp<LLVM::IntToPtrOp, LLVM::PtrToIntOp, LLVM::GEPOp,
                     triton::aux::StoreResourceOp, triton::aux::ViewOp,
-                    bufferization::ToTensorOp, bufferization::ToMemrefOp,
+                    bufferization::ToTensorOp,
                     bufferization::MaterializeInDestinationOp,
                     triton::aux::PrintOp, triton::aux::ScalarPrintOp>();
   target.addDynamicallyLegalDialect<
@@ -1816,8 +1753,7 @@ void triton::TritonToLinalgPass::populatePatterns(
   auto *context = patterns.getContext();
   scf::populateSCFStructuralTypeConversionsAndLegality(converter, patterns,
                                                        target);
-  patterns.add<OptimizationBarrierOpPattern, GPUBarrierOpPattern>(converter,
-                                                                  context);
+  patterns.add<OptimizationBarrierOpPattern>(converter, context);
   patterns.add<PtrSelectOpPattern>(converter, context, 0);
   patterns.add<PtrExtractOpPattern>(converter, context, 0);
   patterns.add<PtrExtractSliceOpPattern>(converter, context, 0);

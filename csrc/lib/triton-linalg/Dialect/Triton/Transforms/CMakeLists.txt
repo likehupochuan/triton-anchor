@@ -1,8 +1,6 @@
 add_triton_library(TritonTransformsExtend
-  CanonicalizeTriton.cpp
   ExtractMoveBackward.cpp
   InferAxisInfoInterfaceImpl.cpp
-  PointerStrengthReduction.cpp
   WrapFuncBodyWithSingleBlock.cpp
 
   DEPENDS

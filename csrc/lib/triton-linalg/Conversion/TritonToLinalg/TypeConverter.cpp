@@ -47,11 +47,10 @@ TritonLinalgTypeConverter::TritonLinalgTypeConverter() {
   // Add generic source and target materializations to handle cases where
   // int64 as triton.ptr types persist after an conversion.
   auto addUnrealizedCast = [](OpBuilder &builder, Type type, ValueRange inputs,
-                              Location loc) {
+                              Location loc) -> Value {
     auto cast = builder.create<UnrealizedConversionCastOp>(loc, type, inputs);
-    return std::optional<Value>(cast.getResult(0));
+    return cast.getResult(0);
   };
   addSourceMaterialization(addUnrealizedCast);
   addTargetMaterialization(addUnrealizedCast);
-  addArgumentMaterialization(addUnrealizedCast);
 }
