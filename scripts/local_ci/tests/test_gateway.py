@@ -316,6 +316,12 @@ class GatewayBehaviorTests(unittest.TestCase):
         legacy.pop("control_policy")
         self.assertNotEqual(g.compute_task_id(legacy),
                             g.compute_task_id({**legacy, "worker_revision_sha": "f" * 40}))
+        reopened = g.prepare_task(self.gh, self.base, 7, trigger_id="100:1")
+        duplicate = g.prepare_task(self.gh, self.base, 7, trigger_id="100:1")
+        rerun = g.prepare_task(self.gh, self.base, 7, trigger_id="100:2")
+        self.assertEqual(reopened["task_id"], duplicate["task_id"])
+        self.assertEqual(len({self.task["task_id"], reopened["task_id"], rerun["task_id"]}), 3)
+        self.assertNotEqual(reopened["task_ref"], self.task["task_ref"])
         self.gh.pull["head"]["sha"] = "e" * 40
         with self.assertRaises(ValueError):
             g.prepare_task(self.gh, self.base, 7, requested_sha=self.head)
@@ -324,6 +330,37 @@ class GatewayBehaviorTests(unittest.TestCase):
         task_file.write_bytes(g.canonical(changed))
         with self.assertRaises(ValueError):
             g.load_task(task_file, g.digest(self.task))
+
+    def test_verification_entry_distinguishes_routing_and_rejects_old_rerun_artifacts(self):
+        env = {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_RUN_ID": "200",
+               "GITHUB_RUN_ATTEMPT": "1"}
+        for routed, expected in (
+            ({}, "200:1"),  # Direct Run workflow.
+            ({"LOCAL_CI_ACTION": "push"}, ""),
+            ({"LOCAL_CI_ACTION": "opened", "LOCAL_CI_REQUEST_ID": "100:1"}, ""),
+            ({"LOCAL_CI_ACTION": "opened", "LOCAL_CI_REQUEST_ID": "100:2"}, "100:2"),
+            ({"LOCAL_CI_ACTION": "reopened", "LOCAL_CI_REQUEST_ID": "100:1"}, "100:1"),
+            ({"LOCAL_CI_ACTION": "manual", "LOCAL_CI_REQUEST_ID": "100:1"}, "100:1"),
+            ({"LOCAL_CI_ACTION": "opened", "LOCAL_CI_TRIGGER_ID": "100:2"}, "100:2"),
+        ):
+            with self.subTest(routed=routed), patch.dict(g.os.environ, {**env, **routed}, clear=True):
+                self.assertEqual(g.verification_trigger_id(), expected)
+        # Failed-only retries must not load the old successful Prepare artifact,
+        # even if a dependent job is selected directly for rerun.
+        for command in ("prepare", "approval", "enqueue", "checks"):
+            with (
+                self.subTest(command=command),
+                patch.dict(g.os.environ, {**env, "GITHUB_RUN_ATTEMPT": "2"}, clear=True),
+                patch("sys.argv", ["gateway.py", command]),
+                patch("sys.stderr", new_callable=io.StringIO),
+                patch.object(g, "GitHub") as client,
+                patch.object(g, "load_task") as load,
+                self.assertRaises(SystemExit) as error,
+            ):
+                g.main()
+            self.assertEqual(error.exception.code, 2)
+            client.assert_not_called()
+            load.assert_not_called()
 
     def test_prepare_reads_llvm_metadata_without_reading_unrelated_files(self):
         llvm_json = json.dumps({"llvm_hash": "a" * 40, "build_number": 123}).encode()
@@ -676,6 +713,7 @@ class GatewayBehaviorTests(unittest.TestCase):
                     "GITEE_RESULTS_REPO_URL": "https://gitee.com/test/results.git",
                     "RECEIVER_TASK_ID": received_id,
                     "PR_NUMBER": "0", "SOURCE_BRANCH": "other",
+                    "GITHUB_RUN_ATTEMPT": "2",  # Receive/publish reruns keep their existing scope.
                 }),
                 patch.object(g, "GitHub", return_value=gh),
                 patch.object(g, "GitStore", side_effect=lambda _url, branch: store(str(self.remote), branch)),
@@ -911,11 +949,21 @@ class GatewayBehaviorTests(unittest.TestCase):
         control = self.store(g.CONTROL_BRANCH)
         g.enqueue(self.task, self.gh, control, self.source)
         results = self.store(g.RESULTS_BRANCH)
+        previous = self.task
+        old_result = self.result()
+        prefix = g.result_task_prefixes(previous)[0]
+        old_path = f"{prefix}/{old_result['run_id']}/result.json"
+        results.put({old_path: old_result})
+        self.task = g.prepare_task(self.gh, self.base, 7, trigger_id="200:1")
+        g.enqueue(self.task, self.gh, control, self.source)
+        g.enqueue(self.task, self.gh, control, self.source)  # Repeated delivery is the same task.
         result = self.result()
+        result.update(run_id="20260907T130000Z-2", status="fail", blocking_reasons=["Regression"])
+        result["checks"][0]["status"] = "fail"
 
         def arrive(_seconds):
             results.put(
-                {f"runs/{self.task['task_id']}/{result['run_id']}/result.json": result}
+                {f"{prefix}/{result['run_id']}/result.json": result}
             )
 
         with patch.object(g.time, "sleep", side_effect=arrive) as sleep:
@@ -925,6 +973,9 @@ class GatewayBehaviorTests(unittest.TestCase):
             )
         sleep.assert_called_once_with(g.RECEIVER_POLL_SECONDS)
         self.assertIsNone(control.get(f"cancel/{self.task['task_id']}.json"))
+        self.assertEqual(control.get(f"tasks/{previous['task_id']}.json"), previous)
+        self.assertEqual(results.get(old_path), old_result)
+        self.assertEqual(g.read_result(g.latest_result(self.task, results), self.task, results)[0]["status"], "fail")
 
     def test_receiver_stops_immediately_when_task_is_obsolete(self):
         control = self.store(g.CONTROL_BRANCH)
@@ -938,6 +989,7 @@ class GatewayBehaviorTests(unittest.TestCase):
         sleep.assert_not_called()
 
     def test_receiver_continuations_are_bounded_and_keep_the_same_task(self):
+        self.task = g.prepare_task(self.gh, self.base, 7, trigger_id="200:1")
         control = self.store(g.CONTROL_BRANCH)
         g.enqueue(self.task, self.gh, control, self.source)
         before = git(control.root, "rev-parse", "HEAD")

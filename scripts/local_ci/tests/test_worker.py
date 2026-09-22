@@ -13,12 +13,12 @@ from types import SimpleNamespace
 import pytest
 
 from agent_ci.policy import minimum_checks
-from agent_ci.protocol import TASK_SCHEMA, atomic_json, metadata_digest, task_id
+from agent_ci.protocol import TASK_SCHEMA, ContractError, atomic_json, metadata_digest, task_id, validate_task
 from agent_ci.worker import Worker, scan_once, trigger_control_update
 from agent_ci.state import Journal, local_run_dir
 
 
-def manifest(event_kind="pull_request"):
+def manifest(event_kind="pull_request", *, trigger_id=None):
     value = {
         "schema": TASK_SCHEMA,
         "repository": "likehupochuan/triton-anchor",
@@ -38,6 +38,8 @@ def manifest(event_kind="pull_request"):
         "labels": [],
         "captured_at": "2026-09-11T00:00:00Z",
     }
+    if trigger_id is not None:
+        value["trigger_id"] = trigger_id
     value["metadata_digest"] = metadata_digest(value)
     value["task_id"] = task_id(value)
     prefix = f"ci/pr-7/{value['task_id']}" if value["pr_number"] else f"ci/branch/{value['task_id']}"
@@ -249,15 +251,30 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
 
 def test_sha_layout_keeps_distinct_tasks_and_restart_history(tmp_path):
     first = manifest()
+    assert first["task_id"] == "ffeb4291fe22c65d93c67fa5e7aef792f32830c92c909ae0f25f878c528204e4"
+    assert validate_task(manifest(trigger_id=""))["task_id"] == first["task_id"]
+    triggered = manifest(trigger_id="12345:1")
+    assert validate_task(triggered) == manifest(trigger_id="12345:1")
+    assert len({first["task_id"], triggered["task_id"],
+                manifest(trigger_id="12345:2")["task_id"],
+                manifest(trigger_id="67890:1")["task_id"]}) == 4
+    worker_selected = {**triggered, "control_policy": "worker"}
+    assert task_id(worker_selected) == task_id({**worker_selected, "worker_revision_sha": "f" * 40})
+    for invalid in (None, 1, "0:1", "1:0", "1", "1:1\n", "1" * 159 + ":1"):
+        with pytest.raises(ContractError, match="trigger_id"):
+            validate_task({**first, "trigger_id": invalid})
     second = revised_manifest("f" * 40, "2026-09-12T00:00:00Z")
     journal = Journal(tmp_path)
     row1, row2 = journal.register(first), journal.register(second)
+    retriggered = journal.register(triggered)
+    assert journal.run_dir(triggered["task_id"]).parent.name == first["head_sha"]
     directory1 = journal.run_dir(first["task_id"])
     directory2 = journal.run_dir(second["task_id"])
     assert directory1.parent == directory2.parent
     assert directory1 != directory2
     journal.phase(first["task_id"], "published")
     journal = Journal(tmp_path)
+    assert journal.register(triggered)["run_id"] == retriggered["run_id"]
     assert journal.task(first["task_id"])["phase"] == "published"
     assert journal.task(second["task_id"])["run_id"] == row2["run_id"]
     assert journal.task(second["task_id"])["head_sha"] == first["head_sha"]
@@ -724,13 +741,14 @@ def test_failed_report_is_final_even_when_cli_exits_with_connection_error(recove
 
 def test_restart_preserves_task_budget_and_does_not_refund_attempts(tmp_path):
     journal = Journal(tmp_path)
-    task = manifest()
+    task = manifest(trigger_id="12345:2")
     journal.register(task)
     journal.claim(task["task_id"], "execution_attempts_used", 3)
     original = journal.claim(task["task_id"], "codex_attempts_used", 10, timeout=21600)
     for _ in range(2):
         journal = Journal(tmp_path)
         journal.restart(task["task_id"])
+        assert json.loads(journal.task(task["task_id"])["manifest"]) == task
         budget = journal.claim(task["task_id"], "execution_attempts_used", 3)
         assert budget["codex_deadline_at"] == original["codex_deadline_at"]
         assert budget["codex_attempts_used"] == 1

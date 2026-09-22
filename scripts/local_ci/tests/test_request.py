@@ -15,6 +15,7 @@ REQUEST = yaml.safe_load((ROOT / ".github/workflows/ci-request.yml").read_text()
 GATEWAY = yaml.safe_load((ROOT / ".github/workflows/ci-gateway.yml").read_text())
 ROUTE, CLEANUP = [step["with"]["script"] for step in REQUEST["jobs"]["route"]["steps"]]
 FINISH = GATEWAY["jobs"]["finish-request"]["steps"][0]["with"]["script"]
+RESTART = GATEWAY["jobs"]["rerun-verification"]["steps"][0]["with"]["script"]
 HEAD = "a" * 40
 URL = "https://github.com/likehupochuan/triton-anchor/actions/runs/100#local-ci-request=100:1"
 
@@ -32,11 +33,15 @@ const head = 'a'.repeat(40);
 const pull = {number: 7, state: input.closed ? 'closed' : 'open', draft: !!input.draft,
               head: {sha: head}, base: {ref: 'main'}};
 const context = {repo: {owner: 'likehupochuan', repo: 'triton-anchor'}, runId: 100,
-                 actor: 'maintainer', eventName: input.manual ? 'workflow_dispatch' : 'pull_request_target',
-                 ref: 'refs/heads/main', payload: input.manual ? {} : {pull_request: pull, action: 'opened'}};
-Object.assign(process.env, {SOURCE_BRANCH: 'main', REQUESTED_SHA: head, GITHUB_RUN_ATTEMPT: '1',
-                           GITHUB_SERVER_URL: 'https://github.com', REQUEST_ID: '100:1'});
-const core = {info() {}, setOutput(key, value) { outputs[key] = value; }};
+                 actor: 'maintainer', eventName: input.manual ? 'workflow_dispatch' : input.push ? 'push' : 'pull_request_target',
+                 ref: 'refs/heads/main', sha: head,
+                 payload: input.manual || input.push ? {} : {pull_request: pull, action: input.action || 'opened'}};
+Object.assign(process.env, {SOURCE_BRANCH: 'main', REQUESTED_SHA: head, GITHUB_RUN_ATTEMPT: String(input.attempt || 1),
+                           GITHUB_SERVER_URL: 'https://github.com', REQUEST_ID: '100:1',
+                           ORIGINAL_INPUTS: JSON.stringify(input.original || {})});
+const core = {info() {}, setOutput(key, value) { outputs[key] = value; },
+              summary: {addHeading() {return this;}, addRaw() {return this;},
+                        addLink() {return this;}, async write() {}}};
 const github = {paginate: async () => rows, rest: {
   repos: {
     listCommitStatusesForRef() {},
@@ -61,7 +66,8 @@ const github = {paginate: async () => rows, rest: {
 const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
 async function run(script) { await new AsyncFunction('github', 'context', 'core', script)(github, context, core); }
 (async () => {
-  if (input.finish) { await run(input.finishScript); }
+  if (input.restart) { await run(input.restartScript); }
+  else if (input.finish) { await run(input.finishScript); }
   else {
     try { await run(input.route); }
     catch (error) {
@@ -77,19 +83,24 @@ async function run(script) { await new AsyncFunction('github', 'context', 'core'
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """
     result = subprocess.run([NODE, "-e", driver], input=json.dumps({
-        "route": ROUTE, "cleanup": CLEANUP, "finishScript": FINISH, **options,
+        "route": ROUTE, "cleanup": CLEANUP, "finishScript": FINISH, "restartScript": RESTART, **options,
     }), text=True, capture_output=True, check=True)
     return json.loads(result.stdout)
 
 
-@pytest.mark.parametrize("manual", [False, True])
-def test_request_publishes_pending_before_dispatch(manual):
-    events = execute(manual=manual)
+@pytest.mark.parametrize("options,trigger", [({}, ""), ({"manual": True}, "100:1"),
+    ({"action": "reopened"}, "100:1"), ({"attempt": 2}, "100:2"),
+    ({"push": True}, ""), ({"push": True, "attempt": 2}, "100:2"),
+    ({"attempt": 2, "rows": [status(URL.replace('100:1', '101:1'))]}, "100:2")])
+def test_request_publishes_pending_before_dispatch(options, trigger):
+    events = execute(**options)
+    attempt = options.get("attempt", 1)
     assert [row["kind"] for row in events] == ["status", "dispatch"]
     assert events[0]["state"] == "pending"
     assert events[0]["sha"] == HEAD
-    assert events[0]["target_url"] == URL
-    assert events[1]["inputs"]["request_id"] == "100:1"
+    assert events[0]["target_url"] == URL.replace("100:1", f"100:{attempt}")
+    assert events[1]["inputs"]["request_id"] == f"100:{attempt}"
+    assert events[1]["inputs"]["trigger_id"] == trigger
     assert REQUEST["jobs"]["route"]["permissions"]["statuses"] == "write"
 
 
@@ -105,6 +116,26 @@ def test_inactive_pr_only_dispatches_cancellation(flag, action):
     assert [row["kind"] for row in events] == ["dispatch"]
     assert events[0]["inputs"]["action"] == action
     assert events[0]["inputs"]["request_id"] == ""
+    assert events[0]["inputs"]["trigger_id"] == ""
+
+
+def test_failed_only_rerun_dispatches_complete_verification_without_old_artifacts():
+    jobs = GATEWAY["jobs"]
+    restart = jobs["rerun-verification"]
+    assert set(restart["needs"]) == set(jobs) - {"rerun-verification"}
+    assert "always()" in restart["if"] and "github.run_attempt > 1" in restart["if"]
+    assert all("github.run_attempt == 1" in job["if"]
+               for key, job in jobs.items() if key != "rerun-verification")
+    original = {"mode": "run", "pr_number": "7", "source_branch": "main",
+                "requested_sha": HEAD, "request_id": "99:1", "trigger_id": "99:1",
+                "worker_revision_sha": "c" * 40, "action": "opened", "full": True,
+                "run_title": "PR #7"}
+    event, = execute(restart=True, attempt=2, original=original)
+    assert event["ref"] == "local-ci-unified"
+    assert event["inputs"] == {**original, "request_id": "", "trigger_id": "100:2",
+                               "worker_revision_sha": "b" * 40, "full": "true"}
+    # Retrying delivery of this handoff does not invent another trigger.
+    assert execute(restart=True, attempt=2, original=original) == [event]
 
 
 @pytest.mark.parametrize("failure", ["lookupFailure", "dispatchFailure"])

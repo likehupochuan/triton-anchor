@@ -22,6 +22,26 @@ PR 任务冻结目标 base、贡献者 head 和精确 merge/tested SHA。
 FlagGems 使用服务器 profile 的固定只读目录；其子模块指针不切换服务器依赖。
 其他子模块固定到被测 Git 对象。
 
+### 新一轮验证与原任务恢复
+
+PR `reopened`、验证 Workflow 的 rerun、手动 Run workflow 发起验证时，
+以该入口的 `run_id:run_attempt` 生成一次 `trigger_id`，参与 task ID 计算。
+即使 head、merge 未变化，也会投递新任务并重新执行服务器测试。
+该编号写入冻结的 `task.json`，审批、派发、结果接收只传递这个文件及其 task ID。
+普通自动路由虽然使用 `workflow_dispatch`，不会因此生成新触发编号；
+源码、基线、PR 审查信息和 full 范围变化仍使用原有身份规则。
+
+Gateway 的 Re-run all jobs 和 Re-run failed jobs 都转交一次完整的新验证。
+重跑 attempt 不执行原验证作业，也不读取上一轮成功 Prepare 留下的任务产物；
+末尾的 `Restart verification` 作业在各作业结束或跳过后派发新的 Gateway。
+新运行固定传入原重跑入口的触发编号，重新完成前置检查及所需审批。
+因此 Actions 会多出一条完整验证运行，可从重跑作业的摘要进入。
+
+同一轮重复投递、Codex 恢复、Worker 重启、网络重试和结果补传不生成编号，
+仍沿用原 task ID 与重试预算。receive 续接、单独补收及页面发布也不创建任务。
+接收器只等指定 task ID 的结果，同 SHA 目录中的上一轮结果不会结束新一轮。
+历史任务不带 `trigger_id` 时保持原 ID，历史结果不删除。
+
 ## 前置检查与审批
 
 检查按成功依赖推进，状态回写可与下一检查并行：
@@ -68,6 +88,7 @@ Summary 从 CI Request 确认有效请求后为 `pending`，覆盖 Gateway 排�
 派发失败或 Gateway 初始化中断时，尚未接管的 Summary 收尾为 `error`。
 关闭或转为草稿的 PR 只执行取消流程，不创建新的等待状态。
 直接派发 Gateway 时不填写 `request_id`，Summary 在可信任务初始化时创建。
+`trigger_id` 由入口传递；手动运行时留空，由 Prepare 确定，勿复制上一轮的值。
 新任务及完整重跑重新初始化 Summary，旧运行不能覆盖新运行的结论；
 重复初始化不会重新打开已结束的阶段。结果接收器只在成功投递后接管 Summary。
 `Local CI Approve` 只用于外部 fork，同仓库任务不创建该项。
@@ -116,6 +137,24 @@ PR 结果按 `result + task_id + run_id + result_digest` 去重，每次运行�
 
 full 要求全部可用工具对应的验证，外部 fork 使用同一审批流程。
 base/candidate 的 profile 与能力见 [Local CI 环境](../local_ci/README.md#环境与生命周期)。
+
+### 触发身份改动的上线顺序
+
+先把修复后的控制代码同步到 Gitee，再使用服务器现有 `control_update.py`
+按修复提交的完整 SHA 更新并重启 Worker；具体路径和命令见
+[更新已有服务器](../local_ci/prepare/README.md#更新已有服务器)。
+需要同步的是包含 `agent_ci/protocol.py` 的整套控制代码，不需要更新 profile、
+LLVM、镜像或重置任务状态。确认实际控制 SHA 已更新后再做 reopen/rerun 验收。
+旧 Worker 会拒绝新触发任务的身份，不能依赖这种任务本身触发自动升级；
+普通控制分支 push 的自动升级仍按已有规则执行。
+
+将修复后的 `ci-request.yml` 同步到默认分支 `main` 及需要路由的源码分支，
+使路由 Workflow 显式传递触发编号，并接受较旧运行的主动 rerun；
+旧路由传来的 `request_id` 中 attempt 大于 1 时，Prepare 也会沿用它作为触发编号。
+`main` 的接收工作流已读取控制分支代码，
+无需修改其 YAML；本次也不涉及 Cloudflare 或 Dashboard 部署。
+GitHub 会使用历史运行原来的工作流代码重跑，因此部署前的旧 Gateway 运行不能靠点击 rerun 获得修复；
+请从最新入口重新打开 PR 或 Run workflow 发起一次验证。
 
 ### 结果接收
 

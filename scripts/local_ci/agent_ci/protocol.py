@@ -16,6 +16,7 @@ PREINSTALLED_SUBMODULES = frozenset({"FlagGems"})
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 ID = re.compile(r"[0-9a-f]{64}\Z")
 RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,159}\Z")
+TRIGGER_ID = re.compile(r"[1-9][0-9]*:[1-9][0-9]*\Z")
 LLVM_METADATA = re.compile(r"triton/cmake/llvm-(?:hash|info)(?:\.(?:txt|json))?\Z")
 TRITON_VERSION_PATH = "triton/python/triton/__init__.py"
 TRITON_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[a-zA-Z0-9.+-]*)\Z")
@@ -99,6 +100,8 @@ def metadata_digest(task: dict) -> str:
 
 def task_id(task: dict) -> str:
     identity = {key: task[key] for key in IDENTITY_FIELDS}
+    if task.get("trigger_id"):
+        identity["trigger_id"] = task["trigger_id"]
     if task.get("control_policy") == "worker":
         identity.pop("worker_revision_sha")
         identity["control_policy"] = "worker"
@@ -173,6 +176,12 @@ def validate_task(
     }
     if required - task.keys():
         raise ContractError("Task is missing required identity fields")
+    if "trigger_id" in task:
+        trigger = task["trigger_id"]
+        if not isinstance(trigger, str) or len(trigger) > 160 or (
+            trigger and not TRIGGER_ID.fullmatch(trigger)
+        ):
+            raise ContractError("Invalid trigger_id")
     if task.get("control_policy") not in {None, "worker"} or (
         task.get("control_policy") == "worker" and not task["pr_number"]
     ):

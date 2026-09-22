@@ -12,18 +12,20 @@ on:
       source_branch: {type: string, default: ''}
       requested_sha: {type: string, default: ''}
       request_id: {type: string, default: '', description: 'CI Request run and attempt; leave empty for direct dispatch'}
+      trigger_id: {type: string, default: '', description: 'Internal verification trigger; leave empty for manual dispatch'}
       worker_revision_sha: {type: string, default: ''}
       action: {type: string, default: ''}
       full: {type: boolean, default: false}
       run_title: {type: string, default: '', description: 'Display identity passed between stages; normally leave empty'}
 permissions: {}
 concurrency:
-  group: ${{ format('local-ci-run-{0}', inputs.pr_number != '0' && inputs.pr_number || inputs.source_branch || github.ref_name) }}
+  group: ${{ format('local-ci-run-{0}{1}', inputs.pr_number != '0' && inputs.pr_number || inputs.source_branch || github.ref_name, github.run_attempt > 1 && format('-rerun-{0}', github.run_id) || '') }}
   cancel-in-progress: true
 jobs:
   cancel-obsolete:
     name: Cancel obsolete tasks
     needs: validate-worker
+    if: ${{ github.run_attempt == 1 }}
     runs-on: ubuntu-latest
     permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: read}
     steps:
@@ -45,7 +47,7 @@ jobs:
     name: >-
       Prepare exact task / ${{ inputs.pr_number != '' && inputs.pr_number != '0' && format('PR #{0}', inputs.pr_number) || format('Branch {0}', inputs.source_branch || github.ref_name) }}
     needs: cancel-obsolete
-    if: ${{ inputs.action != 'closed' && inputs.action != 'converted_to_draft' }}
+    if: ${{ github.run_attempt == 1 && inputs.action != 'closed' && inputs.action != 'converted_to_draft' }}
     runs-on: ubuntu-latest
     permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: read}
     outputs:
@@ -70,6 +72,8 @@ jobs:
           SOURCE_BRANCH: ${{ inputs.source_branch }}
           REQUESTED_SHA: ${{ inputs.requested_sha }}
           LOCAL_CI_REQUEST_ID: ${{ inputs.request_id }}
+          LOCAL_CI_TRIGGER_ID: ${{ inputs.trigger_id }}
+          LOCAL_CI_ACTION: ${{ inputs.action }}
           FULL: ${{ inputs.full }}
           GITEE_SUBMODULE_MIRRORS: ${{ vars.GITEE_SUBMODULE_MIRRORS || '{}' }}
           EVENT_KIND: ${{ inputs.action == 'manual' && 'manual' || 'push' }}
@@ -84,6 +88,7 @@ jobs:
   basic:
     name: Basic CI
     needs: prepare
+    if: ${{ github.run_attempt == 1 }}
     permissions: {contents: read}
     uses: ./.github/workflows/basic-checks.yml
     with:
@@ -91,6 +96,7 @@ jobs:
   api:
     name: API compatibility
     needs: [prepare, basic]
+    if: ${{ github.run_attempt == 1 }}
     permissions: {contents: read}
     uses: ./.github/workflows/api-compatibility.yml
     with:
@@ -101,6 +107,7 @@ jobs:
   security:
     name: Security gate
     needs: [prepare, api]
+    if: ${{ github.run_attempt == 1 }}
     permissions: {contents: read, security-events: write}
     uses: ./.github/workflows/security.yml
     with:
@@ -110,7 +117,7 @@ jobs:
   basic-result:
     name: Publish Basic CI result
     needs: [prepare, basic]
-    if: ${{ always() && needs.prepare.outputs.task_id != '' }}
+    if: ${{ always() && github.run_attempt == 1 && needs.prepare.outputs.task_id != '' }}
     permissions: {contents: read, pull-requests: read, checks: write, statuses: write, actions: read}
     uses: ./.github/workflows/preflight-result.yml
     with:
@@ -121,7 +128,7 @@ jobs:
   api-result:
     name: Publish API result
     needs: [prepare, api]
-    if: ${{ always() && needs.prepare.outputs.task_id != '' }}
+    if: ${{ always() && github.run_attempt == 1 && needs.prepare.outputs.task_id != '' }}
     permissions: {contents: read, pull-requests: read, checks: write, statuses: write, actions: read}
     uses: ./.github/workflows/preflight-result.yml
     with:
@@ -134,7 +141,7 @@ jobs:
     # Keep security execution independent, but publish its result/card only
     # after the earlier result publishers have settled.
     needs: [prepare, security, basic-result, api-result]
-    if: ${{ always() && needs.prepare.outputs.task_id != '' }}
+    if: ${{ always() && github.run_attempt == 1 && needs.prepare.outputs.task_id != '' }}
     permissions: {contents: read, pull-requests: write, checks: write, statuses: write, actions: read}
     uses: ./.github/workflows/preflight-result.yml
     with:
@@ -147,7 +154,7 @@ jobs:
   approve-external-fork:
     name: Approve external fork
     needs: [prepare, security-result]
-    if: ${{ needs.prepare.outputs.external_fork == 'true' && needs.security-result.outputs.eligible == 'true' }}
+    if: ${{ github.run_attempt == 1 && needs.prepare.outputs.external_fork == 'true' && needs.security-result.outputs.eligible == 'true' }}
     environment: local-ci-fork-approval
     runs-on: ubuntu-latest
     permissions: {contents: read, pull-requests: read, actions: read, checks: write, statuses: write}
@@ -170,7 +177,7 @@ jobs:
     name: Dispatch local CI task
     needs: [prepare, basic, api, security, basic-result, api-result, security-result, approve-external-fork]
     if: >-
-      always() && needs.prepare.result == 'success' &&
+      always() && github.run_attempt == 1 && needs.prepare.result == 'success' &&
       needs.prepare.outputs.task_id != '' &&
       needs.basic.result == 'success' && needs.api.result == 'success' &&
       needs.security.result == 'success' &&
@@ -224,7 +231,7 @@ jobs:
   finalize-preflight:
     name: Finish interrupted checks
     needs: [prepare, basic, api, security, basic-result, api-result, security-result, approve-external-fork, enqueue]
-    if: ${{ always() && needs.prepare.outputs.task_id != '' && needs.enqueue.result != 'success' }}
+    if: ${{ always() && github.run_attempt == 1 && needs.prepare.outputs.task_id != '' && needs.enqueue.result != 'success' }}
     runs-on: ubuntu-latest
     permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: read}
     steps:
@@ -244,7 +251,7 @@ jobs:
   finish-request:
     name: Finish interrupted request initialization
     needs: [validate-worker, cancel-obsolete, prepare]
-    if: ${{ always() && inputs.request_id != '' && needs.prepare.result != 'success' }}
+    if: ${{ always() && github.run_attempt == 1 && inputs.request_id != '' && needs.prepare.result != 'success' }}
     runs-on: ubuntu-latest
     permissions: {statuses: write}
     steps:
@@ -271,6 +278,7 @@ jobs:
   validate-worker:
     name: Validate control revision
     if: >-
+      github.run_attempt == 1 &&
       (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
       github.ref_name == 'local-ci-unified' &&
       github.event_name == 'workflow_dispatch' && inputs.mode == 'run'
@@ -282,3 +290,38 @@ jobs:
         run: |
           test "$GITHUB_REF_NAME" = local-ci-unified
           test "$GITHUB_SHA" = "$WORKER_SHA"
+  rerun-verification:
+    name: Restart verification
+    # Re-run failed jobs keeps successful Prepare outputs. Depend on every job
+    # so even a failed-only/single-job rerun reaches this fresh-run handoff.
+    needs: [validate-worker, cancel-obsolete, prepare, basic, api, security, basic-result, api-result, security-result, approve-external-fork, enqueue, finalize-preflight, finish-request]
+    if: >-
+      always() && github.run_attempt > 1 &&
+      (github.repository == 'likehupochuan/triton-anchor' || github.repository == 'anteloper-c/triton-anchor') &&
+      github.ref_name == 'local-ci-unified' && github.event_name == 'workflow_dispatch' &&
+      inputs.mode == 'run' && inputs.action != 'closed' && inputs.action != 'converted_to_draft'
+    runs-on: ubuntu-latest
+    permissions: {contents: read, actions: write}
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          ORIGINAL_INPUTS: ${{ toJSON(inputs) }}
+        with:
+          retries: 3
+          script: |
+            const original = JSON.parse(process.env.ORIGINAL_INPUTS);
+            const triggerId = `${context.runId}:${process.env.GITHUB_RUN_ATTEMPT}`;
+            const {data: control} = await github.rest.repos.getBranch({
+              ...context.repo, branch: 'local-ci-unified'
+            });
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo, workflow_id: 'ci-gateway.yml', ref: 'local-ci-unified',
+              inputs: {
+                ...original, request_id: '', trigger_id: triggerId,
+                worker_revision_sha: control.commit.sha, full: String(original.full)
+              }
+            });
+            await core.summary.addHeading('New verification requested')
+              .addRaw(`Trigger: ${triggerId}. The new run repeats checks and any required approval.\n`)
+              .addLink('Open CI Gateway runs', `${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/workflows/ci-gateway.yml`)
+              .write();

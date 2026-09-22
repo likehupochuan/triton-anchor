@@ -735,6 +735,25 @@ class GitHub:
         return True
 
 
+def verification_trigger_id() -> str:
+    """Resolve a new verification once, before freezing its task manifest."""
+    forwarded = os.getenv("LOCAL_CI_TRIGGER_ID", "")
+    if forwarded:
+        return forwarded
+    request_id = os.getenv("LOCAL_CI_REQUEST_ID", "")
+    action = os.getenv("LOCAL_CI_ACTION", "")
+    direct_dispatch = (
+        os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch"
+        and not request_id and not action
+    )
+    # Older CI Request copies already pass their entry's run and attempt.
+    request_attempt = request_id.rsplit(":", 1)[-1]
+    routed_rerun = request_attempt.isdigit() and int(request_attempt) > 1
+    if action in {"reopened", "manual"} or direct_dispatch or routed_rerun:
+        return request_id or f"{os.getenv('GITHUB_RUN_ID', '')}:{os.getenv('GITHUB_RUN_ATTEMPT') or '1'}"
+    return ""
+
+
 def prepare_task(
     gh: GitHub,
     worker_sha: str,
@@ -743,6 +762,7 @@ def prepare_task(
     requested_sha: str = "",
     full: bool = False,
     event_kind: str = "push",
+    trigger_id: str = "",
 ) -> dict:
     if not SHA.fullmatch(worker_sha):
         raise ValueError("Invalid trusted worker revision")
@@ -827,6 +847,8 @@ def prepare_task(
     task["metadata_digest"] = metadata_digest(task)
     if pr_number:
         task["control_policy"] = "worker"
+    if trigger_id:
+        task["trigger_id"] = trigger_id
     task["task_id"] = compute_task_id(task)
     # Different tasks never move one another's source refs; the manifest is last.
     prefix = (
@@ -2057,6 +2079,12 @@ def main() -> int:
     parser.add_argument("--stages", default=os.getenv("STAGES", "{}"))
     parser.add_argument("--dashboard", type=Path, default=Path("_site/data"))
     args = parser.parse_args()
+    if int(os.getenv("GITHUB_RUN_ATTEMPT") or 1) > 1 and args.command in {
+        "prepare", "info", "card", "checks", "finalize", "approval", "enqueue", "api", "security",
+    }:
+        # Failed-only reruns may retain a successful Prepare job's old outputs.
+        # The workflow redirects these attempts to a fresh, complete validation.
+        parser.error("Validation reruns must start a fresh workflow; refusing the previous task artifact")
     gh = GitHub(args.repository)
     if args.command == "prepare":
         task = prepare_task(
@@ -2067,6 +2095,7 @@ def main() -> int:
             args.sha,
             args.full,
             args.event_kind,
+            verification_trigger_id(),
         )
         args.task.write_bytes(canonical(task) + b"\n")
         for key in ("task_id", "tested_sha", "head_sha", "base_sha", "external_fork"):

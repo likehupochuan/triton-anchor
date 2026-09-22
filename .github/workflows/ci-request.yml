@@ -78,7 +78,9 @@ jobs:
               const {data: latest} = await github.rest.repos.getBranch({owner, repo, branch});
               if (latest.commit.sha !== requestedSha) throw new Error(`Branch ${branch} changed while routing`);
             }
-            const requestId = `${context.runId}:${process.env.GITHUB_RUN_ATTEMPT || '1'}`;
+            const attempt = Number(process.env.GITHUB_RUN_ATTEMPT || '1');
+            const requestId = `${context.runId}:${attempt}`;
+            const triggerId = verify && (manual || action === 'reopened' || attempt > 1) ? requestId : '';
             if (verify) {
               const rows = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
                 owner, repo, ref: requestedSha, per_page: 100
@@ -87,8 +89,9 @@ jobs:
               const identity = new URLSearchParams((previous?.target_url || '').split('#')[1]);
               const prior = identity.get('local-ci-request');
               if (previous?.creator?.login === 'github-actions[bot]' && prior) {
-                const [run, attempt] = prior.split(':').map(Number);
-                if (run > context.runId || (run === Number(context.runId) && attempt >= Number(process.env.GITHUB_RUN_ATTEMPT || '1'))) {
+                const [run, priorAttempt] = prior.split(':').map(Number);
+                if ((run > context.runId && attempt === 1) ||
+                    (run === Number(context.runId) && priorAttempt >= attempt)) {
                   core.info('This request already has a status or has been superseded');
                   return;
                 }
@@ -113,6 +116,7 @@ jobs:
                 source_branch: branch,
                 requested_sha: requestedSha,
                 request_id: verify ? requestId : '',
+                trigger_id: triggerId,
                 run_title: `${subject} | h:${requestedSha.slice(0, 7)}`,
                 worker_revision_sha: revision,
                 action,
