@@ -90,6 +90,33 @@ test('recovery facts separate phase, budget and progress; long silence only warn
   const internalRecovery=assessHealth(worker,{now:healthNow});
   assert.ok(!internalRecovery.issues.some(row=>row.code==='task_recovering'));
   assert.equal(internalRecovery.cards[3].text,'自动恢复中 · 4 / 10');
+  for (const [status, cause] of [['rate_limited','rate_limit'],['session_invalid','session_invalid'],
+    ['failed','cli_failed'],['failed','result_missing']]) {
+    current.codex_status=status;current.recovery.failure_code=cause;
+    for (const [used,state] of [[2,'retry_wait'],[9,'retry_wait'],[10,'recovering']]) {
+      current.budget.codex_attempts_used=used;current.recovery.state=state;
+      const retry=assessHealth(worker,{now:healthNow});
+      assert.deepEqual(retry.issues.map(row=>row.code),['task_no_progress','task_stalled'], status+' '+used+' '+state);
+      assert.equal(retry.cards[3].text,'自动恢复中 · '+used+' / 10');
+    }
+    current.recovery.state='retry_wait';
+    assert.ok(assessHealth(worker,{now:healthNow}).issues.some(row=>row.code==='codex_'+status));
+    current.budget={};
+    assert.ok(assessHealth(worker,{now:healthNow}).issues.some(row=>row.code==='codex_'+status), 'unknown budget is not proof of recovery');
+    current.budget=budget;
+  }
+  for (const status of ['auth_error','timeout']) {
+    current.codex_status=status;
+    for (const cause of ['rate_limit','connection']) {
+      current.recovery={state:'retry_wait',failure_code:cause};
+      for (const used of [2,10]) {
+        current.budget.codex_attempts_used=used;
+        const hardFailure=assessHealth(worker,{now:healthNow});
+        assert.ok(hardFailure.issues.some(row=>row.code==='codex_'+status));
+        assert.equal(hardFailure.cards[3].tone,'bad');
+      }
+    }
+  }
   current.codex_status='connection_error';
   current.budget.codex_attempts_used=10;current.recovery.state='recovering';
   assert.ok(!assessHealth(worker,{now:healthNow}).issues.some(row=>row.code==='codex_connection_error'));

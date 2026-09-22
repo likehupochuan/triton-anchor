@@ -438,6 +438,47 @@ test('failed close is re-evaluated against unreadable, old or newly faulty snaps
 });
 
 test('automatic Codex recovery stays quiet and connection alerts only after the tenth attempt finishes', async () => {
+  for (const [status, cause] of [['rate_limited','rate_limit'],['session_invalid','session_invalid'],
+    ['failed','cli_failed'],['failed','result_missing']]) {
+    const retry = fixture();
+    const recoveringTask = {task_id: 'retry-task', run_id: 'retry-run', stage: 'running', codex_status: status,
+      recovery: {state: 'retry_wait', failure_code: cause}, budget: {codex_attempts_used: 2, codex_attempts_limit: 10}};
+    retry.health.tasks_available = true;
+    retry.health.tasks = [recoveringTask]; retry.health.active_task = recoveringTask;
+    for (const [used, state] of [[2, 'retry_wait'], [9, 'retry_wait'], [10, 'recovering']]) {
+      recoveringTask.budget.codex_attempts_used = used; recoveringTask.recovery.state = state;
+      retry.advance(); await retry.run();
+      assert.equal(retry.issues.length, 0, status + ' ' + used + ' ' + state);
+    }
+    recoveringTask.recovery.state = 'retry_wait';
+    retry.advance(); await retry.run();
+    assert.ok(JSON.parse(retry.stored).codes.includes('codex_' + status));
+    assert.equal(retry.issues[0].state, 'open', 'a finished final attempt still alerts');
+    // Model a previously reported fault when the same task is now known to be retrying.
+    recoveringTask.budget.codex_attempts_used = 2;
+    retry.readFailure = true;
+    retry.advance(); await retry.run();
+    assert.equal(retry.issues[0].state, 'open', 'a failed read cannot clear the old alert');
+    retry.readFailure = false;
+    retry.advance(); await retry.run();
+    assert.equal(retry.issues[0].state, 'closed', 'fresh managed recovery clears the previous false alarm');
+    recoveringTask.budget = {};
+    retry.advance(); await retry.run();
+    assert.ok(JSON.parse(retry.stored).codes.includes('codex_' + status), 'unknown budget is not proof of recovery');
+  }
+  for (const status of ['auth_error', 'timeout']) {
+    for (const cause of ['rate_limit', 'connection']) {
+      const hardFailure = fixture();
+      const task = {task_id: 'hard-task', run_id: 'hard-run', stage: 'running', codex_status: status,
+        recovery: {state: 'retry_wait', failure_code: cause}, budget: {codex_attempts_used: 2, codex_attempts_limit: 10}};
+      hardFailure.health.tasks = [task]; hardFailure.health.active_task = task;
+      for (const used of [2, 10]) {
+        task.budget.codex_attempts_used = used;
+        hardFailure.advance(); await hardFailure.run();
+        assert.ok(JSON.parse(hardFailure.stored).codes.includes('codex_' + status), 'current hard failure must remain visible');
+      }
+    }
+  }
   const h = fixture();
   const task = {task_id: 'task-a', run_id: 'run-1', stage: 'running', codex_status: 'running', codex_alive: true,
     recovery: {state: 'recovering', failure_code: 'result_missing', action: 'resume'},

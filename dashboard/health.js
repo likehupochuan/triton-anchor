@@ -51,8 +51,10 @@
   const connectionFailures = new Set(['connection', 'connection_error']);
   const automaticRecoveryStates = new Set(['retry_wait', 'recovering']);
   const retryableCodexFailures = new Set(['cli_failed', 'result_missing', 'rate_limit', 'rate_limited', 'session_invalid']);
-  const connectionSignal = task => task?.codex_status === 'connection_error'
-    || connectionFailures.has(task?.recovery?.failure_code);
+  const retryableCodexStatuses = new Set(['rate_limited', 'session_invalid', 'failed']);
+  const nonRetryableCodexStatuses = new Set(['auth_error', 'timeout']);
+  const connectionSignal = task => !nonRetryableCodexStatuses.has(task?.codex_status)
+    && (task?.codex_status === 'connection_error' || connectionFailures.has(task?.recovery?.failure_code));
   function connectionAttemptState(task) {
     if (task?.stage !== 'running' || !connectionSignal(task)) return 'none';
     const budget = task.budget || {}, used = budget.codex_attempts_used, limit = budget.codex_attempts_limit;
@@ -64,7 +66,8 @@
     && connectionAttemptState(task) !== 'exhausted';
   const exhaustedConnection = task => connectionAttemptState(task) === 'exhausted';
   function automaticTaskRecovery(task) {
-    if (task?.stage !== 'running' || !automaticRecoveryStates.has(task.recovery?.state)
+    if (task?.stage !== 'running' || nonRetryableCodexStatuses.has(task.codex_status)
+        || !automaticRecoveryStates.has(task.recovery?.state)
         || !retryableCodexFailures.has(task.recovery?.failure_code)) return false;
     const budget = task.budget || {}, used = budget.codex_attempts_used, limit = budget.codex_attempts_limit;
     return Number.isInteger(used) && used >= 0 && Number.isInteger(limit) && limit > 0
@@ -119,7 +122,8 @@
       if (connectionExhausted)
         add('codex_connection_error', 'Codex 异常',
           'Codex 连接失败，' + attemptText + ' 次尝试已用尽');
-      else if (!connectionPending && codex && ['bad', 'warn'].includes(codex[1]) && active.codex_status !== 'retrying')
+      else if (!connectionPending && !(automaticRecovery && retryableCodexStatuses.has(active?.codex_status))
+        && codex && ['bad', 'warn'].includes(codex[1]) && active.codex_status !== 'retrying')
         add('codex_' + active.codex_status, 'Codex 异常', codex[0], codex[1]);
       else if (active?.codex_alive === false && active.codex_status === 'running')
         add('codex_process', 'Codex 异常', 'Codex 进程已退出，等待 Worker 处理');

@@ -51,10 +51,12 @@ const identity = row => row?.task_id && row?.run_id ? `${row.task_id}:${row.run_
 const recovering = new Set(['retry_wait', 'waiting_dependency', 'recovering']);
 const automaticRecoveryStates = new Set(['retry_wait', 'recovering']);
 const retryableCodexFailures = new Set(['cli_failed', 'result_missing', 'rate_limit', 'rate_limited', 'session_invalid']);
+const retryableCodexStatuses = new Set(['rate_limited', 'session_invalid', 'failed']);
+const nonRetryableCodexStatuses = new Set(['auth_error', 'timeout']);
 const instant = value => Number.isFinite(Date.parse(value));
 const connectionFailures = new Set(['connection', 'connection_error']);
-const connectionSignal = row => row?.codex_status === 'connection_error'
-  || connectionFailures.has(row?.recovery?.failure_code);
+const connectionSignal = row => !nonRetryableCodexStatuses.has(row?.codex_status)
+  && (row?.codex_status === 'connection_error' || connectionFailures.has(row?.recovery?.failure_code));
 function connectionAttemptState(row) {
   if (row?.stage !== 'running' || !connectionSignal(row)) return 'none';
   const budget = row.budget || {}, used = budget.codex_attempts_used, limit = budget.codex_attempts_limit;
@@ -63,7 +65,8 @@ function connectionAttemptState(row) {
 }
 const exhaustedConnection = row => connectionAttemptState(row) === 'exhausted';
 function automaticTaskRecovery(row) {
-  if (row?.stage !== 'running' || !automaticRecoveryStates.has(row.recovery?.state)
+  if (row?.stage !== 'running' || nonRetryableCodexStatuses.has(row.codex_status)
+      || !automaticRecoveryStates.has(row.recovery?.state)
       || !retryableCodexFailures.has(row.recovery?.failure_code)) return false;
   const budget = row.budget || {}, used = budget.codex_attempts_used, limit = budget.codex_attempts_limit;
   return Number.isInteger(used) && used >= 0 && Number.isInteger(limit) && limit > 0
@@ -112,9 +115,10 @@ function faults(snapshot, previous, references, now, detectedAt, firstSeen) {
   );
   for (const error of CODEX_ERRORS) {
     const code = `codex_${error}`;
-    const managed = row => error === 'connection_error' && connectionAttemptState(row) === 'retrying';
+    const managed = row => error === 'connection_error' ? connectionAttemptState(row) === 'retrying'
+      : retryableCodexStatuses.has(error) && row.codex_status === error && automaticTaskRecovery(row);
     const bad = error === 'connection_error' ? active.filter(exhaustedConnection)
-      : active.filter(row => row.codex_status === error && !exhaustedConnection(row));
+      : active.filter(row => row.codex_status === error && !exhaustedConnection(row) && !managed(row));
     check(code, bad.length > 0, error === 'connection_error' && laterConnectionSuccess
       || taskKnown(code, row => CODEX_OK.has(row.codex_status) || row.recovery?.state === 'recovered'
       || managed(row) || ['sealing', 'publish_pending', 'published'].includes(row.stage)
