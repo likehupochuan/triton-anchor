@@ -7,10 +7,16 @@
 结果与所选文件随同一 Git 提交发布。页面展示所有检查状态、审查结论和文件链接；未选择、未执行和不适用的检查保留原始状态及说明，未选中或超预算的文件保留在主机，并说明省略原因。PR 评论只列出实际执行的检查，并链接回本页面查看完整记录。
 全量算子视图只显示真实 full FlagGems 结果；性能读取任务测量和同条件比较，无数据时明确留空。
 任务详情分别展示 `environment.variants.base` 与 `candidate` 的 Profile；
-全量算子、后端汇总及性能视图使用 candidate 的 Profile。单环境结果读取 `environment.profile` 或
-`generation`；环境信息缺失时显示“未记录”，不根据目标分支或另一侧环境推断。
+后端汇总及性能视图只使用 candidate 明确 `backend_enabled=true` 且记录 `backend_profile` 的结果，
+不因出现 `backend_*` 检查而推断后端能力。后端汇总按真实后端名保留最近一次已执行的后端检查，
+第一列显示 `backend_profile`（如 `sophgo-cmodel`），Triton/Profile 单列显示 `profile`（如 `triton-3.0`）。
+性能来源和全量算子标题同样分别标注后端与 Profile；各性能指标独立保留最近一次有效测量。
+单环境结果读取同层的 `backend_enabled`、`backend_profile` 及 `profile`/`generation`。
+缺少后端身份的记录仍在任务视图中保留，不借用 base 或通用 Profile 推断；缺少 Triton/Profile 时显示“未记录”。
 仓库中的初始 feed 为空，没有展示样例成功数据。
 接收器也读取结果仓库 `runs/` 中的历史结果及旧版 `delivery-summary.txt` 对应的真实算子/性能报告。
+旧版摘要明确记录的 `backend_profile` 转为候选后端身份；只有该字段存在时才标记后端能力，
+`triton_profile`、`triton_version` 按原始记录保留，缺失时不从后端名或分支名补造。
 历史记录只用于展示，不重跑、不回写旧任务的 GitHub 门禁；全量算子和各性能指标分别保留最近一次有效数据，
 标注来源提交与测量时间，新任务未选择或尚未完成这些检查时不会清空历史数据。
 

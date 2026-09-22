@@ -119,7 +119,7 @@ async function loadData() {
 function renderHeader() {
   $("#generatedAt").textContent = (state.manifest.mode === "mock" ? "界面样例（非真实验证结果） · " : "") + `数据更新：${formatDate(state.manifest.generated_at)}`;
   $("#schemaVersion").textContent = "全量算子与后端性能结果";
-  $("#fullRunBackend").textContent = state.fullTest.run.backend;
+  $("#fullRunBackend").textContent = [state.fullTest.run.backend, state.fullTest.run.profile].filter(Boolean).join(' · ');
   $("#fullRunSha").textContent = [state.fullTest.run.sha.slice(0, 12),
     state.fullTest.run.measured_at ? formatDate(state.fullTest.run.measured_at) : ''].filter(Boolean).join(' · ');
   const csv = [["序号","算子","状态","失败阶段","耗时(ms)"],...state.fullTest.operators.map(row => [row.index,row.name,row.status,row.failure_stage,row.duration_ms])]
@@ -226,7 +226,8 @@ function renderBackends() {
         : "--";
       return `
         <tr>
-          <td><strong>${escapeHtml(backend.name)}</strong><br><small>${escapeHtml(backend.profile)}</small></td>
+          <td><strong>${escapeHtml(backend.name)}</strong></td>
+          <td>${escapeHtml(backend.profile || '未记录')}</td>
           <td>${statusBadge(backend.state)}</td>
           <td>${statusBadge(tests.backend)}</td>
           <td>${statusBadge(tests.compile_time)}</td>
@@ -238,6 +239,7 @@ function renderBackends() {
         </tr>`;
     })
     .join("");
+  $("#backendEmpty").hidden = visibleBackends.length !== 0;
 }
 
 function renderPerformanceList(target, rows, valueKey, maxValue, formatter) {
@@ -269,7 +271,7 @@ function renderPerformance() {
   for (const [id, key] of [['compileSource','compile_time'],['passSource','pass_profile'],['irSource','ir_serialization']]) {
     const measurement = state.performance[key];
     $('#' + id).textContent = measurement.sha
-      ? [measurement.backend, measurement.sha.slice(0, 12), formatDate(measurement.measured_at)].filter(Boolean).join(' · ')
+      ? [measurement.backend, measurement.profile, measurement.sha.slice(0, 12), formatDate(measurement.measured_at)].filter(Boolean).join(' · ')
       : '尚无有效测量';
   }
 

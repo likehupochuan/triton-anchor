@@ -4,6 +4,9 @@ const { normalize, business, blockerGroups, environmentProfile } = require('../.
 const { assess: assessHealth, readSnapshot, readAlerts, readHealth, monitorReading, source: healthSource, taskFacts,
   historyEvents, eventText } = require('../../../dashboard/health.js');
 const task = (id, date) => ({task_id:id, repository:'example/repo',pr_number:7,target_branch:'main',head_sha:('f'+id).repeat(20),tested_sha:id.repeat(40),captured_at:date});
+const backendEnvironment = (backend = 'sophgo-cmodel', profile = 'triton-3.0') => ({variants:{candidate:{
+  backend_enabled:true, backend_profile:backend, profile,
+}}});
 
 const healthNow = Date.parse('2026-09-17T10:00:00Z');
 function healthyWorker() {
@@ -270,21 +273,22 @@ test('dashboard preserves not-selected, skipped, and not-applicable as distinct 
 });
 
 test('full view excludes impact-only selection and preserves failing operator details', () => {
-  const run = {task:task('a','2026-09-10'),result:{environment:{profile:'fixture'},checks:[{tool_id:'flaggems',status:'fail',details:{"flaggems-summary":{mode:'full',results:[{op:'softmax',test_status:'失败',first_failed_stage:'准确率验证',duration_seconds:2}]}}}]}};
+  const run = {task:task('a','2026-09-10'),result:{environment:{profile:'fixture',backend_enabled:true,backend_profile:'fixture-backend'},checks:[{tool_id:'flaggems',status:'fail',details:{"flaggems-summary":{mode:'full',results:[{op:'softmax',test_status:'失败',first_failed_stage:'准确率验证',duration_seconds:2}]}}}]}};
   let data = business(normalize({schema:'triton-anchor-dashboard',tasks:[run]}));
   assert.equal(data.fullTest.operators[0].status,'failed');
   assert.equal(data.fullTest.operators[0].failure_stage,'准确率验证');
-  assert.equal(data.fullTest.run.backend,'fixture');
+  assert.equal(data.fullTest.run.backend,'fixture-backend');
+  assert.equal(data.fullTest.run.profile,'fixture');
   run.result.checks[0].details["flaggems-summary"].mode='impact';
   data = business(normalize({schema:'triton-anchor-dashboard',tasks:[run]}));
   assert.equal(data.fullTest.operators.length,0);
 });
 
 test('variant environments preserve both sources and use candidate for business results', () => {
-  const environment = {variants:{base:{profile:'triton-3.0',backend_enabled:true},
-    candidate:{profile:'triton-3.1',backend_enabled:false}}};
+  const environment = {variants:{base:{profile:'triton-3.0',backend_enabled:true,backend_profile:'sophgo-cmodel'},
+    candidate:{profile:'triton-3.2',backend_enabled:false,backend_profile:'sophgo-cmodel'}}};
   const feed = {schema:'triton-anchor-dashboard',tasks:[{task:task('a','2026-09-10'),result:{environment,checks:[
-    {tool_id:'backend_tests',status:'not_applicable'},
+    {tool_id:'backend_tests',status:'fail'},
     {tool_id:'compile_time',status:'pass',details:{candidate:{summary:{add:{compile_est:{median_ms:7}}}}}},
   ]}}]};
   const normalized = normalize(feed);
@@ -292,20 +296,25 @@ test('variant environments preserve both sources and use candidate for business 
   assert.equal(environmentProfile(environment,'base'),'triton-3.0');
   let data = business(normalized);
   assert.equal(data.backends.backends.length,0);
-  assert.equal(data.performance.backend,'triton-3.1');
-  assert.equal(data.performance.compile_time.backend,'triton-3.1');
-  environment.variants.candidate = {profile:'triton-3.0',backend_enabled:true};
+  assert.equal(data.performance.backend,'尚无有效测量');
+  assert.equal(data.performance.compile_time.kernels.length,0);
+  environment.variants.candidate = {profile:'triton-3.0',backend_enabled:true,backend_profile:'sophgo-cmodel'};
   feed.tasks[0].result.checks = [{tool_id:'backend_tests',status:'pass'},
     {tool_id:'flaggems',status:'pass',details:{'flaggems-summary':{mode:'full',results:[{op:'add',exit_code:0,passed:1}]}}}];
   data = business(normalize(feed));
   assert.equal(data.backends.backends[0].profile,'triton-3.0');
-  assert.equal(data.fullTest.run.backend,'triton-3.0');
+  assert.equal(data.backends.backends[0].name,'sophgo-cmodel');
+  assert.equal(data.fullTest.run.backend,'sophgo-cmodel');
+  delete environment.variants.candidate.backend_profile;
+  assert.equal(business(normalize(feed)).backends.backends.length,0);
   delete environment.variants.candidate;
   environment.profile = 'legacy';
+  environment.backend_enabled = true;
+  environment.backend_profile = 'sophgo-cmodel';
   assert.equal(environmentProfile(environment),'');
   data = business(normalize(feed));
-  assert.equal(data.fullTest.run.backend,'未记录环境');
-  assert.equal(data.backends.backends[0].profile,'未记录环境');
+  assert.equal(data.fullTest.run.backend,'未记录后端');
+  assert.equal(data.backends.backends.length,0);
 });
 
 test('empty initial feed does not create placeholder success data', () => {
@@ -318,11 +327,12 @@ test('empty initial feed does not create placeholder success data', () => {
 test('historical operator and per-metric results survive pending or partially selected tasks', () => {
   const feed = {schema:'triton-anchor-dashboard',tasks:[
     {task:task('c','2026-09-12'),status:'pending'},
-    {task:task('b','2026-09-11'),historical:true,result:{completed_at:'2026-09-11',checks:[
+    {task:task('b','2026-09-11'),historical:true,result:{completed_at:'2026-09-11',environment:backendEnvironment(),checks:[
+      {tool_id:'backend_tests',status:'pass'},
       {tool_id:'compile_time',status:'pass',details:{candidate:{summary:{add:{compile_est:{median_ms:7}}}}}},
       {tool_id:'flaggems',status:'not_selected'},
     ]}},
-    {task:task('a','2026-09-10'),historical:true,result:{completed_at:'2026-09-10',environment:{profile:'legacy'},checks:[
+    {task:task('a','2026-09-10'),historical:true,result:{completed_at:'2026-09-10',environment:backendEnvironment('sophgo-cmodel',''),checks:[
       {tool_id:'backend_tests',status:'pass'},
       {tool_id:'flaggems',status:'fail',details:{'flaggems-summary':{mode:'full',results:[{op:'add',test_status:'失败'}]}}},
       {tool_id:'compile_time',status:'pass',details:{candidate:{summary:{add:{compile_est:{median_ms:12}}}}}},
@@ -333,17 +343,24 @@ test('historical operator and per-metric results survive pending or partially se
   assert.deepEqual(normalized.runs.map(run=>run.is_current),[true,false,false]);
   assert.equal(data.fullTest.operators[0].name,'add');
   assert.equal(data.fullTest.run.sha,'a'.repeat(40));
-  assert.equal(data.backends.backends[0].profile,'legacy');
+  assert.equal(data.backends.backends.length,1);
+  assert.equal(data.backends.backends[0].name,'sophgo-cmodel');
+  assert.equal(data.backends.backends[0].profile,'triton-3.0');
+  assert.equal(data.backends.backends[0].sha,'b'.repeat(40));
   assert.equal(data.performance.compile_time.kernels[0].candidate_ms,7);
   assert.equal(data.performance.compile_time.sha,'b'.repeat(40));
   assert.equal(data.performance.pass_profile.hotspots[0].median_ms,3);
   assert.equal(data.performance.pass_profile.sha,'a'.repeat(40));
+  assert.equal(data.performance.compile_time.backend,'sophgo-cmodel');
+  assert.equal(data.performance.compile_time.profile,'triton-3.0');
+  assert.equal(data.performance.pass_profile.backend,'sophgo-cmodel');
+  assert.equal(data.performance.pass_profile.profile,'');
 });
 
 
 test('performance views read runner candidate and comparison report keys', () => {
   const data = business(normalize({schema:'triton-anchor-dashboard',tasks:[{
-    task:task('a','2026-09-10'),status:'pass',result:{checks:[
+    task:task('a','2026-09-10'),status:'pass',result:{environment:backendEnvironment(),checks:[
       {tool_id:'compile_time',status:'pass',details:{candidate:{summary:{add:{compile_est:{median_ms:12}}}},comparison:{kernels:[{kernel:'add',change_ratio:0.2}]}}},
       {tool_id:'pass_profile',status:'pass',details:{candidate:{summary:{add:{passes:{canonicalize:{wall_ms:{median_ms:3}}}}}}}},
       {tool_id:'ir_serialization',status:'pass',details:{candidate:{summary:{add:{metrics:{serialize:{median_ms:2}}}}}}}
@@ -364,7 +381,7 @@ test('execution errors and failed checks stay separate through task filters and 
   const vm=require('node:vm'), fs=require('node:fs');
   const runs=normalize({schema:'triton-anchor-dashboard',tasks:['fail','infra_error'].map((status,index)=>({
     task:{...task(String(index),'2026-09-10'),pr_number:index+1},status,
-    result:{status,environment:{profile:'profile-'+index},checks:[
+    result:{status,environment:backendEnvironment('backend-'+index),checks:[
       {tool_id:'backend_tests',status},
       {tool_id:'flaggems',status,details:{'flaggems-summary':{mode:'full',results:[
         {op:'a',test_status:'失败'}, {op:'b',test_status:'infra_error'},

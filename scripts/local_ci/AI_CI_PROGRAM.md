@@ -172,6 +172,10 @@ limitations 补充对审查结论的影响，不重复抄写检查记录。必�
 
 ## 最终结果
 
+结果中的 `environment.variants` 由 Worker 从可信运行环境写入：`profile` 表示 Triton/LLVM 环境配置，
+`backend_profile` 表示真实后端配置（来自该侧 `BACKEND_PROFILE`），两者不能混用。
+未启用后端时 `backend_enabled=false`、`backend_profile` 为空；不要根据测试名称或另一侧环境补填。
+
 面向贡献者与审核者的 `summary`、检查/审查说明、发现、阻塞原因和限制说明均使用中文，明确区分
 已执行、未执行和不可比的验证。正文使用“CI 流程验证”“后端测试”等可读名称，不用内部工具 ID 代替说明。
 版本比较使用“base”和“候选”（candidate，PR 任务中为合并后验证源码），不直接使用 candidate 或 baseline 称呼版本。

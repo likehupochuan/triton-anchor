@@ -138,6 +138,7 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
                 "run_id": run_id,
                 "variants": {
                     variant: {**source, "profile": variant, "backend_enabled": variant == "base",
+                              "env": {"BACKEND_PROFILE": "sophgo-cmodel"},
                               "environment_fingerprint": variant, "image_id": "fixture"}
                     for variant, source in task["variants"].items()
                 },
@@ -225,6 +226,8 @@ def test_run_stops_collects_and_publishes_without_reexecuting_on_network_failure
     assert runtimes["base"]["llvm_hash"] == "f" * 40
     assert runtimes["candidate"]["llvm_hash"] == task["llvm_hash"]
     assert runtimes["base"]["source_sha"] == task["base_sha"]
+    assert runtimes["base"]["backend_profile"] == "sophgo-cmodel"
+    assert runtimes["candidate"]["backend_profile"] == ""
     assert events[-3:] == ["stop", "collect", "destroy"]
     worker.journal = Journal(tmp_path)
     assert worker.journal.register(task)["run_id"] == row["run_id"]

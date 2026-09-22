@@ -11,6 +11,10 @@
     const selected = environment.variants ? environment.variants[variant] : environment;
     return selected?.profile || selected?.generation || '';
   }
+  function backendProfile(environment = {}) {
+    const candidate = environment.variants ? environment.variants.candidate : environment;
+    return candidate?.backend_enabled === true ? candidate.backend_profile || '' : '';
+  }
   const blockerCategories = {
     environment: {label:'服务器环境问题', hint:'检查服务器配置、容器、依赖版本、权限和资源；不据此认定 PR 代码有问题。'},
     network: {label:'网络 / 连接问题', hint:'检查目标服务连通性、DNS、代理或 TLS；结合原始错误确认故障位置。'},
@@ -169,17 +173,18 @@
       failure_stage:(row.first_failed_stage === '全部通过' ? '' : row.first_failed_stage) || row.timeout_reason || '', duration_ms:row.duration_seconds * 1000,
       log_url:full?.artifacts.find(a => row.log_file && a.path.endsWith(row.log_file) && a.url)?.url || ''}));
     const latestBackends = new Map();
-    for (const run of runs) {
-      const profile = environmentProfile(run.environment) || '未记录环境';
-      if (run.checks.some(c => c.id.startsWith('backend_') && ['passed','failed','error','cancelled'].includes(c.status)) && !latestBackends.has(profile)) latestBackends.set(profile,run);
+    const backendRuns = runs.filter(run => backendProfile(run.environment));
+    for (const run of backendRuns) {
+      const backend = backendProfile(run.environment);
+      if (run.checks.some(c => c.id.startsWith('backend_') && ['passed','failed','error','cancelled'].includes(c.status)) && !latestBackends.has(backend)) latestBackends.set(backend,run);
     }
-    const backends = [...latestBackends].map(([profile,run]) => ({id:profile,name:profile,profile,
+    const backends = [...latestBackends].map(([backend,run]) => ({id:backend,name:backend,profile:environmentProfile(run.environment),
       state:run.conclusion === 'success' ? 'passed' : status(run.conclusion),sha:run.tested_sha,tested_at:run.completed_at,
       tests:{backend:run.checks.find(c => c.id === 'backend_tests')?.status || 'unknown',
         ...Object.fromEntries(['compile_time','pass_profile','ir_serialization'].map(id => [id,run.checks.find(c => c.id === id)?.status || 'unknown']))},
       result_url:run.result_url}));
     const measurements = Object.fromEntries(['compile_time','pass_profile','ir_serialization'].map(id=>[id,
-      runs.find(run=>run.checks.some(c=>c.id===id && Object.keys(c.details?.candidate?.summary || {}).length))]));
+      backendRuns.find(run=>run.checks.some(c=>c.id===id && Object.keys(c.details?.candidate?.summary || {}).length))]));
     const measured = measurements.compile_time || measurements.pass_profile || measurements.ir_serialization;
     const compile = measurements.compile_time?.checks.find(c => c.id === 'compile_time')?.details || {};
     const passes = measurements.pass_profile?.checks.find(c => c.id === 'pass_profile')?.details || {};
@@ -197,11 +202,11 @@
       Object.entries(value.metrics || {}).map(([name,timing]) => ({name:kernel + ' · ' + name,median_ms:timing.median_ms})))
       .filter(row => Number.isFinite(row.median_ms));
     return {manifest:{generated_at:data.generated_at,mode:data.data_mode === 'fixture' ? 'mock' : 'live',downloads:{}},
-      fullTest:{run:{backend:full ? environmentProfile(full.environment) || '未记录环境' : '尚无全量算子结果',sha:full?.tested_sha || '',measured_at:full?.completed_at},operators},
-      backends:{backends},performance:{backend:measured ? environmentProfile(measured.environment) || '未记录环境' : '尚无有效测量',
-        compile_time:{kernels:compileRows,backend:environmentProfile(measurements.compile_time?.environment),sha:measurements.compile_time?.tested_sha,measured_at:measurements.compile_time?.completed_at},
-        pass_profile:{hotspots:passRows,backend:environmentProfile(measurements.pass_profile?.environment),sha:measurements.pass_profile?.tested_sha,measured_at:measurements.pass_profile?.completed_at},
-        ir_serialization:{metrics:irRows,backend:environmentProfile(measurements.ir_serialization?.environment),sha:measurements.ir_serialization?.tested_sha,measured_at:measurements.ir_serialization?.completed_at}}};
+      fullTest:{run:{backend:full ? backendProfile(full.environment) || '未记录后端' : '尚无全量算子结果',profile:environmentProfile(full?.environment),sha:full?.tested_sha || '',measured_at:full?.completed_at},operators},
+      backends:{backends},performance:{backend:measured ? backendProfile(measured.environment) : '尚无有效测量',
+        compile_time:{kernels:compileRows,backend:backendProfile(measurements.compile_time?.environment),profile:environmentProfile(measurements.compile_time?.environment),sha:measurements.compile_time?.tested_sha,measured_at:measurements.compile_time?.completed_at},
+        pass_profile:{hotspots:passRows,backend:backendProfile(measurements.pass_profile?.environment),profile:environmentProfile(measurements.pass_profile?.environment),sha:measurements.pass_profile?.tested_sha,measured_at:measurements.pass_profile?.completed_at},
+        ir_serialization:{metrics:irRows,backend:backendProfile(measurements.ir_serialization?.environment),profile:environmentProfile(measurements.ir_serialization?.environment),sha:measurements.ir_serialization?.tested_sha,measured_at:measurements.ir_serialization?.completed_at}}};
   }
   global.LocalCIData = {normalize,business,status,safeUrl,blockerGroups,environmentProfile};
   if (typeof module !== 'undefined' && module.exports) module.exports = global.LocalCIData;

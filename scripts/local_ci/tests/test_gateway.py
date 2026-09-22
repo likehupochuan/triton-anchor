@@ -1245,6 +1245,9 @@ class GatewayBehaviorTests(unittest.TestCase):
         self.assertTrue(all(row["historical"] for row in rows))
         self.assertNotIn("private", json.dumps(rows))
         old = next(row for row in rows if row["task"]["target_branch"] == "old-main")
+        self.assertEqual(old["result"]["environment"]["variants"]["candidate"], {
+            "backend_enabled": True, "backend_profile": "sophgo-cmodel", "profile": "", "triton_version": "",
+        })
         self.assertEqual(old["result"]["checks"][1]["details"]["flaggems-summary"]["mode"], "full")
         self.assertTrue(old["artifact_urls"]["flaggems-summary.json"].startswith("https://gitee.com/"))
         self.assertEqual(len(g.history_rows(store, [{"task": self.task, "result": result}])), 1)

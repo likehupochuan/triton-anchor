@@ -465,10 +465,12 @@ class Worker:
             )
             environment = {"variants": {
                 variant: {
-                    key: runtime[key] for key in (
+                    **{key: runtime[key] for key in (
                         "source_sha", "triton_version", "profile", "llvm_hash",
                         "backend_enabled", "environment_fingerprint", "image_id",
-                    )
+                    )},
+                    "backend_profile": runtime.get("env", {}).get("BACKEND_PROFILE", "")
+                    if runtime["backend_enabled"] else "",
                 }
                 for variant, runtime in generation["variants"].items()
             }}

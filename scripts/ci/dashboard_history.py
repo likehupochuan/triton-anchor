@@ -88,9 +88,16 @@ def history_rows(results, current):
                     "pr_number": 0, "head_sha": sha, "tested_sha": sha, "captured_at": date,
                     "target_branch": fields.get("branch", "历史运行"), "full": fields.get("flaggems_test_mode") == "full"}
             outcome = "pass" if fields.get("status") == "0" else "fail"
+            backend_profile = fields.get("backend_profile", "").strip()
+            candidate = {
+                "backend_profile": backend_profile,
+                "backend_enabled": bool(backend_profile),
+                "profile": fields.get("triton_profile", ""),
+                "triton_version": fields.get("triton_version", ""),
+            }
             result = {"run_id": run_id, "completed_at": date, "status": outcome, "checks": checks,
                       "reviews": [], "findings": [], "blocking_reasons": [], "artifacts": artifacts,
-                      "summary": "历史版本的测试与性能记录", "environment": {"profile": fields.get("backend_profile", "历史环境")}}
+                      "summary": "历史版本的测试与性能记录", "environment": {"variants": {"candidate": candidate}}}
             rows.append({"task": task, "result": result, "status": outcome, "historical": True,
                          "result_url": _url(results, path), "artifact_urls": links})
         except (OSError, ValueError, TypeError, KeyError):
