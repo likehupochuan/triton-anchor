@@ -86,6 +86,11 @@ test('recovery facts separate phase, budget and progress; long silence only warn
   assert.ok(!unknownBudget.issues.some(row=>row.code==='codex_connection_error'));
   assert.equal(unknownBudget.cards[3].text,'自动重连中 · 尝试次数未上报');
   current.budget=budget;
+  current.codex_status='running';current.budget.codex_attempts_used=4;current.recovery.state='recovering';
+  const internalRecovery=assessHealth(worker,{now:healthNow});
+  assert.ok(!internalRecovery.issues.some(row=>row.code==='task_recovering'));
+  assert.equal(internalRecovery.cards[3].text,'自动恢复中 · 4 / 10');
+  current.codex_status='connection_error';
   current.budget.codex_attempts_used=10;current.recovery.state='recovering';
   assert.ok(!assessHealth(worker,{now:healthNow}).issues.some(row=>row.code==='codex_connection_error'));
   current.recovery.state='retry_wait';

@@ -49,6 +49,8 @@
   const fresh = (value, now) => age(value, now) >= -60 && age(value, now) <= source.staleSeconds;
   const date = value => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('zh-CN', {hour12: false, timeZone:'Asia/Shanghai'}) : '未上报';
   const connectionFailures = new Set(['connection', 'connection_error']);
+  const automaticRecoveryStates = new Set(['retry_wait', 'recovering']);
+  const retryableCodexFailures = new Set(['cli_failed', 'result_missing', 'rate_limit', 'rate_limited', 'session_invalid']);
   const connectionSignal = task => task?.codex_status === 'connection_error'
     || connectionFailures.has(task?.recovery?.failure_code);
   function connectionAttemptState(task) {
@@ -61,6 +63,13 @@
     && ['retry_wait', 'recovering'].includes(task.recovery?.state)
     && connectionAttemptState(task) !== 'exhausted';
   const exhaustedConnection = task => connectionAttemptState(task) === 'exhausted';
+  function automaticTaskRecovery(task) {
+    if (task?.stage !== 'running' || !automaticRecoveryStates.has(task.recovery?.state)
+        || !retryableCodexFailures.has(task.recovery?.failure_code)) return false;
+    const budget = task.budget || {}, used = budget.codex_attempts_used, limit = budget.codex_attempts_limit;
+    return Number.isInteger(used) && used >= 0 && Number.isInteger(limit) && limit > 0
+      && (used < limit || used === limit && task.recovery.state === 'recovering');
+  }
 
   function assess(worker, {now = Date.now(), workerError = ''} = {}) {
     const issues = [], seen = new Set();
@@ -80,7 +89,8 @@
     ];
     const connectionPending = current && active?.stage === 'running'
       && connectionSignal(active) && !exhaustedConnection(active);
-    const automaticRecovery = connectionPending && automaticConnectionRetry(active);
+    const automaticReconnect = connectionPending && automaticConnectionRetry(active);
+    const automaticRecovery = current && automaticTaskRecovery(active);
     if (current) {
       // The five-minute collector already measures the three-minute Worker heartbeat.
       const workerOk = poller.alive === true && poller.heartbeat_stale === false && age(poller.heartbeat_at, Date.parse(worker.collected_at)) <= 180;
@@ -99,8 +109,9 @@
       const connectionExhausted = exhaustedConnection(active);
       const attemptText = Number.isInteger(attempts?.codex_attempts_used) && Number.isInteger(attempts?.codex_attempts_limit)
         ? attempts.codex_attempts_used + ' / ' + attempts.codex_attempts_limit : '尝试次数未上报';
-      cards[3] = automaticRecovery
+      cards[3] = automaticReconnect
         ? {name: 'Codex', text: '自动重连中 · ' + attemptText, tone: 'info'}
+        : automaticRecovery ? {name: 'Codex', text: '自动恢复中 · ' + attemptText, tone: 'info'}
         : connectionPending ? {name: 'Codex', text: '连接异常，等待恢复 · ' + attemptText, tone: 'info'}
         : {name: 'Codex', text: connectionExhausted
           ? '连接失败 · ' + attemptText + ' 次尝试已用尽'
@@ -125,7 +136,8 @@
           add('task_no_progress', ...incidents.task_no_progress, 'warn');
         if (task.stage === 'running' && age(task.last_progress_at, now) > (worker.thresholds?.progress_stalled_seconds || 3600))
           add('task_stalled', ...incidents.task_stalled, 'warn');
-        if (['recovering', 'retry_wait', 'waiting_dependency'].includes(task.recovery?.state) && !connectionSignal(task))
+        if (['recovering', 'retry_wait', 'waiting_dependency'].includes(task.recovery?.state)
+          && !connectionSignal(task) && !automaticTaskRecovery(task))
           add('task_recovering', ...incidents.task_recovering, 'warn');
         if (task.recovery?.state === 'exhausted' && !connectionSignal(task)) incident('task_recovery_exhausted');
       }
@@ -143,10 +155,11 @@
     }
     return {current, cards, issues,
       title: !worker || workerError ? '健康数据不可用' : !current ? '心跳快照已过期' : issues.length ? '发现异常或待确认项'
-        : automaticRecovery ? '服务器正常，Codex 正在自动重连'
+        : automaticReconnect ? '服务器正常，Codex 正在自动重连'
+          : automaticRecovery ? '服务器正常，Codex 正在自动恢复'
           : connectionPending ? '服务器正常，Codex 连接等待恢复' : '服务器已上报状态正常',
       tone: issues.some(row => row.tone === 'bad') ? 'bad' : issues.length ? 'warn'
-        : automaticRecovery || connectionPending ? 'info' : 'good'};
+        : automaticReconnect || automaticRecovery || connectionPending ? 'info' : 'good'};
   }
 
   async function readGitee(url, message) {

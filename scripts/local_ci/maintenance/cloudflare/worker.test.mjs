@@ -437,14 +437,20 @@ test('failed close is re-evaluated against unreadable, old or newly faulty snaps
   }
 });
 
-test('Codex connection alerts only after the tenth attempt finishes and later activity resolves it', async () => {
+test('automatic Codex recovery stays quiet and connection alerts only after the tenth attempt finishes', async () => {
   const h = fixture();
-  const task = {task_id: 'task-a', run_id: 'run-1', stage: 'running', codex_status: 'connection_error',
-    recovery: {state: 'retry_wait', failure_code: 'result_missing', action: 'resume'},
-    budget: {codex_attempts_used: 2, codex_attempts_limit: 10,
+  const task = {task_id: 'task-a', run_id: 'run-1', stage: 'running', codex_status: 'running', codex_alive: true,
+    recovery: {state: 'recovering', failure_code: 'result_missing', action: 'resume'},
+    budget: {codex_attempts_used: 4, codex_attempts_limit: 10,
       codex_deadline_at: new Date(h.now + 3600000).toISOString()}};
   h.health.tasks_available = true;
   h.health.tasks = [task]; h.health.active_task = task;
+  await h.run();
+  assert.equal(h.issues.length, 0, 'an in-budget internal recovery is not an incident');
+  task.codex_status = 'connection_error';
+  task.recovery.state = 'retry_wait';
+  task.budget.codex_attempts_used = 2;
+  h.advance();
   await h.run();
   assert.equal(h.issues.length, 0, 'an in-budget retry is not an incident');
   task.budget.codex_attempts_used = 10;

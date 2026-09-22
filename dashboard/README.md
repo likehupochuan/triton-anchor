@@ -44,4 +44,4 @@ Gitee 读取失败时，页面从 `source.cacheUrl` 读取 Cloudflare 定时保�
 「Cloudflare 告警记录」匿名读取同一健康仓库最近 50 条更新的 Issues，筛选当前 Worker 的自动告警标记，展示最近 10 条及详情入口。它与实时健康快照分开展示：Issue 已关闭不代表服务已经恢复，没有 Issue 也不表示外部监测已启用。页面不触发通知；无人打开页面时的检测和 Issue 写入由独立 [Cloudflare Worker](../scripts/local_ci/maintenance/cloudflare/README.md) 执行，无需为每次告警重新发布 Pages。
 本地静态预览不代表已部署 Pages，也不代表真实工具链或生产门禁验收通过。
 
-任务执行与恢复区展示动作、次数、截止时间和真实容器状态；结果上传等待独立显示。Codex 连接异常在前 9 次和仍在执行的第 10 次只显示自动重连状态，第 10 次失败后才进入当前异常和 Cloudflare 告警。页面读取缓存不写 KV。任务/上传采集失败显示未知，不用空列表宣告恢复。健康页面测试：`node --test scripts/local_ci/tests/dashboard.test.cjs`。
+任务执行与恢复区展示动作、次数、截止时间和真实容器状态；结果上传等待独立显示。预算内的 Codex 内部恢复只显示当前恢复状态，不建立 Cloudflare 告警；连接异常在前 9 次和仍在执行的第 10 次只显示自动重连状态，第 10 次失败后才进入当前异常和 Cloudflare 告警。页面读取缓存不写 KV。任务/上传采集失败显示未知，不用空列表宣告恢复。健康页面测试：`node --test scripts/local_ci/tests/dashboard.test.cjs`。

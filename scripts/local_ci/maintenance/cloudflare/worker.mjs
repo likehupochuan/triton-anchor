@@ -49,6 +49,8 @@ const READ_ERRORS = {timeout: '请求超时', network_error: '网络请求失败
 const rows = value => Array.isArray(value) ? value : [];
 const identity = row => row?.task_id && row?.run_id ? `${row.task_id}:${row.run_id}` : '';
 const recovering = new Set(['retry_wait', 'waiting_dependency', 'recovering']);
+const automaticRecoveryStates = new Set(['retry_wait', 'recovering']);
+const retryableCodexFailures = new Set(['cli_failed', 'result_missing', 'rate_limit', 'rate_limited', 'session_invalid']);
 const instant = value => Number.isFinite(Date.parse(value));
 const connectionFailures = new Set(['connection', 'connection_error']);
 const connectionSignal = row => row?.codex_status === 'connection_error'
@@ -60,6 +62,13 @@ function connectionAttemptState(row) {
   return used < limit || used === limit && row.recovery?.state === 'recovering' ? 'retrying' : 'exhausted';
 }
 const exhaustedConnection = row => connectionAttemptState(row) === 'exhausted';
+function automaticTaskRecovery(row) {
+  if (row?.stage !== 'running' || !automaticRecoveryStates.has(row.recovery?.state)
+      || !retryableCodexFailures.has(row.recovery?.failure_code)) return false;
+  const budget = row.budget || {}, used = budget.codex_attempts_used, limit = budget.codex_attempts_limit;
+  return Number.isInteger(used) && used >= 0 && Number.isInteger(limit) && limit > 0
+    && (used < limit || used === limit && row.recovery.state === 'recovering');
+}
 
 // Missing telemetry never proves recovery. Remember which task/service caused each fault.
 function faults(snapshot, previous, references, now, detectedAt, firstSeen) {
@@ -112,8 +121,9 @@ function faults(snapshot, previous, references, now, detectedAt, firstSeen) {
         && ['pass', 'fail'].includes(row.result_status)), bad.map(identity).filter(Boolean));
   }
   const taskChecks = [
-    ['task_recovering', row => recovering.has(row.recovery?.state) && !connectionSignal(row),
-    row => connectionSignal(row)
+    ['task_recovering', row => recovering.has(row.recovery?.state)
+      && !connectionSignal(row) && !automaticTaskRecovery(row),
+    row => connectionSignal(row) || automaticTaskRecovery(row)
       || ['normal', 'recovered', 'exhausted'].includes(row.recovery?.state) || completed(row) || endedFailed(row)],
     ['task_recovery_exhausted', row => row.recovery?.state === 'exhausted' && !connectionSignal(row),
     row => connectionSignal(row) || row.recovery?.state === 'recovered' || endedFailed(row)],
