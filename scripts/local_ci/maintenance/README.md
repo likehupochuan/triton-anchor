@@ -67,7 +67,7 @@ systemctl --user start triton-anchor-local-ci.service
 | --- | --- |
 | `health.py` | 约每五分钟独立采集心跳、任务进展、恢复预算、容器退出/OOM、systemd 与磁盘状态，发布 `worker-health.json` |
 | Cloudflare Worker | 每五分钟读取公开快照，识别故障、维护告警 Issue 和健康缓存，不远程执行恢复 |
-| Worker 页面 | 展示当前执行、恢复、资源、独立上传等待及近 7 天事件 |
+| Worker 页面 | 展示当前执行、恢复、资源、独立上传等待及 Cloudflare 告警 |
 | Summary | CI Request 确认请求后即为 pending；派发后接收器最多每五分钟读取健康源显示进展，最终结果优先 |
 | 本机 Journal / systemd 日志 | 保存具体错误和私有诊断 |
 
@@ -76,10 +76,10 @@ systemctl --user start triton-anchor-local-ci.service
 Gitee 不可读不能单独证明服务器宕机。
 
 公开数据仅包含允许的状态、时间、资源与错误类别；私有路径、凭据、完整 session
-和原始异常留在本机。异常与恢复事件每任务最多 20 条、全局最多 100 条、保留近 7 天。
-近期终态用于判断故障是否结束，连续恢复保留故障原因；无任务或缺字段时显示未上报。
+和原始异常留在本机。任务的恢复状态和预算只发布当前快照，不发布历史过程；
+无任务或缺字段时显示未上报。
 
-同一连续异常复用一个 Gitee Issue，故障或恢复事件变化时更新。
+同一连续异常复用一个 Gitee Issue，当前故障集合变化时更新。
 恢复需要晚于故障证据、与同一对象匹配的新鲜正常快照；
 过期数据、缺失字段或另一任务成功不能证明恢复。
 Cloudflare 的缓存与告警规则见 [外部告警](cloudflare/README.md)。

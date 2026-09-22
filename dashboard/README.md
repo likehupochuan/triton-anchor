@@ -38,10 +38,10 @@ python3 -m http.server 8000 --directory dashboard --bind 127.0.0.1
 ```
 
 Gateway 发布时将 `_site/data/tasks.json` 复制到页面的 `data/`。
-`worker.html` 独立加载 `health.js`，展示运行概览、当前异常、服务与资源、当前任务和最近异常记录；业务页面只保留导航入口，不加载健康数据。Worker 页面每五分钟匿名读取 Gitee 文件 API 的 `snapshot/<worker>/worker-health.json`，不等待任务发布，不增加 Actions 定时任务。健康仓库、Worker ID 和 20 分钟过期阈值集中在 `health.js` 的 `source` 中；普通 raw URL 没有浏览器跨域许可，不能替代文件 API。
+`worker.html` 独立加载 `health.js`，展示运行概览、当前异常、服务与资源、当前任务和 Cloudflare 告警；业务页面只保留导航入口，不加载健康数据。Worker 页面每五分钟匿名读取 Gitee 文件 API 的 `snapshot/<worker>/worker-health.json`，不等待任务发布，不增加 Actions 定时任务。健康仓库、Worker ID 和 20 分钟过期阈值集中在 `health.js` 的 `source` 中；普通 raw URL 没有浏览器跨域许可，不能替代文件 API。
 Gitee 读取失败时，页面从 `source.cacheUrl` 读取 Cloudflare 定时保存的合并缓存，只补充读取失败的部分。遇到 Gitee 429 或 403 限流响应后冷却 15 分钟，期间直接读取备用缓存，之后恢复优先读取 Gitee。页面注明缓存来源与更新时间，心跳仍按原始采集时间判断；两边都不可用时保留已读取的数据并标记状态待确认。浏览器不写 KV，也不触发 Cloudflare 即时抓取 Gitee。启用此功能需先部署 Cloudflare Worker，再发布 Dashboard；仅更新页面不会自动部署缓存接口。
 服务、Gitee 访问、环境/磁盘、任务交付与 Codex 异常分别展示；Codex 连接、认证、限流等分类需要服务器更新后的结构化健康字段，旧快照显示未上报，不推测错误原因。心跳过期时不继续展示旧的绿色状态，浏览器读取失败也不判成服务器断网。按需 oneshot 服务未运行不算故障；不再读取旧 watchdog 文件。
 「Cloudflare 告警记录」匿名读取同一健康仓库最近 50 条更新的 Issues，筛选当前 Worker 的自动告警标记，展示最近 10 条及详情入口。它与实时健康快照分开展示：Issue 已关闭不代表服务已经恢复，没有 Issue 也不表示外部监测已启用。页面不触发通知；无人打开页面时的检测和 Issue 写入由独立 [Cloudflare Worker](../scripts/local_ci/maintenance/cloudflare/README.md) 执行，无需为每次告警重新发布 Pages。
 本地静态预览不代表已部署 Pages，也不代表真实工具链或生产门禁验收通过。
 
-任务执行与恢复区展示动作、次数、截止时间和真实容器状态；结果上传等待独立显示。近 7 天异常与恢复记录合并服务器事件及 Cloudflare 只读缓存，默认显示 20 条，可展开至最多 100 条。页面读取缓存不写 KV。任务/上传采集失败显示未知，不用空列表宣告恢复。健康页面测试：`node --test scripts/local_ci/tests/dashboard.test.cjs`。
+任务执行与恢复区展示动作、次数、截止时间和真实容器状态；结果上传等待独立显示。Codex 连接异常在前 9 次和仍在执行的第 10 次只显示自动重连状态，第 10 次失败后才进入当前异常和 Cloudflare 告警。页面读取缓存不写 KV。任务/上传采集失败显示未知，不用空列表宣告恢复。健康页面测试：`node --test scripts/local_ci/tests/dashboard.test.cjs`。

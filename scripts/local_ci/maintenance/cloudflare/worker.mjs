@@ -49,56 +49,17 @@ const READ_ERRORS = {timeout: '请求超时', network_error: '网络请求失败
 const rows = value => Array.isArray(value) ? value : [];
 const identity = row => row?.task_id && row?.run_id ? `${row.task_id}:${row.run_id}` : '';
 const recovering = new Set(['retry_wait', 'waiting_dependency', 'recovering']);
-const publicWord = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value) ? value : undefined;
-const publicSha = value => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value) ? value : undefined;
-const publicRepository = value => typeof value === 'string' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value) ? value : undefined;
 const instant = value => Number.isFinite(Date.parse(value));
 const connectionFailures = new Set(['connection', 'connection_error']);
-const connectionRecovery = row => row?.stage === 'running'
-  && ['retry_wait', 'recovering'].includes(row.recovery?.state)
-  && connectionFailures.has(row.recovery?.failure_code);
-function automaticConnectionRetry(row, now) {
-  if (!connectionRecovery(row)) return false;
+const connectionSignal = row => row?.codex_status === 'connection_error'
+  || connectionFailures.has(row?.recovery?.failure_code);
+function connectionAttemptState(row) {
+  if (row?.stage !== 'running' || !connectionSignal(row)) return 'none';
   const budget = row.budget || {}, used = budget.codex_attempts_used, limit = budget.codex_attempts_limit;
-  if (!Number.isInteger(used) || !Number.isInteger(limit) || used > limit
-    || used === limit && row.recovery.state !== 'recovering') return false;
-  return ['codex_deadline_at', 'recovery_deadline_at'].every(key =>
-    !instant(budget[key]) || Date.parse(budget[key]) > now);
+  if (!Number.isInteger(used) || used < 0 || !Number.isInteger(limit) || limit < 1) return 'unknown';
+  return used < limit || used === limit && row.recovery?.state === 'recovering' ? 'retrying' : 'exhausted';
 }
-const connectionRetryEvent = event => event.kind === 'recovery'
-  && ['retry_wait', 'recovering'].includes(event.detail?.state)
-  && connectionFailures.has(event.detail?.failure_code);
-const incidentEvents = (state, suppressConnection, firstSeen = state.first_seen) => rows(state.events)
-  .filter(event => Date.parse(event.at) >= Date.parse(firstSeen)
-    && !(suppressConnection && connectionRetryEvent(event)));
-
-function mergeEvents(previous, incoming, now) {
-  const unique = new Map();
-  for (const event of [...rows(previous), ...rows(incoming)]) {
-    if (!publicWord(event.id) || !instant(event.at) || Date.parse(event.at) > now
-        || now - Date.parse(event.at) > 7 * 86400000) continue;
-    const detail = {};
-    for (const key of ['state', 'failure_code', 'action', 'outcome', 'phase']) {
-      if (publicWord(event.detail?.[key])) detail[key] = event.detail[key];
-    }
-    if (Number.isInteger(event.detail?.attempt) && event.detail.attempt >= 0) detail.attempt = event.detail.attempt;
-    const known = unique.get(event.id);
-    unique.set(event.id, { id: event.id, at: event.at, kind: publicWord(event.kind) || 'recovery',
-      ...(publicWord(event.task_id) ? { task_id: event.task_id } : {}),
-      ...(publicWord(event.run_id) ? { run_id: event.run_id } : {}), detail,
-      head_sha: publicSha(event.head_sha) || known?.head_sha,
-      repository: publicRepository(event.repository) || known?.repository,
-      ...(Array.isArray(event.codes) ? { codes: event.codes.filter(code => LABELS[code]) } : {}),
-    });
-  }
-  const counts = new Map();
-  return [...unique.values()].sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).filter(event => {
-    if (!event.task_id) return true;
-    const count = (counts.get(event.task_id) || 0) + 1;
-    counts.set(event.task_id, count);
-    return count <= 20;
-  }).slice(0, 100);
-}
+const exhaustedConnection = row => connectionAttemptState(row) === 'exhausted';
 
 // Missing telemetry never proves recovery. Remember which task/service caused each fault.
 function faults(snapshot, previous, references, now, detectedAt, firstSeen) {
@@ -142,20 +103,20 @@ function faults(snapshot, previous, references, now, detectedAt, firstSeen) {
   );
   for (const error of CODEX_ERRORS) {
     const code = `codex_${error}`;
-    const managed = row => error === 'connection_error' && (automaticConnectionRetry(row, now)
-      || row.codex_status === 'connection_error' && row.recovery?.state === 'exhausted');
-    const bad = active.filter(row => row.codex_status === error && !managed(row));
+    const managed = row => error === 'connection_error' && connectionAttemptState(row) === 'retrying';
+    const bad = error === 'connection_error' ? active.filter(exhaustedConnection)
+      : active.filter(row => row.codex_status === error && !exhaustedConnection(row));
     check(code, bad.length > 0, error === 'connection_error' && laterConnectionSuccess
       || taskKnown(code, row => CODEX_OK.has(row.codex_status) || row.recovery?.state === 'recovered'
       || managed(row) || ['sealing', 'publish_pending', 'published'].includes(row.stage)
         && ['pass', 'fail'].includes(row.result_status)), bad.map(identity).filter(Boolean));
   }
   const taskChecks = [
-    ['task_recovering', row => recovering.has(row.recovery?.state)
-      && !automaticConnectionRetry(row, now) && row.codex_status !== 'connection_error',
-    row => automaticConnectionRetry(row, now) || row.codex_status === 'connection_error'
+    ['task_recovering', row => recovering.has(row.recovery?.state) && !connectionSignal(row),
+    row => connectionSignal(row)
       || ['normal', 'recovered', 'exhausted'].includes(row.recovery?.state) || completed(row) || endedFailed(row)],
-    ['task_recovery_exhausted', row => row.recovery?.state === 'exhausted', row => row.recovery?.state === 'recovered' || endedFailed(row)],
+    ['task_recovery_exhausted', row => row.recovery?.state === 'exhausted' && !connectionSignal(row),
+    row => connectionSignal(row) || row.recovery?.state === 'recovered' || endedFailed(row)],
     ['task_no_progress', row => row.stage === 'running' && instant(row.last_progress_at)
       && now - Date.parse(row.last_progress_at) > (snapshot.thresholds?.progress_warning_seconds || 1800) * 1000,
     row => instant(row.last_progress_at) && now - Date.parse(row.last_progress_at) <= (snapshot.thresholds?.progress_warning_seconds || 1800) * 1000 || completed(row) || endedFailed(row)],
@@ -269,31 +230,13 @@ async function findOpenIssue(fetcher, token) {
   return null;
 }
 
-const EVENT_LABELS = {
-  normal: '正常执行', retry_wait: '等待重试', waiting_dependency: '等待依赖恢复', recovering: '恢复中',
-  recovered: '恢复成功', exhausted: '恢复预算耗尽', pending: '进行中', success: '恢复成功', failed: '恢复失败',
-  resume: '复用原 session', resume_codex: '复用原 session', new_session: '创建新 session', new_codex_session: '创建新 session',
-  rebuild: '重建隔离环境', rebuild_execution: '重建隔离环境', wait_dependency: '等待依赖',
-  wait_credentials: '等待凭据更新', wait_runtime: '等待 Docker 恢复', retry_sealing: '重新封存',
-  retry_publish: '重传已封存结果', publish_infra_error: '发布基础设施失败结果', continue_sealing: '继续封存', configuration_invalid: '任务配置无效', delivery_failed: '结果上传失败', container_oom: '任务容器内存不足（OOM）',
-  preparing: '准备环境', running: '执行中', sealing: '封存结果', publish_pending: '等待上传', published: '已发布',
-};
-function eventText(event) {
-  if (event.codes?.length) return (event.kind === 'recovered' ? '确认恢复：' : event.kind === 'finished_failed' ? '恢复失败，任务已结束：' : '异常：')
-    + event.codes.map(code => LABELS[code]).join('；');
-  const detail = event.detail || {};
-  const label = value => value === 'unknown' ? '' : EVENT_LABELS[value] || LABELS[value] || LABELS[`codex_${value}`] || value;
-  return [...new Set([event.task_id && `任务 ${event.task_id}`, label(detail.phase), label(detail.state), label(detail.failure_code),
-    label(detail.action), Number.isInteger(detail.attempt) && `第 ${detail.attempt} 次`, label(detail.outcome)].filter(Boolean))].join(' · ');
-}
-
 function beijingTime(value) {
   if (!instant(value)) return '尚未取得';
   // Keep the offset parseable when recovering an incident from its Issue body.
   return new Date(Date.parse(value) + 8 * 3600000).toISOString().replace('Z', '+08:00');
 }
 
-function issueBody(state, at, recovered = false, suppressConnection = false) {
+function issueBody(state, at, recovered = false) {
   const lines = [MARKER, `服务器：${CONFIG.worker}`, '以下时间均为北京时间（UTC+8）。', '',
     `首次发现：${beijingTime(state.first_seen)}`, `本次观测：${beijingTime(at)}`,
     `故障证据快照：${beijingTime(state.fault_snapshot_at)}`, ''];
@@ -304,14 +247,14 @@ function issueBody(state, at, recovered = false, suppressConnection = false) {
       : '更新且有效的健康快照确认此前异常已结束。', '', '此前异常：');
   else lines.push('当前异常（缺少明确恢复证据的原有异常继续保留）：');
   for (const code of state.codes) lines.push(`- ${LABELS[code]}`);
+  if (state.codes.includes('codex_connection_error'))
+    lines.push('Codex 连接重试：第 10 次已经结束，10 次尝试已用尽。');
   if (!recovered && state.codes.includes('source_unreadable') && state.health_read?.status === 'error') {
     const read = state.health_read;
     lines.push('', `Cloudflare → Gitee 健康快照读取：${READ_ERRORS[read.error_code] || '错误详情未上报'}`
       + (read.http_status ? `（HTTP ${read.http_status}）` : '') + `；耗时 ${read.duration_ms} ms。`,
     `连续失败：${read.consecutive_failures} 次；最近成功读取：${beijingTime(read.last_success_at)}。`);
   }
-  const events = incidentEvents(state, suppressConnection).slice(0, 20).reverse();
-  if (events.length) lines.push('', '近期异常与恢复过程：', ...events.map(event => `- ${beijingTime(event.at)} · ${eventText(event)}`));
   lines.push('', '仅依据公开健康快照；Cloudflare 不执行服务器恢复。原始错误、认证信息和服务器日志不在此发布。');
   return lines.join('\n');
 }
@@ -335,14 +278,11 @@ async function runMonitor(env, { fetcher, now, current, read }) {
   };
   state.references ||= {};
   state.detected_at ||= {};
+  delete state.events;
   const at = now.toISOString(), timestamp = now.getTime();
   const patch = (body, extra = {}) => issueRequest(fetcher, env.GITEE_TOKEN,
     `/repos/${CONFIG.owner}/issues/${encodeURIComponent(state.issue_number)}`, 'PATCH',
     { repo: CONFIG.repository, body, ...extra });
-  const record = (kind, codes) => {
-    const id = `cf:${at}:${kind}`;
-    state.events = mergeEvents(state.events, [{ id, at, kind, codes }], timestamp);
-  };
   try {
     state.read_failures = current ? 0 : state.read_failures + 1;
     state.health_read = { ...read, consecutive_failures: state.read_failures,
@@ -367,7 +307,6 @@ async function runMonitor(env, { fetcher, now, current, read }) {
     let codes = [...prior];
     if (accepted) {
       state.last_source_at = current.collected_at;
-      state.events = mergeEvents(state.events, current.events, timestamp);
       if (fresh) {
         const observed = faults(current, prior, state.references, timestamp, state.detected_at, state.first_seen);
         codes = observed.codes;
@@ -389,7 +328,6 @@ async function runMonitor(env, { fetcher, now, current, read }) {
     }
     if (!current && state.read_failures >= 2 && !codes.includes('source_unreadable')) codes.push('source_unreadable');
     codes.sort();
-    state.events = mergeEvents(state.events, [], timestamp);
     // Never retry a remembered close before observing this round's evidence.
     const wasClosing = !!state.pending_close || state.needs_reopen;
     state.pending_close = null;
@@ -397,30 +335,25 @@ async function runMonitor(env, { fetcher, now, current, read }) {
       if (wasClosing) state.needs_reopen = true;
       state.first_seen ||= at;
       state.codes = codes;
-      if (codes.join(',') !== prior.join(',')) record('fault', codes);
-      const suppressConnection = !codes.includes('codex_connection_error') && !codes.includes('task_recovering');
-      const recoveryEvents = incidentEvents(state, suppressConnection)
-        .filter(event => event.kind !== 'phase' && event.kind !== 'progress');
-      const signature = JSON.stringify([codes, recoveryEvents.map(event => event.id),
+      const signature = JSON.stringify([codes,
         ...(codes.includes('source_unreadable') ? [[read.error_code, read.http_status]] : [])]);
       const title = `[Local CI 告警] ${CONFIG.worker} ${codes.length}项异常`;
       if (!state.issue_number) {
         const created = await issueRequest(fetcher, env.GITEE_TOKEN, `/repos/${CONFIG.owner}/issues`, 'POST', {
-          repo: CONFIG.repository, title, body: issueBody(state, at, false, suppressConnection),
+          repo: CONFIG.repository, title, body: issueBody(state, at),
         });
         if (!created.number) throw new Error('Issue creation returned no number');
         state.issue_number = String(created.number);
         state.signature = signature;
       }
       if (state.signature !== signature || wasClosing) {
-        await patch(issueBody(state, at, false, suppressConnection), { title, ...(wasClosing ? {state: 'open'} : {}) });
+        await patch(issueBody(state, at), { title, ...(wasClosing ? {state: 'open'} : {}) });
         state.signature = signature;
         state.needs_reopen = false;
       }
     } else if (state.issue_number && fresh) {
       state.pending_close = current.collected_at;
-      await patch(issueBody(state, at, true, true), { state: 'closed' });
-      record(state.finished_failed ? 'finished_failed' : 'recovered', prior);
+      await patch(issueBody(state, at, true), { state: 'closed' });
       resetIncident(state);
     } else if (!state.issue_number) resetIncident(state);
   } finally {
@@ -436,7 +369,7 @@ async function refreshCache(env, { fetcher, now, current }) {
   const cache = {
     schema: 'triton-anchor-worker-health-cache', worker_id: CONFIG.worker,
     updated_at: now.toISOString(), worker: current && !older ? current : previous?.worker || null,
-    events: mergeEvents(state?.events, [], now.getTime()), alerts: previous?.alerts || [],
+    alerts: previous?.alerts || [],
     health_read: state?.health_read,
     errors: { worker: !current ? 'Cloudflare 未能读取 Gitee 健康快照' : older ? 'Gitee 返回较旧快照，保留最后已知数据' : '', alerts: '' },
   };

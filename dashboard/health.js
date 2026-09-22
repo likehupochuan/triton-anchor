@@ -49,19 +49,20 @@
   const fresh = (value, now) => age(value, now) >= -60 && age(value, now) <= source.staleSeconds;
   const date = value => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('zh-CN', {hour12: false, timeZone:'Asia/Shanghai'}) : '未上报';
   const connectionFailures = new Set(['connection', 'connection_error']);
-  const connectionRecovery = task => task?.stage === 'running'
-    && ['retry_wait', 'recovering'].includes(task.recovery?.state)
-    && connectionFailures.has(task.recovery?.failure_code);
-  function automaticConnectionRetry(task, now = Date.now()) {
-    if (!connectionRecovery(task)) return false;
+  const connectionSignal = task => task?.codex_status === 'connection_error'
+    || connectionFailures.has(task?.recovery?.failure_code);
+  function connectionAttemptState(task) {
+    if (task?.stage !== 'running' || !connectionSignal(task)) return 'none';
     const budget = task.budget || {}, used = budget.codex_attempts_used, limit = budget.codex_attempts_limit;
-    if (!Number.isInteger(used) || !Number.isInteger(limit) || used > limit
-      || used === limit && task.recovery.state !== 'recovering') return false;
-    return ['codex_deadline_at', 'recovery_deadline_at'].every(key =>
-      !Number.isFinite(Date.parse(budget[key])) || Date.parse(budget[key]) > now);
+    if (!Number.isInteger(used) || used < 0 || !Number.isInteger(limit) || limit < 1) return 'unknown';
+    return used < limit || used === limit && task.recovery?.state === 'recovering' ? 'retrying' : 'exhausted';
   }
+  const automaticConnectionRetry = task => connectionSignal(task)
+    && ['retry_wait', 'recovering'].includes(task.recovery?.state)
+    && connectionAttemptState(task) !== 'exhausted';
+  const exhaustedConnection = task => connectionAttemptState(task) === 'exhausted';
 
-  function assess(worker, events = [], {now = Date.now(), workerError = ''} = {}) {
+  function assess(worker, {now = Date.now(), workerError = ''} = {}) {
     const issues = [], seen = new Set();
     const add = (code, category, text, tone = 'bad') => {
       if (!seen.has(code)) { issues.push({code, category, text, tone}); seen.add(code); }
@@ -77,7 +78,9 @@
       {name: '服务器 → Gitee', text: '状态未知', tone: 'muted'},
       {name: 'Codex', text: '状态未知', tone: 'muted'},
     ];
-    const automaticRecovery = current && automaticConnectionRetry(active, now);
+    const connectionPending = current && active?.stage === 'running'
+      && connectionSignal(active) && !exhaustedConnection(active);
+    const automaticRecovery = connectionPending && automaticConnectionRetry(active);
     if (current) {
       // The five-minute collector already measures the three-minute Worker heartbeat.
       const workerOk = poller.alive === true && poller.heartbeat_stale === false && age(poller.heartbeat_at, Date.parse(worker.collected_at)) <= 180;
@@ -93,11 +96,19 @@
       const codex = codexStates[active?.codex_status];
       const codexIdle = !active ? '空闲' : active.stage === 'preparing' ? '准备任务环境' : ['sealing', 'publish_pending', 'published'].includes(active.stage) ? '任务已结束' : '连接状态未上报';
       const attempts = active?.budget;
+      const connectionExhausted = exhaustedConnection(active);
+      const attemptText = Number.isInteger(attempts?.codex_attempts_used) && Number.isInteger(attempts?.codex_attempts_limit)
+        ? attempts.codex_attempts_used + ' / ' + attempts.codex_attempts_limit : '尝试次数未上报';
       cards[3] = automaticRecovery
-        ? {name: 'Codex', text: '自动重连中 · ' + attempts.codex_attempts_used + ' / ' + attempts.codex_attempts_limit, tone: 'info'}
-        : {name: 'Codex', text: codex?.[0] || codexIdle, tone: codex?.[1] || 'muted'};
-      const exhaustedConnection = active?.codex_status === 'connection_error' && active.recovery?.state === 'exhausted';
-      if (!automaticRecovery && !exhaustedConnection && codex && ['bad', 'warn'].includes(codex[1]) && active.codex_status !== 'retrying')
+        ? {name: 'Codex', text: '自动重连中 · ' + attemptText, tone: 'info'}
+        : connectionPending ? {name: 'Codex', text: '连接异常，等待恢复 · ' + attemptText, tone: 'info'}
+        : {name: 'Codex', text: connectionExhausted
+          ? '连接失败 · ' + attemptText + ' 次尝试已用尽'
+          : codex?.[0] || codexIdle, tone: codex?.[1] || 'muted'};
+      if (connectionExhausted)
+        add('codex_connection_error', 'Codex 异常',
+          'Codex 连接失败，' + attemptText + ' 次尝试已用尽');
+      else if (!connectionPending && codex && ['bad', 'warn'].includes(codex[1]) && active.codex_status !== 'retrying')
         add('codex_' + active.codex_status, 'Codex 异常', codex[0], codex[1]);
       else if (active?.codex_alive === false && active.codex_status === 'running')
         add('codex_process', 'Codex 异常', 'Codex 进程已退出，等待 Worker 处理');
@@ -114,10 +125,9 @@
           add('task_no_progress', ...incidents.task_no_progress, 'warn');
         if (task.stage === 'running' && age(task.last_progress_at, now) > (worker.thresholds?.progress_stalled_seconds || 3600))
           add('task_stalled', ...incidents.task_stalled, 'warn');
-        if (['recovering', 'retry_wait', 'waiting_dependency'].includes(task.recovery?.state)
-          && !automaticConnectionRetry(task, now) && task.codex_status !== 'connection_error')
+        if (['recovering', 'retry_wait', 'waiting_dependency'].includes(task.recovery?.state) && !connectionSignal(task))
           add('task_recovering', ...incidents.task_recovering, 'warn');
-        if (task.recovery?.state === 'exhausted') incident('task_recovery_exhausted');
+        if (task.recovery?.state === 'exhausted' && !connectionSignal(task)) incident('task_recovery_exhausted');
       }
       if (rows(worker.task_containers).some(row => row.oom_killed === true || row.expected_running === true
         && (row.status === 'missing' || row.available === true && row.running === false))) incident('container_failed');
@@ -131,11 +141,12 @@
       const controlUpdate = controlUpdateStates[worker.control_update?.state];
       if (controlUpdate) add('control_update', '控制更新异常', controlUpdate);
     }
-    const history = historyEvents([...rows(worker?.events), ...rows(events)], now);
-    return {current, cards, issues, history,
+    return {current, cards, issues,
       title: !worker || workerError ? '健康数据不可用' : !current ? '心跳快照已过期' : issues.length ? '发现异常或待确认项'
-        : automaticRecovery ? '服务器正常，Codex 正在自动重连' : '服务器已上报状态正常',
-      tone: issues.some(row => row.tone === 'bad') ? 'bad' : issues.length ? 'warn' : automaticRecovery ? 'info' : 'good'};
+        : automaticRecovery ? '服务器正常，Codex 正在自动重连'
+          : connectionPending ? '服务器正常，Codex 连接等待恢复' : '服务器已上报状态正常',
+      tone: issues.some(row => row.tone === 'bad') ? 'bad' : issues.length ? 'warn'
+        : automaticRecovery || connectionPending ? 'info' : 'good'};
   }
 
   async function readGitee(url, message) {
@@ -182,7 +193,7 @@
 
   async function readHealth(retryAt = 0, previous = {}) {
     const cooling = Date.now() < retryAt;
-    // Gitee remains the primary snapshot source. The read-only cache also supplies external incidents.
+    // Gitee remains the primary snapshot source; Cloudflare supplies authenticated fallback data.
     const [gitee, cached] = await Promise.all([
       cooling ? Promise.resolve(Array.from({length: 2}, () => ({status: 'rejected', reason: new Error('Gitee 限流冷却中')})))
         : Promise.allSettled([
@@ -217,7 +228,7 @@
       dataSource = '上次较新的快照';
     }
     return {results, retryAt, notice, pageRead, dataSource, monitor: cache ? {
-      updated_at: cache.updated_at, source_at: cache.worker?.collected_at, events: rows(cache.events),
+      updated_at: cache.updated_at, source_at: cache.worker?.collected_at,
       read: cache.health_read, readError: cache.errors?.worker,
       error: fresh(cache.updated_at, Date.now()) ? '' : 'Cloudflare 监测缓存已过期'}
       : {error: '网页无法读取 Cloudflare 缓存'}};
@@ -280,67 +291,6 @@
     ];
   }
 
-  function historyEvents(events, now) {
-    const unique = new Map();
-    for (const row of rows(events)) if (typeof row.id === 'string' && age(row.at, now) >= 0 && age(row.at, now) <= 7 * 86400) {
-      const previous = unique.get(row.id);
-      unique.set(row.id, {...row, head_sha: validHead(row.head_sha) ? row.head_sha : previous?.head_sha,
-        repository: row.repository || previous?.repository});
-    }
-    const counts = new Map();
-    return [...unique.values()].sort((a,b) => Date.parse(b.at) - Date.parse(a.at)).filter(row => {
-      if (!row.task_id) return true;
-      const count = (counts.get(row.task_id) || 0) + 1; counts.set(row.task_id, count); return count <= 20;
-    }).slice(0, 100);
-  }
-  function eventText(row, includeHeading = true) {
-    const detail = row.detail || {};
-    const historicalStates = {retry_wait:'当时等待重试', waiting_dependency:'当时等待依赖恢复', recovering:'当时恢复中'};
-    return [...new Set([...(includeHeading ? [date(row.at), row.task_id
-      ? 'Head SHA ' + (validHead(row.head_sha) ? row.head_sha.slice(0, 12) : '未上报') : 'Cloudflare 监测'] : []),
-      row.kind === 'recovered' ? '确认恢复' : row.kind === 'fault' ? '发现异常' : row.kind === 'finished_failed' ? '恢复失败，任务已结束' : '',
-      rows(row.codes).map(code => row.kind === 'recovered' && code === 'source_unreadable' ? 'Cloudflare 读取 Gitee 健康快照已恢复'
-        : incidents[code]?.[1] || codexStates[code.replace(/^codex_/, '')]?.[0] || controlUpdateStates[code.replace(/^control_update_/, '')] || failureNames[code] || code).join('；'),
-      detail.phase && describe(detail.phase, stages), detail.state && detail.state !== 'unknown' && (historicalStates[detail.state] || describe(detail.state, recoveryStates)), detail.failure_code && describe(detail.failure_code, failureNames),
-      detail.action && describe(detail.action, recoveryActions), Number.isInteger(detail.attempt) ? '第 ' + detail.attempt + ' 次' : '',
-      detail.outcome && !(detail.outcome === 'pending' && historicalStates[detail.state])
-        && describe(detail.outcome, {success:'恢复成功', recovered:'恢复成功', failed:'恢复失败', pending:'当时尚未恢复'}),
-    ].filter(Boolean))].join(' · ');
-  }
-
-  function groupHistory(events) {
-    const groups = [], active = new Map();
-    for (const row of [...events].reverse().sort((a,b) => Date.parse(a.at) - Date.parse(b.at))) {
-      const detail = row.detail || {}, key = row.task_id && row.run_id && row.task_id !== 'unknown' && row.run_id !== 'unknown'
-        && JSON.stringify([row.task_id, row.run_id]);
-      // Normal lifecycle records only delimit recovery episodes; they are not incidents.
-      if (row.kind === 'phase' || row.kind === 'recovery' && detail.state === 'normal') {
-        if (key && (detail.state === 'normal' || ['published', 'cancelled'].includes(detail.phase))) active.delete(key);
-        continue;
-      }
-      if (!key || row.kind !== 'recovery') {
-        groups.push({events:[row]});
-        continue;
-      }
-      let group = active.get(key);
-      if (!group || (detail.failure_code && group.reason && detail.failure_code !== group.reason)) {
-        group = {events:[], reason:detail.failure_code || ''}; groups.push(group); active.set(key, group);
-      }
-      group.events.push(row);
-      group.reason ||= detail.failure_code || '';
-      if (['recovered', 'exhausted'].includes(detail.state) || ['success', 'recovered', 'failed'].includes(detail.outcome)) active.delete(key);
-    }
-    return groups.reverse().sort((a,b) => Date.parse(b.events.at(-1).at) - Date.parse(a.events.at(-1).at));
-  }
-  function hideConnectionHistory(group, worker, now = Date.now()) {
-    if (!connectionFailures.has(group.reason)) return false;
-    if (group.events.some(row => row.detail?.state === 'recovered'
-      || ['success', 'recovered'].includes(row.detail?.outcome))) return true;
-    const latest = group.events.at(-1), task = [...rows(worker?.tasks), ...rows(worker?.recent_tasks), worker?.active_task]
-      .find(row => row && row.task_id === latest.task_id && row.run_id === latest.run_id);
-    return !!task && (automaticConnectionRetry(task, now) || ['recovered', 'exhausted'].includes(task.recovery?.state));
-  }
-
   function mount(root) {
     const node = (tag, className, text) => { const item = document.createElement(tag); if (className) item.className = className; if (text) item.textContent = text; return item; };
     const headLink = row => {
@@ -363,22 +313,13 @@
       details.append(node('summary', '', '查看完整 SHA 与排查编号'), identityFacts(row));
       return details;
     };
-    const eventLine = row => {
-      const line = node('span', '', date(row.at) + ' · ');
-      if (row.task_id) line.append(document.createTextNode('Head SHA '), headLink(row));
-      else line.append(document.createTextNode('Cloudflare 监测'));
-      const text = eventText(row, false);
-      if (text) line.append(document.createTextNode(' · ' + text));
-      return line;
-    };
     const heading = node('div', 'health-heading'), title = node('div');
     title.append(node('h2', '', '运行概览'), node('p', 'health-muted', source.worker + ' · Gitee 健康快照 · 时间均为北京时间（UTC+8）'));
     const refresh = node('button', 'button secondary', '刷新健康状态'); refresh.type = 'button';
     heading.append(title, refresh);
     const content = node('div'); content.setAttribute('aria-live', 'polite');
     root.append(heading, content);
-    let worker = null, workerError = '', loading = false, renderedState = '', monitor = {events: []};
-    let showAllEvents = false;
+    let worker = null, workerError = '', loading = false, renderedState = '', monitor = {};
     let alerts = [], alertsError = '', retryAt = 0, sourceNotice = '', pageRead = '未上报', dataSource = '未上报';
 
     function render() {
@@ -386,12 +327,12 @@
       refresh.disabled = loading;
       refresh.textContent = loading ? '读取中…' : cooling ? '刷新备用数据' : '刷新健康状态';
       if (loading && !worker) { renderedState = ''; content.replaceChildren(node('p', 'health-muted', '正在读取健康数据…')); return; }
-      const model = assess(worker, monitor.events, {workerError});
+      const model = assess(worker, {workerError});
       const monitoring = monitorReading(monitor);
-      const viewState = JSON.stringify([model, worker, monitor, monitoring, pageRead, dataSource, alerts, alertsError, sourceNotice, cooling, showAllEvents]);
+      const viewState = JSON.stringify([model, worker, monitor, monitoring, pageRead, dataSource, alerts, alertsError, sourceNotice, cooling]);
       if (viewState === renderedState) return;
       renderedState = viewState;
-      const expanded = new Set([...content.querySelectorAll('details[open][data-history-key]')].map(item => item.dataset.historyKey));
+      const expanded = new Set([...content.querySelectorAll('details[open][data-details-key]')].map(item => item.dataset.detailsKey));
       content.replaceChildren();
       const summary = node('div', 'health-summary');
       summary.append(node('strong', 'health-badge ' + model.tone, model.title));
@@ -498,7 +439,7 @@
       allAlerts.href = 'https://gitee.com/' + source.repository + '/issues';
       alertSection.append(allAlerts);
       if (alertsError) alertSection.append(node('p', 'health-muted', alertsError + '；以下旧记录不能代表当前告警状态。'));
-      const alertList = node('ul', 'health-history'), closedList = node('ul', 'health-history');
+      const alertList = node('ul', 'health-alerts'), closedList = node('ul', 'health-alerts');
       for (const alert of alerts) {
         const closed = ['closed', 'rejected'].includes(alert.state);
         const item = node('li'), link = node('a', '', alert.title);
@@ -510,45 +451,12 @@
       }
       alertSection.append(alertList.childElementCount ? alertList : node('p', 'health-muted', alertsError ? '告警记录暂不可用。' : alerts.length ? '已读取的告警中没有未关闭项。' : '暂无已记录的告警；这不表示 Cloudflare 监测已经启用。'));
       if (closedList.childElementCount) {
-        const archived = node('details'); archived.dataset.historyKey = 'closed-alerts'; archived.open = expanded.has('closed-alerts');
+        const archived = node('details'); archived.dataset.detailsKey = 'closed-alerts'; archived.open = expanded.has('closed-alerts');
         archived.append(node('summary', '', '查看已关闭告警（' + closedList.childElementCount + '）'), closedList);
         alertSection.append(archived);
       }
       alertSection.append(node('p', 'health-muted', '显示最近更新的告警。Issue 关闭不等于服务已确认恢复，当前状态以上方健康快照为准。'));
-      content.append(alertSection);
-      const records = node('section', 'health-section');
-      records.append(node('h3', '', '异常与恢复记录（近 7 天）'));
-      records.append(node('p', 'health-muted', '记录需要关注的恢复结果和 Cloudflare 外部监测事件；预算内的 Codex 自动重连只在上方“任务执行与恢复”展示。'));
-      if (monitor.error) records.append(node('p', 'health-muted', monitor.error + '；服务器上报的记录仍会展示。'));
-      const history = node('ul', 'health-history');
-      const groups = groupHistory(model.history.map(row => taskIdentity(row, worker)))
-        .filter(group => !hideConnectionHistory(group, worker));
-      for (const group of groups.slice(0, showAllEvents ? 100 : 20)) {
-        const item = node('li'), latest = group.events.at(-1);
-        if (group.events.length === 1 && !latest.task_id) item.append(eventLine(latest));
-        else {
-          const details = node('details'), first = group.events[0];
-          details.dataset.historyKey = first.id; details.open = expanded.has(first.id);
-          const switches = new Set(group.events.filter(row => row.detail?.state === 'recovering'
-            && ['new_session', 'new_codex_session'].includes(row.detail.action) && Number.isInteger(row.detail.attempt)).map(row => row.detail.attempt)).size;
-          const summary = node('summary'); summary.append(eventLine(latest), document.createTextNode(
-            (group.reason && !latest.detail?.failure_code ? ' · 本段原因：' + describe(group.reason, failureNames) : '')
-            + (switches ? ' · 已记录新 session 启动 ' + switches + ' 次' : '') + ' · 展开 ' + group.events.length + ' 条过程记录'));
-          details.append(summary, identityFacts(latest));
-          details.append(node('p', 'health-muted', '已记录时间：' + date(first.at) + ' — ' + date(latest.at)));
-          const entries = node('ul', 'health-history');
-          for (const row of [...group.events].reverse()) { const entry = node('li'); entry.append(eventLine(row)); entries.append(entry); }
-          details.append(entries); item.append(details);
-        }
-        history.append(item);
-      }
-      records.append(groups.length ? history : node('p', 'health-muted', '近 7 天暂无已读取的异常与恢复记录；旧快照可能尚未上报这些字段。'));
-      if (groups.length) records.append(node('p', 'health-muted', '同一运行的连续恢复过程已折叠；仅汇总保留的记录，尝试序号不是本段重试次数。'));
-      if (groups.length > 20) {
-        const expand = node('button', 'button secondary', showAllEvents ? '收起记录' : '展开全部 ' + groups.length + ' 组记录');
-        expand.type = 'button'; expand.addEventListener('click', () => { showAllEvents = !showAllEvents; render(); }); records.append(expand);
-      }
-      content.append(records, node('p', 'health-muted', '健康快照超过 20 分钟未更新时标记过期；不可读不等于服务器宕机。恢复由服务器执行，Cloudflare 独立管理告警，本页只展示数据。'));
+      content.append(alertSection, node('p', 'health-muted', '健康快照超过 20 分钟未更新时标记过期；不可读不等于服务器宕机。恢复由服务器执行，Cloudflare 独立管理告警，本页只展示数据。'));
 
     }
 
@@ -557,7 +465,7 @@
       loading = true;
       render();
       const response = await readHealth(retryAt, {worker}), results = response.results;
-      monitor = response.monitor.events ? response.monitor : {...monitor, error: response.monitor.error};
+      monitor = response.monitor.updated_at ? response.monitor : {...monitor, error: response.monitor.error};
       pageRead = response.pageRead; dataSource = response.dataSource;
       retryAt = response.retryAt; sourceNotice = response.notice;
       const error = result => result.status === 'fulfilled' ? result.error || '' : result.reason instanceof TypeError || ['TimeoutError', 'AbortError'].includes(result.reason?.name)
@@ -577,7 +485,7 @@
     document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
   }
   if (typeof module !== 'undefined') module.exports = {assess, readSnapshot, readAlerts, readHealth, monitorReading, source,
-    taskFacts, historyEvents, eventText};
+    taskFacts};
   if (typeof document !== 'undefined') {
     const root = document.getElementById('serverHealth');
     if (root) mount(root);

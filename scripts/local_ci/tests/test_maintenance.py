@@ -286,7 +286,7 @@ def test_retention_protects_unstarted_null_delivery(tmp_path):
     assert not report["errors"]
 
 
-def test_health_exposes_recovery_identity_and_bounded_history_without_private_checkpoint(tmp_path):
+def test_health_exposes_recovery_identity_without_private_checkpoint(tmp_path):
     now = 9 * 86400
     run = make_run(tmp_path, "active", "running", None)
     manifest = {"repository": "likehupochuan/triton-anchor", "head_sha": "b" * 40,
@@ -297,12 +297,7 @@ def test_health_exposes_recovery_identity_and_bounded_history_without_private_ch
               "budget": {"codex_attempts_used": 3, "codex_deadline_at": now+3600,
                          "execution_attempts_used": 2, "session_switches": 1},
               "recovery": {"state": "retry_wait", "failure_code": "connection", "action": "resume",
-                           "next_retry_at": now+30, "session_id": "PRIVATE_SENTINEL"},
-              "events": [{"at": now-i, "kind": "recovery", "run_id": "old-run",
-                          "detail": {"state": "recovering", "action": "resume", "attempt": 3,
-                                     "error": "PRIVATE_SENTINEL"}} for i in range(25)]
-                        + [{"at": now, "kind": "codex_exit", "detail": {"session_id": "PRIVATE_SENTINEL"}},
-                           {"at": now-8*86400, "kind": "recovery", "detail": {}}]}
+                           "next_retry_at": now+30, "session_id": "PRIVATE_SENTINEL"}}
     (run / "state.json").write_text(json.dumps(record))
     done = make_run(tmp_path, "done", "published", now-60)
     (done / "task.json").write_text(json.dumps(manifest))
@@ -314,7 +309,6 @@ def test_health_exposes_recovery_identity_and_bounded_history_without_private_ch
     assert (task["repository"], task["head_sha"], task["tested_sha"]) == tuple(manifest[k] for k in ("repository", "head_sha", "tested_sha"))
     assert task["budget"]["codex_attempts_used"] == 3 and task["budget"]["codex_attempts_limit"] == 10
     assert task["recovery"]["next_retry_at"] == health.iso(now+30)
-    assert len(result["events"]) == 20 and all(e["run_id"] == "old-run" for e in result["events"])
     assert result["recent_tasks"][0]["result_status"] == "pass"
     assert "PRIVATE_SENTINEL" not in json.dumps(result)
     assert public_snapshot(result) == result
@@ -333,18 +327,6 @@ def test_public_health_keeps_unknown_unknown_and_projects_container_and_oneshot_
     assert result["services"][0]["type"] == "oneshot" and result["services"][0]["result"] == "success"
     assert "PRIVATE_SENTINEL" not in json.dumps(result)
     assert public_snapshot(result) == result
-
-
-def test_health_event_history_has_a_global_limit():
-    now = 10000
-    result = public_snapshot({"collected_at": health.iso(now), "events": [
-        {"at": now-i, "kind": "recovery", "task_id": str(task), "run_id": "run-1",
-         "detail": {"state": "recovering", "action": "resume"}}
-        for task in range(8) for i in range(25)
-    ]})
-    assert len(result["events"]) == 100
-    assert all(sum(e["task_id"] == str(task) for e in result["events"]) <= 20 for task in range(8))
-
 
 def test_broken_local_task_record_does_not_claim_an_empty_healthy_queue(tmp_path):
     run = make_run(tmp_path, "broken", "publish_pending", None)

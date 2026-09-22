@@ -1,8 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { normalize, business, blockerGroups, environmentProfile } = require('../../../dashboard/data.js');
-const { assess: assessHealth, readSnapshot, readAlerts, readHealth, monitorReading, source: healthSource, taskFacts,
-  historyEvents, eventText } = require('../../../dashboard/health.js');
+const { assess: assessHealth, readSnapshot, readAlerts, readHealth, monitorReading, source: healthSource,
+  taskFacts } = require('../../../dashboard/health.js');
 const task = (id, date) => ({task_id:id, repository:'example/repo',pr_number:7,target_branch:'main',head_sha:('f'+id).repeat(20),tested_sha:id.repeat(40),captured_at:date});
 const backendEnvironment = (backend = 'sophgo-cmodel', profile = 'triton-3.0') => ({variants:{candidate:{
   backend_enabled:true, backend_profile:backend, profile,
@@ -17,11 +17,11 @@ function healthyWorker() {
 
 test('health freshness does not turn a normal five-minute sampling gap into a dead Worker', () => {
   const worker=healthyWorker();
-  assert.equal(assessHealth(worker,[],{now:healthNow+240000}).issues.length,0);
-  const stale=assessHealth(worker,[],{now:healthNow+1201000});
+  assert.equal(assessHealth(worker,{now:healthNow+240000}).issues.length,0);
+  const stale=assessHealth(worker,{now:healthNow+1201000});
   assert.equal(stale.current,false);
   assert.ok(stale.issues.some(row=>row.code==='snapshot_stale'));
-  const unreadable=assessHealth(worker,[],{now:healthNow,workerError:'浏览器请求失败'});
+  const unreadable=assessHealth(worker,{now:healthNow,workerError:'浏览器请求失败'});
   assert.equal(unreadable.current,false);
   assert.deepEqual(unreadable.issues.map(row=>row.code),['health_read']);
 });
@@ -30,18 +30,21 @@ test('health separates service, relay and Codex evidence without treating idle o
   const worker=healthyWorker();
   worker.services=[{name:'triton-anchor-local-ci-control-update.service',type:'oneshot',available:true,active_state:'inactive',result:'success'}];
   worker.active_task={stage:'running'};
-  let result=assessHealth(worker,[],{now:healthNow});
+  let result=assessHealth(worker,{now:healthNow});
   assert.equal(result.issues.length,0);
   worker.services.push({name:'triton-anchor-local-ci-health.timer',available:false,active_state:'unknown'});
-  result=assessHealth(worker,[],{now:healthNow});
+  result=assessHealth(worker,{now:healthNow});
   assert.equal(result.issues.length,0, 'unknown service telemetry must not create a failure');
   assert.equal(Object.fromEntries(taskFacts(worker.active_task))['恢复状态'],'未上报');
   worker.services.pop();
   worker.services.push({name:'triton-anchor-local-ci-health.timer',available:true,active_state:'failed'});
   worker.poller.last_poll_status='error';
   for (const status of ['connection_error','auth_error','session_invalid','rate_limited','timeout','failed']) {
-    worker.active_task.codex_status=status;
-    result=assessHealth(worker,[],{now:healthNow});
+    worker.active_task={stage:'running',codex_status:status,...(status==='connection_error' ? {
+      recovery:{state:'retry_wait',failure_code:'connection_error'},
+      budget:{codex_attempts_used:10,codex_attempts_limit:10},
+    } : {})};
+    result=assessHealth(worker,{now:healthNow});
     assert.ok(result.issues.some(row=>row.code==='service_triton-anchor-local-ci-health.timer'));
     assert.ok(result.issues.some(row=>row.code==='relay_poll_failed'));
     assert.ok(result.issues.some(row=>row.code==='codex_'+status));
@@ -53,34 +56,43 @@ test('health distinguishes update execution failure from invalid or blocked requ
   const descriptions=new Set();
   for (const state of ['failed','invalid','blocked']) {
     worker.control_update={state};
-    const issue=assessHealth(worker,[],{now:healthNow}).issues.find(row=>row.code==='control_update');
+    const issue=assessHealth(worker,{now:healthNow}).issues.find(row=>row.code==='control_update');
     descriptions.add(issue.text);
     assert.equal(issue.tone,'bad');
   }
   assert.equal(descriptions.size,3);
   for (const state of ['idle','pending','updating']) {
     worker.control_update={state};
-    assert.equal(assessHealth(worker,[],{now:healthNow}).issues.length,0);
+    assert.equal(assessHealth(worker,{now:healthNow}).issues.length,0);
   }
 });
 
 test('recovery facts separate phase, budget and progress; long silence only warns', () => {
   const worker=healthyWorker();
   const current={task_id:'task',run_id:'run',stage:'running',last_progress_at:new Date(healthNow-3700000).toISOString(),
-    recovery:{state:'retry_wait',action:'resume',failure_code:'connection_error',next_retry_at:worker.collected_at},
+    codex_status:'connection_error',recovery:{state:'retry_wait',action:'resume',failure_code:'result_missing',next_retry_at:worker.collected_at},
     budget:{codex_attempts_used:3,codex_attempts_limit:10,execution_attempts_used:1,execution_attempts_limit:3,
       session_switches:0,session_switches_limit:1}};
   worker.active_task=current;worker.tasks=[current];
-  const model=assessHealth(worker,[],{now:healthNow}),facts=Object.fromEntries(taskFacts(current));
+  const model=assessHealth(worker,{now:healthNow}),facts=Object.fromEntries(taskFacts(current));
   assert.equal(facts['执行阶段'],'执行中');assert.equal(facts['恢复状态'],'等待重试');
   assert.equal(facts['Codex 尝试'],'3 / 10');assert.equal(facts['恢复动作'],'复用原 session');
   assert.deepEqual(model.issues.map(row=>row.code),['task_no_progress','task_stalled']);
   assert.equal(model.cards[3].text,'自动重连中 · 3 / 10');
   assert.ok(model.issues.every(row=>row.tone==='warn'));
-  current.recovery.failure_code='result_missing';
   assert.equal(Object.fromEntries(taskFacts(current))['异常原因'],'最终执行报告缺失或不完整');
+  const budget=current.budget;current.budget={};
+  const unknownBudget=assessHealth(worker,{now:healthNow});
+  assert.ok(!unknownBudget.issues.some(row=>row.code==='codex_connection_error'));
+  assert.equal(unknownBudget.cards[3].text,'自动重连中 · 尝试次数未上报');
+  current.budget=budget;
+  current.budget.codex_attempts_used=10;current.recovery.state='recovering';
+  assert.ok(!assessHealth(worker,{now:healthNow}).issues.some(row=>row.code==='codex_connection_error'));
+  current.recovery.state='retry_wait';
+  assert.ok(assessHealth(worker,{now:healthNow}).issues.some(row=>row.code==='codex_connection_error'));
+  current.codex_status='failed';
   current.recovery={state:'exhausted',failure_code:'recovery_exhausted',action:'publish_infra_error'};
-  assert.ok(assessHealth(worker,[],{now:healthNow}).issues.some(row=>row.code==='task_recovery_exhausted'));
+  assert.ok(assessHealth(worker,{now:healthNow}).issues.some(row=>row.code==='task_recovery_exhausted'));
 });
 
 test('health reader anonymously decodes the Gitee file API and rejects a different worker', async t => {
@@ -117,8 +129,7 @@ test('health uses Gitee first, falls back once, and observes rate-limit cooldown
   let now=healthNow, limited=false;
   const calls=[], worker=healthyWorker();
   const cache={schema:'triton-anchor-worker-health-cache',worker_id:healthSource.worker,
-    updated_at:new Date(now).toISOString(),worker,alerts:[],errors:{},
-    events:[{id:'external',at:worker.collected_at,kind:'fault',codes:['runtime_unavailable']}]};
+    updated_at:new Date(now).toISOString(),worker,alerts:[],errors:{}};
   t.mock.method(Date,'now',()=>now);
   t.mock.method(global,'fetch',async (url,options)=>{
     calls.push(url); assert.equal(options.credentials,'omit');
@@ -129,15 +140,15 @@ test('health uses Gitee first, falls back once, and observes rate-limit cooldown
   });
   let result=await readHealth();
   assert.equal(result.notice,'');
-  assert.equal(calls.length,3);assert.ok(calls.includes(healthSource.cacheUrl),'read-only cache supplies external history');
+  assert.equal(calls.length,3);assert.ok(calls.includes(healthSource.cacheUrl),'read-only cache supplies monitor status');
   assert.equal(result.results[0].value,worker,'Gitee remains primary');
-  assert.equal(result.monitor.events[0].id,'external');
+  assert.equal(result.monitor.updated_at,cache.updated_at);
   cache.errors.worker='Cloudflare 未能读取 Gitee 健康快照';
   cache.health_read={status:'error',error_code:'http_error',http_status:403,duration_ms:240,consecutive_failures:13};
   result=await readHealth();
   assert.match(monitorReading(result.monitor).text,/HTTP 403/);
   assert.equal(result.pageRead,'读取成功'); assert.equal(result.dataSource,'Gitee 直读');
-  assert.equal(assessHealth(result.results[0].value,[],{now,workerError:result.results[0].error}).current,true);
+  assert.equal(assessHealth(result.results[0].value,{now,workerError:result.results[0].error}).current,true);
   cache.errors.worker=''; delete cache.health_read;
   limited=true; calls.length=0;
   result=await readHealth();
@@ -176,7 +187,7 @@ test('cache only fills failed reads and never presents stale or failed collectio
   const worker=healthyWorker();
   const cache={schema:'triton-anchor-worker-health-cache',worker_id:healthSource.worker,
     updated_at:new Date(healthNow-1201000).toISOString(),worker:{...worker,collected_at:'2026-09-17T09:00:00Z'},
-    events:[],alerts:[],errors:{alerts:'Cloudflare 未能更新告警记录'}};
+    alerts:[],errors:{alerts:'Cloudflare 未能更新告警记录'}};
   t.mock.method(Date,'now',()=>healthNow);
   t.mock.method(global,'fetch',async url=>{
     if(url===healthSource.cacheUrl) return {ok:true,json:async()=>cache};
@@ -188,7 +199,7 @@ test('cache only fills failed reads and never presents stale or failed collectio
   assert.match(result.monitor.error,/缓存已过期/);
   assert.match(result.results[1].error,/未能更新告警/);
   result=await readHealth(healthNow+900000);
-  const model=assessHealth(result.results[0].value,[],
+  const model=assessHealth(result.results[0].value,
     {now:healthNow,workerError:result.results[0].error});
   assert.equal(model.current,false);
   cache.updated_at=new Date(healthNow).toISOString();
@@ -208,7 +219,7 @@ test('failure of both health sources leaves existing data untouched and is not a
   assert.equal(calls.length,3);
   assert.ok(result.results.every(row=>row.status==='rejected' && row.value===undefined));
   assert.match(result.notice,/保留最后读取的数据/);
-  const model=assessHealth(healthyWorker(),[],
+  const model=assessHealth(healthyWorker(),
     {now:healthNow,workerError:result.notice});
   assert.equal(model.current,false);
   assert.ok(!model.issues.some(row=>row.code==='poller_unavailable'));
@@ -217,23 +228,12 @@ test('failure of both health sources leaves existing data untouched and is not a
 test('missing telemetry is unknown and broken task collection cannot look like an empty healthy queue', () => {
   const worker=healthyWorker();
   delete worker.runtime;delete worker.poller.alive;
-  let model=assessHealth(worker,[],{now:healthNow});
+  let model=assessHealth(worker,{now:healthNow});
   assert.deepEqual(model.issues,[]);
   assert.equal(model.cards[0].text,'未上报');assert.equal(model.cards[1].text,'未上报');
   worker.tasks_available=worker.uploads_available=false;
-  model=assessHealth(worker,[],{now:healthNow});
+  model=assessHealth(worker,{now:healthNow});
   assert.ok(model.issues.some(row=>row.code==='task_state_unavailable' && row.tone==='warn'));
-});
-
-test('history deduplicates IDs and limits each task to 20 and total to 100 within seven days', () => {
-  const events=Array.from({length:140},(_,i)=>({id:'event-'+i,at:new Date(healthNow-i*1000).toISOString(),
-    task_id:i<30?'one-task':'task-'+i,run_id:'run',kind:'recovery',detail:{state:'recovering',action:'resume',attempt:i}}));
-  events.push(events[0],{id:'old',at:new Date(healthNow-8*86400000).toISOString()},
-    {id:'future',at:new Date(healthNow+1000).toISOString()});
-  const history=historyEvents(events,healthNow);
-  assert.equal(history.length,100);assert.equal(history.filter(row=>row.task_id==='one-task').length,20);
-  assert.ok(!history.some(row=>['old','future'].includes(row.id)));
-  assert.match(eventText(history[0]),/恢复中.*复用原 session.*第 0 次/);
 });
 
 test('superseded tasks preserve execution results without becoming current or passing unexecuted tasks', () => {

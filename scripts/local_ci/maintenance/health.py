@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -54,7 +53,7 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
     stale = not heartbeat or now - heartbeat > int(
         config.get("heartbeat_stale_seconds", 180)
     )
-    tasks, recent_tasks, uploads, events = [], [], [], []
+    tasks, recent_tasks, uploads = [], [], []
     tasks_available = (state / "runs").is_dir() and os.access(state / "runs", os.R_OK | os.X_OK)
     try:
         state_paths = run_state_paths(state)
@@ -99,12 +98,6 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
                     recent_tasks.append(task)
             else:
                 tasks.append(task)
-            for event in record.get("events", []):
-                if (isinstance(event, dict) and event.get("kind") in {"recovery", "phase"}
-                        and type(event.get("at")) in (int, float)
-                        and now - 7 * 86400 <= event["at"] <= now):
-                    events.append({**event, "task_id": task["task_id"], "run_id": event.get("run_id", task["run_id"]),
-                                   "head_sha": task["head_sha"], "repository": task["repository"]})
             if task["stage"] == "publish_pending":
                 delivery = record.get("delivery") or {}
                 recovery = record.get("recovery") or {}
@@ -281,7 +274,6 @@ def collect(config: dict, *, now: float | None = None, manager=None) -> dict:
         "tasks_available": tasks_available,
         "uploads_available": tasks_available,
         "recent_tasks": recent_tasks[:20],
-        "events": events,
         "thresholds": {"progress_warning_seconds": config.get("progress_warning_seconds", 1800),
                        "progress_stalled_seconds": config.get("progress_stalled_seconds", 3600),
                        "upload_seconds": 1200},
@@ -408,40 +400,6 @@ def public_snapshot(snapshot):
             else None,
         }
 
-    events = []
-    counts, seen_events = {}, set()
-    collected = instant(snapshot.get("collected_at"))
-    observed_at = datetime.fromisoformat(collected.replace("Z", "+00:00")).timestamp() if collected else time.time()
-    raw_events = [r for r in snapshot.get("events", []) if isinstance(r, dict)]
-    for event in sorted(raw_events, key=lambda row: str(instant(row.get("at")) or ""), reverse=True):
-        at = instant(event.get("at"))
-        if not at or event.get("kind") not in {"recovery", "phase"}:
-            continue
-        seconds = datetime.fromisoformat(at.replace("Z", "+00:00")).timestamp()
-        task_id = identifier(event.get("task_id"))
-        if not observed_at - 7 * 86400 <= seconds <= observed_at or counts.get(task_id, 0) >= 20:
-            continue
-        detail = event.get("detail") if isinstance(event.get("detail"), dict) else {}
-        if event["kind"] == "recovery" and detail.get("state") == "normal":
-            continue
-        clean = {"at": at, "task_id": task_id, "run_id": identifier(event.get("run_id")),
-                 "kind": event["kind"], "detail": {k: v for k, v in recovery(detail).items()
-                 if k in {"state", "failure_code", "action", "outcome"} and v is not None}}
-        clean["detail"]["attempt"] = number(detail.get("attempt"))
-        clean["detail"]["execution_attempt"] = number(detail.get("execution_attempt"))
-        if detail.get("phase") in {"preparing", "running", "sealing", "publish_pending", "published"}:
-            clean["detail"]["phase"] = detail["phase"]
-        clean["id"] = hashlib.sha256(json.dumps(clean, sort_keys=True).encode()).hexdigest()[:16]
-        # Display metadata must not change the identity of previously published events.
-        clean.update(head_sha=sha(event.get("head_sha")), repository=repository(event.get("repository")))
-        if clean["id"] in seen_events:
-            continue
-        seen_events.add(clean["id"])
-        events.append(clean)
-        counts[task_id] = counts.get(task_id, 0) + 1
-        if len(events) >= 100:
-            break
-
     poller = snapshot.get("poller", {})
     runtime = snapshot.get("runtime", {})
     environment = snapshot.get("environments", {})
@@ -509,7 +467,6 @@ def public_snapshot(snapshot):
         "tasks_available": flag(snapshot.get("tasks_available")),
         "uploads_available": flag(snapshot.get("uploads_available")),
         "recent_tasks": [task(r) for r in snapshot.get("recent_tasks", []) if isinstance(r, dict)][:20],
-        "events": list(reversed(events)),
         "thresholds": {k: number(snapshot.get("thresholds", {}).get(k)) for k in (
             "progress_warning_seconds", "progress_stalled_seconds", "upload_seconds")},
         "active_task": task(snapshot["active_task"])
