@@ -1459,15 +1459,16 @@ class GatewayBehaviorTests(unittest.TestCase):
         result["findings"] = [
             {"summary": "架构契约遭到破坏", "blocking": True,
              "qualification": "目录扫描遗漏独立安装的插件，导致后端无法注册",
-             "code_evidence": [{"path": "src/file.py", "line": 17}]},
+             "code_evidence": {"path": "src/file.py", "line": 17},
+             "evidence": ["validation.md", "unpublished.log:8"]},
             {"summary": "异常路径丢失资源释放", "blocking": True,
              "qualification": "初始化失败后未关闭句柄，与插件发现是独立问题",
-             "code_evidence": ["src/file.py:31"]},
+             "code_evidence": "src/file.py:31-33"},
             {"summary": "可以改进错误提示", "blocking": False, "severity": "low",
-             "evidence": ["src/file.py:23", "../secret", "/absolute/path", "https://evil.invalid"]},
+             "code_evidence": ["../secret", "/absolute/path", "https://evil.invalid", "validation.md:1", "src/file.py:23", "src/file.py:23"]},
         ]
         result["blocking_reasons"].append(result["findings"][0]["summary"])
-        rendered = g.result_comment(result)
+        rendered = g.result_comment(result, artifact_urls={"validation.md": "https://example.invalid/validation.md"})
         findings = rendered.split("### 需要关注的发现", 1)[1].split("### 查看审查详情", 1)[0]
         limitations = rendered.split("### 限制说明", 1)[1]
         for reason in result["blocking_reasons"][:-1]:
@@ -1480,17 +1481,23 @@ class GatewayBehaviorTests(unittest.TestCase):
         self.assertIn("工具拒绝仓内符号链接", limitations)
         for line in (17, 23, 31):
             self.assertIn(f"/blob/{self.tested}/src/file.py#L{line}", findings)
+        self.assertIn(f"/blob/{self.tested}/src/file.py#L31-L33", findings)
         self.assertNotIn("secret", findings)
         self.assertNotIn("evil.invalid", findings)
         self.assertNotIn("/absolute/path", findings)
         self.assertNotIn("前端构建", rendered)
+        self.assertNotIn("证据 1", findings)
+        self.assertNotIn("validation.md", findings)
+        self.assertNotIn("unpublished.log", findings)
+        self.assertEqual(findings.count(f"/blob/{self.tested}/src/file.py#L23"), 1)
+        self.assertNotIn(f"/blob/{self.tested}/s)", findings)
 
     def test_sealed_advisories_recovery_and_limits_use_contributor_language(self):
         from agent_ci.delivery import seal_result
 
         result = self.result()
         result["policy"] = {"required_checks": ["change_validation"]}
-        result["summary"] = "backend_tests 已完成，control_plane 的补充范围受限。"
+        result["summary"] = "candidate 的 backend_tests 已完成，control_plane 的补充范围受限。"
         limitation = "control_plane 没有现成回归套件；必要行为已通过定向断言验证。"
         result["checks"] = [
             {"tool_id": "change_validation", "status": "pass", "summary": "行为验证完成",
@@ -1523,6 +1530,26 @@ class GatewayBehaviorTests(unittest.TestCase):
         self.assertIn("标量内存定向验证", rendered)
         for identifier in ("control_plane", "backend_tests", "custom_probe", "diff_check"):
             self.assertNotIn(g.feedback_text(identifier), rendered)
+        self.assertIn("候选 的 后端测试 已完成", rendered)
+
+    def test_comment_uses_version_names_without_inventing_unselected_limits(self):
+        result = self.result()
+        result["checks"] = [{"tool_id": "source_syntax", "status": "pass", "summary": "语法检查通过"}]
+        result["limitations"] = []
+        result["summary"] = "baseline 和 candidate 一致，base 无变化，candidate/base 与 baseline/candidate 已比较。"
+        result["checks"].append({"tool_id": "custom_probe", "display_name": "candidate profile 核对", "status": "pass",
+                                 "summary": "控制面根据冻结任务上下文核对候选 profile、venv 和 checkout，通过。"})
+        rendered = g.result_comment(result)
+        self.assertIn("base 和 候选 一致，base 无变化", rendered)
+        self.assertIn("候选/base 与 base/候选 已比较", rendered)
+        self.assertIn("候选 环境配置 核对", rendered)
+        self.assertIn("CI 流程根据任务信息核对候选 环境配置、Python 虚拟环境 和 源码目录，通过", rendered)
+        self.assertNotIn("### 限制说明", rendered)
+        self.assertNotIn("报告未列出编译器", rendered)
+        self.assertEqual(g.feedback_prose("在candidate中与Baseline一致"), "在候选中与base一致")
+        self.assertEqual(g.feedback_prose("pull_request 检查标为 limited"), "PR 检查标为 验证受限")
+        literal = "/task/candidate/checkout src/baseline.py base_sha candidate-context `python -m venv /tmp/test` `backend_enabled=false`"
+        self.assertEqual(g.feedback_prose(literal), g.feedback_text(literal))
 
     def test_result_comment_preserves_failure_without_findings_and_nonblocking_limits(self):
         result = self.result()

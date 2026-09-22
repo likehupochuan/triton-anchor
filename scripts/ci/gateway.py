@@ -1219,12 +1219,28 @@ def feedback_text(value: object, limit: int = 1600) -> str:
     return re.sub(r"([\\\[\]()*_~#!])", r"\\\1", text)
 
 
-def feedback_prose(value: object) -> str:
-    text = re.sub(
-        r"(?<![\w/.-])(" + "|".join(map(re.escape, DISPLAY_CHECKS)) + r")(?![\w/.-])",
-        lambda match: DISPLAY_CHECKS[match[0]], str(value),
+def feedback_prose(value: object, limit: int = 1600) -> str:
+    names = {
+        **DISPLAY_CHECKS,
+        "candidate/base": "候选/base", "baseline/candidate": "base/候选",
+        "base/candidate": "base/候选", "candidate/baseline": "候选/base",
+        "candidate": "候选", "baseline": "base",
+        "冻结任务上下文": "任务信息", "冻结上下文": "验证配置",
+        "task-context": "任务信息", "context": "验证配置", "variant": "源码版本",
+        "pull_request": "PR",
+        "profile": "环境配置", "venv": "Python 虚拟环境", "checkout": "源码目录",
+        "控制面": "CI 流程", "symlink": "符号链接",
+        "limited": DISPLAY_STATES["limited"], "infra_error": DISPLAY_STATES["infra_error"],
+        "backend tests": "后端测试", "backend smoke": "后端基本功能验证",
+        "frontend smoke": "前端基本功能验证", "smoke": "基本功能验证",
+    }
+    pattern = r"(?<![A-Za-z0-9_/.-])(" + "|".join(map(re.escape, names)) + r")(?![A-Za-z0-9_/.-])"
+    # Literal commands and field names are not contributor-facing prose.
+    text = "".join(
+        part if part.startswith("`") else re.sub(pattern, lambda match: names[match[0].lower()], part, flags=re.I)
+        for part in re.split(r"(`[^`]*`)", str(value))
     )
-    return feedback_text(text)
+    return feedback_text(text, limit)
 
 
 def dashboard_url(task: dict) -> str:
@@ -1254,23 +1270,29 @@ def display_state(value: str) -> str:
 
 def feedback_evidence(item: dict, task: dict, artifact_urls: dict) -> str:
     links = []
-    for reference in item.get("evidence", [])[:3]:
+    references = item.get("code_evidence", [])
+    if isinstance(references, (str, dict)):
+        references = [references]
+    if not isinstance(references, list):
+        return ""
+    for reference in references:
         if isinstance(reference, dict):
             reference = str(reference.get("path", "")) + (
                 ":" + str(reference["line"]) if reference.get("line") else ""
             )
         if not isinstance(reference, str):
             continue
-        if reference in artifact_urls:
-            links.append(f"[证据 {len(links) + 1}]({artifact_urls[reference]})")
-        elif item.get("kind"):
-            match = re.fullmatch(r"([\w./-]+)(?::([1-9][0-9]*))?", reference)
-            if match and not match[1].startswith("/") and not {"..", ".", ""}.intersection(match[1].split("/")):
-                url = f"https://github.com/{task['repository']}/blob/{task['tested_sha']}/" + quote(match[1], safe="/")
-                if match[2]:
-                    url += "#L" + match[2]
-                links.append(f"[{feedback_text(reference, 200)}]({url})")
-    return " · ".join(links)
+        match = re.fullmatch(r"([\w./-]+)(?::([1-9][0-9]*)(?:-([1-9][0-9]*))?)?", reference)
+        if match and not match[1].startswith("/") and not {"..", ".", ""}.intersection(match[1].split("/")):
+            if match[1] in artifact_urls or (match[3] and int(match[3]) < int(match[2])):
+                continue
+            url = f"https://github.com/{task['repository']}/blob/{task['tested_sha']}/" + quote(match[1], safe="/")
+            if match[2]:
+                url += "#L" + match[2]
+                if match[3]:
+                    url += "-L" + match[3]
+            links.append(f"[{feedback_text(reference, 200)}]({url})")
+    return " · ".join(list(dict.fromkeys(links))[:3])
 
 
 def result_comment(result: dict, result_url: str = "", artifact_urls: dict | None = None) -> str:
@@ -1307,10 +1329,7 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
             label = "合入阻塞" if blocking else f"风险：{risk}"
             if analysis := finding.get("qualification"):
                 text += " 分析：" + feedback_prose(analysis)
-            evidence = feedback_evidence({
-                "kind": "finding",
-                "evidence": [*finding.get("code_evidence", []), *finding.get("evidence", [])],
-            }, task, artifact_urls or {})
+            evidence = feedback_evidence(finding, task, artifact_urls or {})
             findings.append(f"【{label}】{text}" + (f" · {evidence}" if evidence else ""))
     # Findings are the reviewed issue list; failed checks are evidence, not extra defects.
     if not has_blocking_findings:
@@ -1329,7 +1348,7 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
         lines.extend(["", "本次评论没有可列出的已执行检查或审查记录；未选择、未执行和不适用项已保留在 Dashboard。"])
     for item in visible_records:
         name = item.get("tool_id", item.get("kind", ""))
-        label = DISPLAY_CHECKS.get(name, feedback_text(item.get("display_name") or "补充检查", 100))
+        label = DISPLAY_CHECKS.get(name, feedback_prose(item.get("display_name") or "补充检查", 100))
         state = display_state(item["status"])
         detail = feedback_prose(item.get("summary", ""))
         lines.append(f"| {label} | {state} | {detail} |")
@@ -1349,9 +1368,6 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
         )
     if not limitations and not findings and result["status"] != "pass":
         limitations.append("尚无完整通过结论，请补齐验证。")
-    if not any(c["tool_id"].startswith(("frontend_", "backend_")) or c["tool_id"] == "flaggems"
-               for c in result["checks"] if c["status"] in {"pass", "fail"}):
-        limitations.append("报告未列出编译器构建或运行检查；不能据此声称编译器运行行为已验证。")
     if limitations:
         lines.extend(["", "### 限制说明", "", *(f"- {x}" for x in dict.fromkeys(limitations))])
     if result_url:

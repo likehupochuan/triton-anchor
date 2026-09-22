@@ -19,7 +19,7 @@ def git(root: Path, *args: str) -> str:
     ).decode("utf-8")
 
 
-def yaml_document(text: str):
+def yaml_documents(text: str, *, allow_local_tags: bool = False):
     try:
         import yaml
     except ImportError as exc:
@@ -47,7 +47,17 @@ def yaml_document(text: str):
         return result
 
     Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
-    return yaml.load(text, Loader=Loader)
+    if allow_local_tags:
+        # MLIR configuration tags describe data, not Python object constructors.
+        def local_tag(loader, tag, node):
+            if isinstance(node, yaml.MappingNode):
+                return mapping(loader, node)
+            if isinstance(node, yaml.SequenceNode):
+                return loader.construct_sequence(node)
+            return loader.construct_scalar(node)
+
+        Loader.add_multi_constructor("!", local_tag)
+    return list(yaml.load_all(text, Loader=Loader))
 
 
 def workflow_contract(document) -> None:
@@ -111,8 +121,20 @@ def check(root: Path, base: str, tested: str) -> dict:
     rows = []
     for relative in filter(None, paths):
         path = root / relative
-        if path.is_symlink() or not path.resolve().is_relative_to(root):
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError("Changed contract path cannot be resolved: " + relative) from exc
+        if not resolved.is_relative_to(root):
             raise ValueError("Changed contract path escaped checkout: " + relative)
+        if path.is_symlink():
+            rows.append({
+                "path": relative,
+                "sha256": hashlib.sha256(str(path.readlink()).encode("utf-8")).hexdigest(),
+                "target": resolved.relative_to(root).as_posix(),
+                "checks": ["symlink_target"],
+            })
+            continue
         if not path.is_file():
             # Gitlink trees have independent policy classification/build checks.
             continue
@@ -168,10 +190,13 @@ def check(root: Path, base: str, tested: str) -> dict:
             json.loads(text)
             checks.append("json_parse")
         elif suffix in {".yml", ".yaml"}:
-            document = yaml_document(text)
+            workflow = relative.startswith(".github/workflows/")
+            documents = yaml_documents(text, allow_local_tags=not workflow)
             checks.append("yaml_parse")
-            if relative.startswith(".github/workflows/"):
-                workflow_contract(document)
+            if workflow:
+                if len(documents) != 1:
+                    raise ValueError("Workflow requires exactly one YAML document")
+                workflow_contract(documents[0])
                 checks.append("workflow_contract")
         elif suffix == ".py":
             ast.parse(text, filename=relative)

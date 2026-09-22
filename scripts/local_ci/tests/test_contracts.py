@@ -138,6 +138,59 @@ class ContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "needs"):
             contracts.check(self.checkout, self.base, sha)
 
+    def test_tagged_yaml_stream_and_workflow_boundaries(self):
+        import yaml
+
+        relative = "csrc/include/triton-linalg/Dialect/LinalgExt/IR/LinalgExtNamedStructuredOps.yaml"
+        sha = self.change(relative,
+            "--- !LinalgOpConfig\nmetadata: !LinalgOpMetadata\n  name: pooling\n"
+            "structured_op: !LinalgStructuredOpConfig\n  args:\n"
+            "  - !LinalgOperandDefConfig {name: input, kind: input_tensor}\n"
+            "--- !LinalgOpConfig\nmetadata: !LinalgOpMetadata {name: convolution}\n")
+        result = contracts.check(self.checkout, self.base, sha)
+        self.assertIn("yaml_parse", result["verified_files"][0]["checks"])
+        self.assertEqual(
+            contracts.yaml_documents("--- !Config {value: !Scalar text}\n--- !Items [a, b]\n", allow_local_tags=True),
+            [{"value": "text"}, ["a", "b"]],
+        )
+        for tail in ("--- [unterminated\n", "--- !Config {key: 1, key: 2}\n",
+                     "--- !!python/object/apply:os.system ['echo unsafe']\n"):
+            with self.subTest(tail=tail), self.assertRaises((ValueError, yaml.YAMLError)):
+                sha = self.change(relative, "--- !Config {name: valid}\n" + tail)
+                contracts.check(self.checkout, self.base, sha)
+        (self.checkout / relative).unlink()
+        workflow = "on: workflow_dispatch\njobs:\n  run:\n    uses: example/repo/.github/workflows/run.yml@main\n"
+        for content in (workflow + "---\n" + workflow, "!Config\n" + workflow):
+            with self.subTest(content=content), self.assertRaises((ValueError, yaml.YAMLError)):
+                sha = self.change(".github/workflows/router.yml", content)
+                contracts.check(self.checkout, self.base, sha)
+
+    def test_checkout_internal_symlink_targets_are_verified(self):
+        target = self.checkout / "triton/include/header.h"
+        target.parent.mkdir(parents=True)
+        target.write_text("// fixture\n")
+        link = self.checkout / "triton/python/triton/_C/include"
+        link.parent.mkdir(parents=True)
+        link.symlink_to("../../../include", target_is_directory=True)
+        (self.checkout / "header.h").symlink_to("triton/python/triton/_C/include/header.h")
+        result = contracts.check(self.checkout, self.base, self.commit())
+        rows = {row["path"]: row for row in result["verified_files"]}
+        self.assertEqual(rows["triton/python/triton/_C/include"]["target"], "triton/include")
+        self.assertEqual(rows["header.h"]["target"], "triton/include/header.h")
+        self.assertEqual(rows["header.h"]["checks"], ["symlink_target"])
+
+    def test_external_broken_and_looping_symlinks_are_rejected(self):
+        outside = self.root / "outside.txt"
+        outside.write_text("outside checkout\n")
+        link = self.checkout / "link.txt"
+        for target in ("../outside.txt", "missing.txt", "link.txt"):
+            with self.subTest(target=target):
+                link.unlink(missing_ok=True)
+                link.symlink_to(target)
+                sha = self.commit()
+                with self.assertRaisesRegex(ValueError, "escaped checkout|cannot be resolved"):
+                    contracts.check(self.checkout, self.base, sha)
+
     def test_conflicts_and_python_syntax_fail(self):
         sha = self.change("README.md", "<<<<<<< HEAD\nbroken\n>>>>>>> other\n")
         with self.assertRaises((ValueError, subprocess.CalledProcessError)):

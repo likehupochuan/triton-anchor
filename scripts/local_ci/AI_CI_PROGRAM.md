@@ -144,6 +144,8 @@ ops 或 categories 展开后超过上限会报错，不自动截断。空 impact
 每个独立阻塞结论对应一项 finding，不把同一根因造成的 change_validation、测试和架构审查失败
 分别列成多个问题。`summary` 写简短问题结论，`qualification` 说明原因、触发条件及影响，
 `code_evidence` 给出相关代码路径和行号；多个不同缺陷须分别列出，不能因同文件或同检查而合并。
+源码位置必须来自实际检出的验证提交，供 PR 评论生成可跳转的代码行链接；日志路径放入 `evidence`，
+通过完整执行报告查看，不在发现的正文或分析中插入“证据 1”“证据 2”等日志链接。
 `blocking_reasons` 只复用阻塞 findings 的简短结论，不再用另一种措辞重复解释。
 封存层从阻塞 findings 提取这些结论；无阻塞 finding 时，以已有阻塞说明、失败检查或必要审查诊断、
 失败摘要依次兜底，确保失败仍有明确原因。详细诊断与证据保留在 checks 和 reviews 中。
@@ -172,6 +174,15 @@ limitations 补充对审查结论的影响，不重复抄写检查记录。必�
 
 面向贡献者与审核者的 `summary`、检查/审查说明、发现、阻塞原因和限制说明均使用中文，明确区分
 已执行、未执行和不可比的验证。正文使用“CI 流程验证”“后端测试”等可读名称，不用内部工具 ID 代替说明。
+版本比较使用“base”和“候选”（candidate，PR 任务中为合并后验证源码），不直接使用 candidate 或 baseline 称呼版本。
+正文将 profile、task-context/context、venv、checkout、控制面分别表述为环境配置、任务信息或验证配置、
+Python 虚拟环境、源码目录、CI 流程；limited 等状态使用中文结果名称。
+描述验证范围时说明行为，例如“候选环境未启用后端，因此未执行后端测试”，不要只抄写 backend_enabled=false。
+与缺陷直接相关的 API、ABI、LLVM、JIT、AnchorIR 和代码名称保留；entry point、registry、pipeline 等
+涉及具体机制时说明是插件注册入口、注册表、编译流程，不堆叠缩写或泛列与改动无关的架构名词。
+命令和字段原文需要引用时使用代码标记，避免与正文混淆。
+按改动范围未选择的检查不构成限制，不为此追加未验证编译器运行行为的免责声明；
+确实影响必要验证或结论的缺失仍须说明。
 自定义检查提供中文 `display_name`。JSON 字段名、状态枚举、tool_id、命令、路径与原始日志保留原貌；
 原始异常和修复经过留在 details 或证据文件中，对外简述其影响，不把未知原因猜成结论。
 PR 和 push 任务生成的 `ai_custom_tools/validation.md`，标题、正文、审查结论和验证说明均使用中文；代码、命令、路径及原始日志保留原文。
@@ -208,7 +219,8 @@ PR 和 push 任务生成的 `ai_custom_tools/validation.md`，标题、正文、
 `infra_error`、`cancelled`、`warning`（非阻塞提示）、`limited`（验证范围受限）、`not_applicable` 或
 `not_selected`；最低必检未完成不能通过。通过但有低风险提示或不影响必要验证的补充限制时，整体使用 `pass`。
 findings 每项提供 `severity`、`summary`、`blocking`，可用 `qualification` 补充分析，
-用 `code_evidence`（如 `src/file.py:17`）和 `evidence` 引用代码与复现证据。
+用 `code_evidence` 列表（如 `["src/file.py:17"]` 或 `[{"path":"src/file.py","line":17}]`）
+引用问题代码行；连续多行可写为 `src/file.py:17-20`。`evidence` 列表引用复现证据文件。
 `limitations` 为中文说明字符串列表；无独立限制说明时留空。
 检查的 `limitation` 为可选中文字符串，只说明仍存在的限制；已修复问题不填写。
 检查的 `details` 可直接保留基础工具结果中的业务数据，供页面展示算子、后端与性能。
