@@ -437,12 +437,13 @@ test('failed close is re-evaluated against unreadable, old or newly faulty snaps
   }
 });
 
-test('task identity and new terminal evidence resolve recovery; stable event IDs deduplicate timeline', async () => {
+test('later active Codex success resolves an earlier task connection fault; stable event IDs deduplicate timeline', async () => {
   const h = fixture();
   const task = {task_id: 'task-a', run_id: 'run-1', stage: 'running', codex_status: 'connection_error',
     recovery: {state: 'retry_wait', failure_code: 'connection_error', action: 'resume'},
     budget: {codex_attempts_used: 2, codex_attempts_limit: 10,
       codex_deadline_at: new Date(h.now + 3600000).toISOString()}};
+  h.health.tasks_available = true;
   h.health.tasks = [task]; h.health.active_task = task;
   h.health.events = [{id: 'event-a', at: h.health.collected_at, kind: 'recovery', task_id: 'task-a', run_id: 'run-1',
     detail: {state: 'retry_wait', action: 'resume', failure_code: 'connection_error', attempt: 2}}];
@@ -455,12 +456,11 @@ test('task identity and new terminal evidence resolve recovery; stable event IDs
   assert.match(h.issues[0].body, /第 10 次/);
   h.advance(); await h.run();
   assert.equal(h.writes.length, 1, 'same source event is not appended or patched again');
-  h.health.tasks = [{...task, task_id: 'task-b', codex_status: 'running', recovery: {state: 'normal'}}];
+  h.advance();
+  h.health.tasks = [{...task, task_id: 'task-b', codex_status: 'running', codex_alive: true,
+    last_progress_at: h.health.collected_at, recovery: {state: 'normal'}}];
   h.health.active_task = h.health.tasks[0];
-  h.advance(); await h.run();
-  assert.equal(h.issues[0].state, 'open', 'another task cannot prove task-a recovered');
-  h.health.recent_tasks = [{...task, stage: 'published', result_status: 'fail', codex_status: 'succeeded', recovery: {state: 'recovered'}}];
-  h.advance(); await h.run();
+  await h.run();
   assert.equal(h.issues[0].state, 'closed');
   assert.equal(JSON.parse(h.cached).events.filter(row => row.id === 'event-a').length, 1);
 });

@@ -101,7 +101,7 @@ function mergeEvents(previous, incoming, now) {
 }
 
 // Missing telemetry never proves recovery. Remember which task/service caused each fault.
-function faults(snapshot, previous, references, now) {
+function faults(snapshot, previous, references, now, detectedAt, firstSeen) {
   const result = new Set(), detected = new Set(), nextReferences = { ...references };
   const check = (code, bad, known, affected = []) => {
     if (bad) { result.add(code); detected.add(code); }
@@ -122,12 +122,31 @@ function faults(snapshot, previous, references, now) {
   const endedFailed = row => row.stage === 'published' && row.result_status === 'infra_error';
   const completed = row => row.recovery?.state === 'recovered'
     || ['published', 'publish_pending', 'sealing'].includes(row.stage) && ['pass', 'fail', 'cancelled'].includes(row.result_status);
+  const codexHealthy = row => CODEX_OK.has(row.codex_status)
+    || ['published', 'publish_pending', 'sealing'].includes(row.stage) && ['pass', 'fail'].includes(row.result_status);
+  const referencedConnectionRows = (references.codex_connection_error || [])
+    .flatMap(id => knownTasks.filter(row => identity(row) === id));
+  const referencedConnectionTimes = referencedConnectionRows.flatMap(row =>
+    [row.updated_at, row.last_progress_at, row.recovery?.last_recovery_at].filter(instant).map(Date.parse));
+  const connectionFaultAt = detectedAt.codex_connection_error
+    || (referencedConnectionTimes.length ? new Date(Math.max(...referencedConnectionTimes)).toISOString() : firstSeen);
+  const afterConnectionFault = value => instant(connectionFaultAt) && instant(value)
+    && Date.parse(value) > Date.parse(connectionFaultAt);
+  // Require explicit live progress or a later published result; missing task telemetry
+  // and the cancelled faulting task cannot prove that connectivity recovered.
+  const laterConnectionSuccess = snapshot.tasks_available === true && (
+    active.some(row => row.stage === 'running' && row.codex_alive === true
+      && CODEX_OK.has(row.codex_status) && afterConnectionFault(row.last_progress_at))
+    || rows(snapshot.recent_tasks).some(row => codexHealthy(row)
+      && [row.updated_at, row.last_progress_at, row.recovery?.last_recovery_at].some(afterConnectionFault))
+  );
   for (const error of CODEX_ERRORS) {
     const code = `codex_${error}`;
     const managed = row => error === 'connection_error' && (automaticConnectionRetry(row, now)
       || row.codex_status === 'connection_error' && row.recovery?.state === 'exhausted');
     const bad = active.filter(row => row.codex_status === error && !managed(row));
-    check(code, bad.length > 0, taskKnown(code, row => CODEX_OK.has(row.codex_status) || row.recovery?.state === 'recovered'
+    check(code, bad.length > 0, error === 'connection_error' && laterConnectionSuccess
+      || taskKnown(code, row => CODEX_OK.has(row.codex_status) || row.recovery?.state === 'recovered'
       || managed(row) || ['sealing', 'publish_pending', 'published'].includes(row.stage)
         && ['pass', 'fail'].includes(row.result_status)), bad.map(identity).filter(Boolean));
   }
@@ -303,6 +322,7 @@ function resetIncident(state) {
   state.signature = '';
   state.codes = [];
   state.references = {};
+  state.detected_at = {};
   state.pending_close = null;
   state.needs_reopen = false;
   state.fault_snapshot_at = null;
@@ -314,6 +334,7 @@ async function runMonitor(env, { fetcher, now, current, read }) {
     first_seen: null, issue_number: null, signature: '', codes: [], read_failures: 0,
   };
   state.references ||= {};
+  state.detected_at ||= {};
   const at = now.toISOString(), timestamp = now.getTime();
   const patch = (body, extra = {}) => issueRequest(fetcher, env.GITEE_TOKEN,
     `/repos/${CONFIG.owner}/issues/${encodeURIComponent(state.issue_number)}`, 'PATCH',
@@ -348,15 +369,21 @@ async function runMonitor(env, { fetcher, now, current, read }) {
       state.last_source_at = current.collected_at;
       state.events = mergeEvents(state.events, current.events, timestamp);
       if (fresh) {
-        const observed = faults(current, prior, state.references, timestamp);
+        const observed = faults(current, prior, state.references, timestamp, state.detected_at, state.first_seen);
         codes = observed.codes;
         const faultAt = Date.parse(state.fault_snapshot_at || state.first_seen);
         if (Number.isFinite(faultAt) && sourceAt <= faultAt) {
           codes = [...new Set([...codes, ...prior])];
           for (const code of prior) if (state.references[code]) observed.references[code] = state.references[code];
         }
-        if (observed.detected.length) state.fault_snapshot_at = current.collected_at;
+        if (observed.detected.length) {
+          state.fault_snapshot_at = current.collected_at;
+          for (const code of observed.detected) state.detected_at[code] = current.collected_at;
+        }
         state.references = observed.references;
+        for (const code of Object.keys(state.detected_at)) {
+          if (!codes.includes(code)) delete state.detected_at[code];
+        }
         state.finished_failed ||= observed.finishedFailed;
       } else codes = [...new Set([...prior.filter(code => code !== 'source_unreadable'), 'snapshot_stale'])];
     }
