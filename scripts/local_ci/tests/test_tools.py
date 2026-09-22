@@ -67,6 +67,23 @@ def test_selected_nodes_and_build_parameters():
             runner.plan("frontend_build", context(), {"jobs": jobs})
 
 
+def test_backend_pytest_supports_top_level_conftest_import(tmp_path):
+    backend = tmp_path / "backend"
+    (backend / "tests").mkdir(parents=True)
+    (backend / "tests/conftest.py").write_text("VALUE = 42\n")
+    (backend / "tests/test_jit.py").write_text("from conftest import VALUE\ndef test_jit(): assert VALUE == 42\n")
+    ctx = context()
+    ctx.update(python_bin=sys.executable, tools_dir=str(ROOT / "tools"), artifact_dir=str(tmp_path / "artifacts"))
+    ctx["profile"]["tools"]["backend_dir"] = str(backend)
+    command = runner.plan("backend_tests", ctx)["commands"][-1]
+    Path(command["cwd"]).mkdir(parents=True)
+    process = subprocess.run(command["argv"], cwd=command["cwd"], capture_output=True, text=True)
+    assert process.returncode == 0, process.stdout + process.stderr
+    report = json.loads((Path(command["cwd"]) / "tests.json").read_text())
+    assert report["passed"] == 1 and report["errors"] == 0
+    assert "--import-mode=importlib" in runner.plan("frontend_tests", ctx)["commands"][-1]["argv"]
+
+
 @pytest.mark.parametrize("configured,explicit,expected", [
     (None, None, 12), ("4", None, 4), ("12", 32, 32),
 ])

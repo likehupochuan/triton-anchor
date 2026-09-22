@@ -329,7 +329,8 @@ def scan(files: list[dict[str, object]]) -> tuple[list[Finding], list[Finding]]:
                 if has_ci_review_exception(filename):
                     continue
                 if pattern.search(line):
-                    blocking.append(Finding("error", filename, line_number, message))
+                    # Network capability alone is advisory, not a code execution finding.
+                    warnings.append(Finding("warning", filename, line_number, message))
 
             if dependency_control_path:
                 for message, pattern in DEPENDENCY_SOURCE_PATTERNS:

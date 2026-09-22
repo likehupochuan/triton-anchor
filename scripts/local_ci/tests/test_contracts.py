@@ -109,6 +109,12 @@ class ContractTests(unittest.TestCase):
         )
         result = contracts.check(self.checkout, self.base, sha)
         self.assertIn("workflow_contract", result["verified_files"][0]["checks"])
+        process = self.invoke(sha)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        report = json.loads((self.root / "artifacts/control_plane/result.json").read_text())
+        self.assertEqual(report["status"], "limited")
+        self.assertEqual(report["details"]["control_plane"]["regression_paths"], [])
+        self.assertTrue(report["details"]["control_plane"]["regression_required"])
 
     def test_bad_yaml_and_empty_workflow_fail(self):
         sha = self.change(

@@ -63,6 +63,12 @@ def test_executor_selects_task_venv_and_prepared_management_python(tmp_path):
         assert context["environment_fingerprint"] == runtimes[variant]["environment_fingerprint"]
         assert context["artifact_dir"] == f"/task/artifacts/{variant}"
         assert ("BACKEND_PATH" in env) == (variant == "candidate")
+        if variant == "candidate":
+            assert env["TRITON_SOURCE_DIR"] == f"/task/{variant}/checkout/triton"
+            assert env["TRITON_ANCHOR_SOURCE_DIR"] == f"/task/{variant}/checkout"
+        else:
+            assert "TRITON_SOURCE_DIR" not in env
+            assert "TRITON_ANCHOR_SOURCE_DIR" not in env
     assert "/opt/ci/bin/python" in executor.codex_command([])
 
 

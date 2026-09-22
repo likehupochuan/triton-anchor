@@ -1485,6 +1485,45 @@ class GatewayBehaviorTests(unittest.TestCase):
         self.assertNotIn("/absolute/path", findings)
         self.assertNotIn("前端构建", rendered)
 
+    def test_sealed_advisories_recovery_and_limits_use_contributor_language(self):
+        from agent_ci.delivery import seal_result
+
+        result = self.result()
+        result["policy"] = {"required_checks": ["change_validation"]}
+        result["summary"] = "backend_tests 已完成，control_plane 的补充范围受限。"
+        limitation = "control_plane 没有现成回归套件；必要行为已通过定向断言验证。"
+        result["checks"] = [
+            {"tool_id": "change_validation", "status": "pass", "summary": "行为验证完成",
+             "evidence": ["validation.md"]},
+            {"tool_id": "backend_tests", "status": "pass", "summary": "已使用等价入口执行同一组断言。",
+             "details": {"initial_status": "infra_error", "recovery": "修复导入方式后验证通过"}},
+            {"tool_id": "control_plane", "status": "limited", "summary": "缺少现成回归套件",
+             "limitation": limitation},
+            {"tool_id": "diff_check", "status": "warning", "summary": "文档行尾空白"},
+            {"tool_id": "custom_probe", "display_name": "标量内存定向验证", "status": "pass", "summary": "四组断言通过"},
+        ]
+        result["findings"] = [{"summary": "文档行尾空白", "severity": "low", "blocking": False}]
+        result["limitations"] = [limitation]
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "artifacts").mkdir()
+            (source / "artifacts/validation.md").write_text("validated fixture\n")
+            sealed = seal_result(self.task, result["run_id"], result, result["policy"],
+                                 result["environment"], source, source / "sealed")
+        self.assertEqual(sealed["status"], "pass")
+        rendered = g.result_comment(sealed)
+        limits = rendered.split("### 限制说明", 1)[1]
+        self.assertEqual(limits.count("没有现成回归套件"), 1)
+        self.assertNotIn("行尾空白", limits)
+        self.assertNotIn("【合入阻塞】", rendered)
+        self.assertNotIn("验证未完成（环境或执行异常）", rendered)
+        self.assertIn("【风险：低】文档行尾空白", rendered)
+        self.assertIn("| 格式检查 | 提示 |", rendered)
+        self.assertIn("| CI 流程验证 | 验证受限 |", rendered)
+        self.assertIn("标量内存定向验证", rendered)
+        for identifier in ("control_plane", "backend_tests", "custom_probe", "diff_check"):
+            self.assertNotIn(g.feedback_text(identifier), rendered)
+
     def test_result_comment_preserves_failure_without_findings_and_nonblocking_limits(self):
         result = self.result()
         result["status"] = "fail"
@@ -1749,7 +1788,7 @@ class GatewayBehaviorTests(unittest.TestCase):
             first.put({"a.json": {"a": 3}}, ("a.json",))
 
     def test_security_scans_real_git_diff(self):
-        (self.source / "unsafe.py").write_text("import socket\n")
+        (self.source / "unsafe.py").write_text("import socket\nimport os\nos." "system('example')\n")
         git(self.source, "add", ".")
         git(self.source, "commit", "-qm", "unsafe")
         tested = git(self.source, "rev-parse", "HEAD")

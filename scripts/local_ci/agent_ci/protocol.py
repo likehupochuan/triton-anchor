@@ -33,7 +33,7 @@ IDENTITY_FIELDS = (
     "full",
 )
 RESULT_STATUSES = {"pass", "fail", "infra_error", "cancelled"}
-CHECK_STATUSES = RESULT_STATUSES | {"not_selected", "not_applicable", "skipped"}
+CHECK_STATUSES = RESULT_STATUSES | {"not_selected", "not_applicable", "skipped", "warning", "limited"}
 
 
 class ContractError(ValueError):

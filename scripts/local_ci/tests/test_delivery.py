@@ -271,6 +271,39 @@ def test_limitations_do_not_turn_a_completed_review_into_a_code_failure(tmp_path
     assert any("Required test dependency" in reason for reason in result["limitations"])
 
 
+@pytest.mark.parametrize("status", ["warning", "limited"])
+@pytest.mark.parametrize("required", [False, True])
+def test_advisory_and_limited_checks_do_not_override_minimum_validation(tmp_path, status, required):
+    value = answer()
+    row = {"tool_id": "frontend_tests" if required else "supplemental", "status": status,
+           "summary": "Supplemental observation", "limitation": "Optional coverage unavailable"}
+    if required:
+        value["checks"] = [row]
+    else:
+        value["checks"].append(row)
+    result = seal(tmp_path, value)
+    assert result["status"] == ("infra_error" if required else "pass")
+    assert not result["blocking_reasons"]
+    assert result["limitations"] == ([row["limitation"]] if required or status == "limited" else [])
+
+
+def test_repaired_checks_and_format_warning_keep_final_outcome_and_single_limit(tmp_path):
+    value = answer()
+    value["checks"][0].update(details={"initial_status": "infra_error", "repair": "Corrected import mode"})
+    explanation = "缺少补充回归套件；必要行为已通过独立定向用例验证。"
+    value["checks"] += [
+        {"tool_id": "diff_check", "status": "warning", "summary": "文档行尾空白", "details": {"exit_code": 2}},
+        {"tool_id": "control_plane", "status": "limited", "summary": "没有现成回归套件", "limitation": explanation},
+    ]
+    value["findings"] = [{"severity": "low", "blocking": False, "summary": "文档行尾空白"}]
+    value["limitations"] = [explanation]
+    result = seal(tmp_path, value)
+    assert result["status"] == "pass"
+    assert result["blocking_reasons"] == []
+    assert result["limitations"] == [explanation]
+    assert result["checks"][0]["details"]["initial_status"] == "infra_error"
+
+
 def test_only_selected_files_are_published_and_text_is_redacted(tmp_path):
     artifacts = tmp_path / "run/artifacts"
     artifacts.mkdir(parents=True)

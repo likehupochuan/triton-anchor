@@ -67,9 +67,10 @@ def execute(payload: dict) -> None:
             command += ["-k", payload["parameters"]["keyword"]]
         command += [str(root / path) for path in selected]
         run(command, cwd=out)
-    elif regression_required and not dashboard_tests:
-        raise ValueError("Control change has no runnable regression suite")
+    missing_suite = regression_required and not selected and not dashboard_tests
     result.update(
+        status="limited" if missing_suite else "pass",
+        summary="仓库未提供对应回归套件；需按改动生成并执行定向测试。" if missing_suite else "契约检查与所选回归验证通过。",
         task_id=context["task_id"],
         target_sha=context["target_sha"],
         regression_required=regression_required,

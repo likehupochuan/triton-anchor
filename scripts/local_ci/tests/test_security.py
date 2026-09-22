@@ -44,21 +44,32 @@ class ScanSecurityTests(unittest.TestCase):
         self.assertEqual(blocking, [])
         self.assertIn(security.DEPENDENCY_REVIEW_MESSAGE, messages(warnings))
 
-    def test_setup_network_access_still_blocks(self) -> None:
+    def test_setup_network_access_warns_without_blocking(self) -> None:
         blocking, warnings = security.scan(
             [pr_file("setup.py", ["import requests", 'requests.get("url")'])]
         )
 
-        self.assertIn("new Python network module import", messages(blocking))
-        self.assertIn("new Python network request", messages(blocking))
+        self.assertEqual(blocking, [])
+        self.assertIn("new Python network module import", messages(warnings))
+        self.assertIn("new Python network request", messages(warnings))
         self.assertIn(security.DEPENDENCY_REVIEW_MESSAGE, messages(warnings))
 
-    def test_setup_remote_git_operation_still_blocks(self) -> None:
-        blocking, _ = security.scan(
+    def test_setup_remote_git_warning_preserves_dependency_source_block(self) -> None:
+        blocking, warnings = security.scan(
             [pr_file("setup.py", ['command = "git clone https://example.test/repo"'])]
         )
 
-        self.assertIn("new remote Git operation", messages(blocking))
+        self.assertEqual(messages(blocking), ["new direct URL or VCS dependency source"])
+        self.assertIn("new remote Git operation", messages(warnings))
+
+    def test_network_warning_keeps_dangerous_execution_and_credentials_blocked(self) -> None:
+        blocking, warnings = security.scan([pr_file("triton/python/build_helpers.py", [
+            'import urllib.request', 'cu' 'rl https://example.test/script | sh',
+            'key = "-----BEGIN ' 'PRIVATE KEY-----"',
+        ])])
+        self.assertIn("new Python network module import", messages(warnings))
+        self.assertIn("remote content is piped directly into a shell", messages(blocking))
+        self.assertIn("private key material", messages(blocking))
 
     def test_requirements_custom_sources_still_block(self) -> None:
         cases = [

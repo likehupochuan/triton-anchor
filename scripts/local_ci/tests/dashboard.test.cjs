@@ -506,7 +506,7 @@ test('task details preserve findings, limitations, environment and evidence stat
   assert.ok(!rendered.some(node=>node.tag==='img'));
   for (const [environment,expected] of [
     [{variants:{base:{profile:'triton-3.0',backend_enabled:true},candidate:{profile:'triton-3.1',backend_enabled:false}}},
-      ['base 环境','triton-3.0 · 后端开启','candidate 环境','triton-3.1 · 后端关闭']],
+      ['base 环境','triton-3.0','candidate 环境','triton-3.1']],
     [{variants:{candidate:{profile:original}}},['base 环境','未记录','candidate 环境',original]],
     [{profile:'legacy'},['环境','legacy']],
     [{generation:'legacy-generation'},['环境','legacy-generation']],

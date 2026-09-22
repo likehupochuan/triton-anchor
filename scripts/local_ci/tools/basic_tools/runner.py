@@ -373,7 +373,7 @@ def plan(
             "-o",
             "addopts=",
             "--capture=sys",
-            "--import-mode=importlib",
+            "--import-mode=prepend" if tool_id == "backend_tests" else "--import-mode=importlib",
             "--rootdir",
             test_source,
         ]
@@ -600,6 +600,8 @@ def execute(
                 pass  # The command failure and raw log remain available.
     if details:
         result["details"] = details
+    if result["status"] == "pass" and details.get("control_plane", {}).get("status") == "limited":
+        result.update(status="limited", reason=details["control_plane"]["summary"])
     result["duration_seconds"] = round(time.monotonic() - started, 3)
     result["artifacts"] = [
         str(path.relative_to(out)) for path in sorted(out.iterdir())
@@ -630,7 +632,7 @@ def main() -> int:
         args.tool_id, context, json.loads(args.parameters)
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if result["status"] in {"pass", "ready", "not_applicable"} else 1
+    return 0 if result["status"] in {"pass", "ready", "not_applicable", "limited"} else 1
 
 
 if __name__ == "__main__":

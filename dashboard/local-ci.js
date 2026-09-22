@@ -1,5 +1,5 @@
 /* Render remote result text as text nodes. No result field can inject HTML. */
-const labels = {success:'通过',passed:'通过',failure:'未通过',failed:'未通过',error:'执行错误',evidence_pending:'证据待确认',cancelled:'已取消',superseded:'已失效 / 被替代',skipped:'未执行',not_selected:'本次未选择',not_applicable:'不适用',healthy:'正常',degraded:'异常',offline:'离线',snapshot_stale:'快照已过期',unknown:'状态未知',waiting:'等待',ready:'已交付',pending:'待交付',expired:'已到期',not_comparable:'无可比基线'};
+const labels = {success:'通过',passed:'通过',failure:'未通过',failed:'未通过',warning:'提示',limited:'验证受限',error:'执行错误',evidence_pending:'证据待确认',cancelled:'已取消',superseded:'已失效 / 被替代',skipped:'未执行',not_selected:'本次未选择',not_applicable:'不适用',healthy:'正常',degraded:'异常',offline:'离线',snapshot_stale:'快照已过期',unknown:'状态未知',waiting:'等待',ready:'已交付',pending:'待交付',expired:'已到期',not_comparable:'无可比基线'};
 const names = {environment:'环境与依赖',frontend_build:'前端构建',frontend_install:'前端安装与导入',frontend_tests:'前端测试',wheel_install:'Wheel 安装与导入',frontend_smoke:'前端基本功能验证',backend_build:'后端构建',backend_install:'后端安装与发现',backend_tests:'后端测试',backend_rebuild:'后端重新构建',backend_smoke:'后端基本功能与 JIT 验证',flaggems:'FlagGems',compile_time:'编译时间性能',pass_profile:'编译阶段性能剖析',ir_serialization:'IR 序列化',pr_information:'PR 说明与改动核验',architecture_review:'架构与接口约束审查',control_plane:'CI 流程检查',custom_test:'定向测试'};
 const friendlyReasons = {'cancelled':'任务已取消','missing required check':'必检尚未完成','PR intent and attributes were not reviewed':'PR 意图与属性尚未完成核验','all commands completed successfully':'命令执行成功','not selected for this change':'本次改动未触发该项检查','minimum frontend coverage':'编译器改动的最低检查范围','frontend code or test behavior changed':'前端代码或测试行为发生变化','architecture contract review is mandatory':'架构审查为必检项'};
 const model = {data:null, selected:null};
@@ -122,10 +122,8 @@ function renderDetail(run) {
   const identity=el('div','ci-identity'); identity.append(el('code','',displaySha(run)),el('span','',date(run.completed_at))); root.append(identity);
   const environmentRows = run.environment.variants
     ? ['base','candidate'].map(variant => {
-      const environment = run.environment.variants[variant];
       const profile = LocalCIData.environmentProfile(run.environment,variant) || '未记录';
-      const backend = environment?.backend_enabled === true ? ' · 后端开启' : environment?.backend_enabled === false ? ' · 后端关闭' : '';
-      return [variant+' 环境',profile+backend];
+      return [variant+' 环境',profile];
     })
     : [['环境',LocalCIData.environmentProfile(run.environment)||'未记录']];
   facts(root,[['本地验证',pendingEvidence?'证据待确认':labels[run.local_conclusion]||run.local_conclusion],...environmentRows]);

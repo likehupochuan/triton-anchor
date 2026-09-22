@@ -6,7 +6,7 @@
 
 结果与所选文件随同一 Git 提交发布。页面展示所有检查状态、审查结论和文件链接；未选择、未执行和不适用的检查保留原始状态及说明，未选中或超预算的文件保留在主机，并说明省略原因。PR 评论只列出实际执行的检查，并链接回本页面查看完整记录。
 全量算子视图只显示真实 full FlagGems 结果；性能读取任务测量和同条件比较，无数据时明确留空。
-任务详情分别展示 `environment.variants.base` 与 `candidate` 的 Profile 和已记录的后端开关；
+任务详情分别展示 `environment.variants.base` 与 `candidate` 的 Profile；
 全量算子、后端汇总及性能视图使用 candidate 的 Profile。单环境结果读取 `environment.profile` 或
 `generation`；环境信息缺失时显示“未记录”，不根据目标分支或另一侧环境推断。
 仓库中的初始 feed 为空，没有展示样例成功数据。

@@ -144,6 +144,8 @@ class DockerExecutor:
         )
         if runtime["backend_enabled"]:
             env["BACKEND_PATH"] = str(root / "backend")
+            env["TRITON_SOURCE_DIR"] = str(root / "checkout/triton")
+            env["TRITON_ANCHOR_SOURCE_DIR"] = str(root / "checkout")
         env.pop("PYTHONHOME", None)
         return env
 

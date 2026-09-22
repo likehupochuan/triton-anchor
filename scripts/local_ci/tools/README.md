@@ -42,6 +42,8 @@
 `execute(tool_id, context, parameters)` 使用同一实现。执行结果写到
 `artifact_dir/<tool_id>/result.json`，命令输出在同目录的 `command.log`。
 工具报告记录状态、参数、耗时和产物，可用于 AI 最终的 `agent-result.json` 汇总。
+CI 流程检查没有可运行回归套件时返回 `limited`，保存已完成的契约检查和缺失范围；
+Codex 应继续生成并执行定向测试，不能将工具缺少套件误判为环境故障或直接声称行为已通过。
 
 build 参数为 `jobs`、`build_mode`；install 可用 `wheel` 指定现有 wheel，
 默认读取 `artifact_dir/<build_tool>/wheel.json`。若构建产物在另一目录，
@@ -55,7 +57,11 @@ pytest 参数为 `paths`（相对路径或 node ID）、`keyword`；FlagGems 为
 不要拆批规避上限。full 保留完整算子目录，每个算子仍可包含多个参数化用例。
 
 普通 pytest 输出简单计数，失败、空收集和全部跳过都不会显示为通过。
+后端选测使用 pytest 的 prepend 导入模式，以兼容测试对同目录 conftest 的导入；
+前端选测保留 importlib 模式。两者都使用已选任务解释器和隔离启动，不读取用户 Python 环境。
 Worker 为 base/candidate 分别提供完整 `runtime_env`、LLVM、profile、能力与环境指纹。
+启用后端的任务环境同时设置 `TRITON_SOURCE_DIR` 为该侧 checkout 下的 `triton`，
+`TRITON_ANCHOR_SOURCE_DIR` 为该侧 checkout；base 与 candidate 不共享源码目录变量。
 基础工具只继承调用端的网络代理／证书设置，构建环境由选中的 context 提供；不能借用另一侧
 的后端、LLVM 或 Python 搜索路径。原生 shell 使用同一环境入口：
 

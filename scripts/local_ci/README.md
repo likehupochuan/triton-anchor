@@ -127,6 +127,9 @@ state_dir/
 必要审查的诊断或失败摘要兜底。详细诊断与证据保留在 `checks`、`reviews` 中。
 `limitations` 单独保存环境、工具或证据不足的限制说明，在 PR 评论和 Dashboard 独立展示，
 不改变检查的实际状态和最低验证要求。
+单项限制由检查的 `limitation` 提供，顶层仅补充整体限制，避免重复。补充检查的 `warning`
+表示非阻塞提示，`limited` 表示范围受限，两者不自动导致整体失败；最低必检仍须有通过证据。
+检查记录反映最终行为验证结论，修复或等价入口验证成功后使用 `pass`，初次异常保留在 details 和日志中。
 
 GitHub 阶段状态及 `Summary` 使用 Commit Status，PR 写入 `head_sha`，
 实际验证对应冻结的 `tested_sha`。Basic → API → Security 按成功依赖推进；

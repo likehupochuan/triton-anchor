@@ -1195,6 +1195,7 @@ DISPLAY_STATES = {
     "pass": "通过", "success": "通过", "fail": "未通过", "failure": "未通过",
     "infra_error": "验证未完成（环境或执行异常）", "error": "异常",
     "cancelled": "已取消", "skipped": "未执行", "not_selected": "本次未选择",
+    "warning": "提示", "limited": "验证受限",
     "not_applicable": "不适用", "queued": "等待执行", "in_progress": "执行中",
 }
 DISPLAY_CHECKS = {
@@ -1206,6 +1207,7 @@ DISPLAY_CHECKS = {
     "frontend_tests": "前端测试", "backend_build": "后端构建", "backend_install": "后端安装",
     "backend_smoke": "后端基本功能", "backend_tests": "后端测试", "flaggems": "FlagGems 算子验证",
     "compile_time": "编译耗时", "pass_profile": "编译阶段性能", "ir_serialization": "IR 序列化性能",
+    "diff_check": "格式检查", "source_syntax": "源码语法检查",
 }
 COMMENT_OMIT_STATUSES = frozenset({"not_selected", "skipped", "not_applicable"})
 
@@ -1215,6 +1217,14 @@ def feedback_text(value: object, limit: int = 1600) -> str:
     text = re.sub(r"\s+", " ", str(value)).strip()[:limit]
     text = html.escape(text).replace("@", "＠").replace("|", "/").replace("`", "'")
     return re.sub(r"([\\\[\]()*_~#!])", r"\\\1", text)
+
+
+def feedback_prose(value: object) -> str:
+    text = re.sub(
+        r"(?<![\w/.-])(" + "|".join(map(re.escape, DISPLAY_CHECKS)) + r")(?![\w/.-])",
+        lambda match: DISPLAY_CHECKS[match[0]], str(value),
+    )
+    return feedback_text(text)
 
 
 def dashboard_url(task: dict) -> str:
@@ -1279,24 +1289,24 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
         "## Local CI 审查反馈", "", f"**结论：{verdict[result['status']]}**", "",
         f"PR 提交：`{task['head_sha']}`", "",
         f"合并后验证提交：`{task['tested_sha']}`",
-        "", "### 变更意图与审查结论", "", feedback_text(result["summary"]),
+        "", "### 变更意图与审查结论", "", feedback_prose(result["summary"]),
     ]
     findings = []
     has_blocking_findings = False
-    limitations = [feedback_text(item) for item in result.get("limitations", [])]
+    limitations = [feedback_prose(item) for item in result.get("limitations", [])]
     for item in records:
         if item.get("status") in {"infra_error", "cancelled"} and "limitations" not in result:
             name = item.get("tool_id", item.get("kind", ""))
-            limitations.append(feedback_text(f"{DISPLAY_CHECKS.get(name, name)}：{item.get('summary') or display_state(item['status'])}"))
+            limitations.append(feedback_prose(f"{DISPLAY_CHECKS.get(name, '补充检查')}：{item.get('summary') or display_state(item['status'])}"))
     for finding in result["findings"]:
-        text = feedback_text(finding.get("summary", ""))
+        text = feedback_prose(finding.get("summary", ""))
         if text:
             risk = {"critical": "严重", "high": "高", "medium": "中", "low": "低", "info": "提示"}.get(finding.get("severity"), "未标注")
             blocking = finding.get("blocking") or finding.get("severity") in {"high", "critical"}
             has_blocking_findings |= bool(blocking)
             label = "合入阻塞" if blocking else f"风险：{risk}"
             if analysis := finding.get("qualification"):
-                text += " 分析：" + feedback_text(analysis)
+                text += " 分析：" + feedback_prose(analysis)
             evidence = feedback_evidence({
                 "kind": "finding",
                 "evidence": [*finding.get("code_evidence", []), *finding.get("evidence", [])],
@@ -1304,7 +1314,7 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
             findings.append(f"【{label}】{text}" + (f" · {evidence}" if evidence else ""))
     # Findings are the reviewed issue list; failed checks are evidence, not extra defects.
     if not has_blocking_findings:
-        reasons = [feedback_text(reason) for reason in result["blocking_reasons"]]
+        reasons = [feedback_prose(reason) for reason in result["blocking_reasons"]]
         if result["status"] == "fail":
             findings.extend(f"【合入阻塞】{reason}" for reason in reasons if reason not in limitations)
         else:
@@ -1319,9 +1329,9 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
         lines.extend(["", "本次评论没有可列出的已执行检查或审查记录；未选择、未执行和不适用项已保留在 Dashboard。"])
     for item in visible_records:
         name = item.get("tool_id", item.get("kind", ""))
-        label = DISPLAY_CHECKS.get(name, "补充检查（" + feedback_text(name) + "）")
+        label = DISPLAY_CHECKS.get(name, feedback_text(item.get("display_name") or "补充检查", 100))
         state = display_state(item["status"])
-        detail = feedback_text(item.get("summary", ""))
+        detail = feedback_prose(item.get("summary", ""))
         lines.append(f"| {label} | {state} | {detail} |")
     if visible_records:
         lines.extend(["", "</details>"])
