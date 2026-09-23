@@ -266,15 +266,20 @@ class Worker:
             checks, reviews = report.get("checks"), report.get("reviews")
             if not isinstance(checks, list) or not isinstance(reviews, list):
                 return None
-            from agent_ci.delivery import _records
+            from agent_ci.delivery import _records, required_parameters_match
             checked = _records(checks, "tool_id")
             reviewed = _records(reviews, "kind")
             if report["status"] == "fail" or any(x["status"] == "fail" for x in checked + reviewed):
                 return report
             if report["status"] in {"infra_error", "cancelled"}:
                 return report
-            if (set(policy.get("required_checks", [])) <= {x["tool_id"] for x in checked}
-                    and set(policy.get("required_reviews", [])) <= {x["kind"] for x in reviewed}):
+            selected = {x["tool_id"]: x for x in checked}
+            parameters_match = all(required_parameters_match(
+                selected.get(tool_id, {}), expected,
+            ) for tool_id, expected in policy.get("required_parameters", {}).items())
+            if (set(policy.get("required_checks", [])) <= set(selected)
+                    and set(policy.get("required_reviews", [])) <= {x["kind"] for x in reviewed}
+                    and parameters_match):
                 return report
         except (OSError, ValueError, TypeError, KeyError):
             pass

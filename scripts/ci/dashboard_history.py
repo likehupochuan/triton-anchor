@@ -6,7 +6,12 @@ import re
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from agent_ci.protocol import RESULT_SCHEMA, validate_result
+from agent_ci.delivery import MAX_FULL_FLAGGEMS_BYTES, validate_full_flaggems
+from agent_ci.protocol import FULL_FLAGGEMS_ROOT, RESULT_SCHEMA, validate_result
+
+
+FULL_FLAGGEMS_DEMO_SHA = "3d4c586307dcc3c1f11e650c67529b85da3dd22f"
+FULL_FLAGGEMS_DEMO_RUN = "20260724T112410Z-3d4c586307dc"
 
 
 def _read(path):
@@ -23,6 +28,152 @@ def _url(results, path):
     if not base.startswith("https://gitee.com/"):
         return ""
     return base + "/blob/" + results.branch + "/" + quote(path.relative_to(results.root).as_posix(), safe="/")
+
+
+def _full_flaggems(path):
+    if path.is_symlink() or path.stat().st_size > MAX_FULL_FLAGGEMS_BYTES:
+        raise ValueError("Invalid full FlagGems business result")
+    return validate_full_flaggems(json.loads(path.read_bytes()))
+
+
+def _full_check(row):
+    if (row.get("task") or {}).get("full") is not True:
+        return None
+    for check in (row.get("result") or {}).get("checks", []):
+        if check.get("tool_id") != "flaggems" or check.get("status") not in {
+            "pass",
+            "fail",
+        }:
+            continue
+        mode = (check.get("parameters") or {}).get("mode")
+        if mode is None:
+            mode = (
+                (check.get("details") or {})
+                .get("flaggems-summary", {})
+                .get("mode")
+            )
+        if mode == "full":
+            return check
+    return None
+
+
+def _demo_full_row(results, path, document):
+    """Keep the named historical sample available if its old task was retired."""
+    completed = "2026-07-24T11:24:10+00:00"
+    status = document.get("summary", {}).get("status", "fail")
+    task_id = hashlib.sha256(f"full-demo:{FULL_FLAGGEMS_DEMO_SHA}".encode()).hexdigest()
+    task = {
+        "task_id": task_id,
+        "repository": "likehupochuan/triton-anchor",
+        "event_kind": "manual",
+        "pr_number": 0,
+        "target_branch": "ci/full/jiwang-delivery-ci",
+        "head_sha": FULL_FLAGGEMS_DEMO_SHA,
+        "tested_sha": FULL_FLAGGEMS_DEMO_SHA,
+        "captured_at": completed,
+        "full": True,
+    }
+    result = {
+        "run_id": FULL_FLAGGEMS_DEMO_RUN,
+        "completed_at": completed,
+        "status": status,
+        "summary": "2026-07-24 历史全量算子样例",
+        "checks": [{
+            "tool_id": "flaggems",
+            "status": status,
+            "summary": "历史全量算子测试结果",
+            "parameters": {"mode": "full"},
+            "details": {"flaggems-summary": document},
+        }],
+        "reviews": [],
+        "findings": [],
+        "blocking_reasons": [],
+        "limitations": [],
+        "artifacts": [],
+        "environment": {"variants": {"candidate": {
+            "backend_enabled": True,
+            "backend_profile": "sophgo-cmodel",
+            "profile": "",
+        }}},
+    }
+    return {
+        "task": task,
+        "result": result,
+        "status": status,
+        "historical": True,
+        "result_url": _url(results, path),
+        "artifact_urls": {},
+    }
+
+
+def attach_full_flaggems(results, rows):
+    """Join independent full reports into the generated feed, never result.json."""
+    root = results.root / FULL_FLAGGEMS_ROOT
+    paths = []
+    if root.is_dir():
+        paths.extend(root.glob("*/flaggems-summary.json"))
+        paths.extend(root.glob("*/*/flaggems-summary.json"))
+    for path in sorted(paths):
+        try:
+            relative = path.relative_to(root)
+            parts = relative.parts
+            sha = parts[0]
+            if not re.fullmatch(r"[a-f0-9]{40}", sha):
+                continue
+            run_id = parts[1] if len(parts) == 3 else ""
+            demo_sample = sha == FULL_FLAGGEMS_DEMO_SHA and run_id in {
+                "",
+                FULL_FLAGGEMS_DEMO_RUN,
+            }
+            document = _full_flaggems(path)
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+
+        matches = [row for row in rows if row.get("task", {}).get("tested_sha") == sha]
+        if run_id:
+            match = next(
+                (
+                    row
+                    for row in matches
+                    if (row.get("result") or {}).get("run_id") == run_id
+                    and _full_check(row) is not None
+                ),
+                None,
+            )
+        elif demo_sample:
+            # The preserved sample belongs only to its named historical run.
+            # Never inject it into an unrelated impact check that happens to
+            # share the same tested commit.
+            match = next(
+                (
+                    row
+                    for row in matches
+                    if (row.get("result") or {}).get("run_id")
+                    == FULL_FLAGGEMS_DEMO_RUN
+                    and _full_check(row) is not None
+                ),
+                None,
+            )
+        else:
+            match = next((row for row in matches if _full_check(row)), None)
+        if match is None and demo_sample:
+            match = _demo_full_row(results, path, document)
+            rows.append(match)
+        check = _full_check(match) if match is not None else None
+        if check is None:
+            continue
+        check.setdefault("details", {})["flaggems-summary"] = document
+        check.setdefault("parameters", {})["mode"] = "full"
+        match["business_full"] = {
+            "data_mode": "mock" if demo_sample else "live",
+            "source_path": path.relative_to(results.root).as_posix(),
+            "source_note": (
+                "历史样例，仅在没有新的合规全量算子结果时展示。"
+                if demo_sample
+                else "独立发布的全量算子结果。"
+            ),
+        }
+    return rows
 
 
 def history_rows(results, current):

@@ -3,22 +3,36 @@
 提供三个业务视图：`local-ci.html` 的任务与证据，`index.html` 的全量算子和后端与性能；另有独立的 `worker.html`「Worker 运行状态」页面。
 业务视图统一读取 Gateway 短作业生成的 `data/tasks.json`（`triton-anchor-dashboard`）；
 `data.js` 将统一结果投影到三个界面，保留选测/未执行原因、审查依据、失败详情、筛选、分页及 CSV/XLSX 下载。
+Gateway 在生成 feed 时读取独立的
+`runs/ci_full_flaggems/<tested_sha>/<run_id>/flaggems-summary.json`，按 SHA 与 run ID
+关联任务；逐算子明细不写进任务仓库中的 `result.json`。
+指定的历史样例兼容
+`runs/ci_full_flaggems/3d4c586307dcc3c1f11e650c67529b85da3dd22f/flaggems-summary.json`
+直达路径，只在没有新实测时回退显示。
 
 结果与所选文件随同一 Git 提交发布。页面展示所有检查状态、审查结论和文件链接；未选择、未执行和不适用的检查保留原始状态及说明，未选中或超预算的文件保留在主机，并说明省略原因。PR 评论只列出实际执行的检查，并链接回本页面查看完整记录。
-全量算子视图只显示真实 full FlagGems 结果；性能读取任务测量和同条件比较，无数据时明确留空。
+全量算子和后端性能两个业务视图固定读取 `likehupochuan/triton-anchor` 的 `triton_v3.0`
+分支任务：PR 结果只留在任务详情，
+不能覆盖业务页。全量算子优先接受该分支显式 `full=true` 的真实 FlagGems full 结果；
+没有新结果时精确回退到 `3d4c586307dcc3c1f11e650c67529b85da3dd22f` 的历史样例，
+并明确标为历史样例，不把它冒充 Triton 3.0 新实测；
+后端与性能只读取该分支的 push；性能只接受同一次任务完成的三项标准测量，
+四个 kernel 与采样参数必须一致，无有效数据时明确留空。
 任务详情分别展示 `environment.variants.base` 与 `candidate` 的 Profile；
 后端汇总及性能视图只使用 candidate 明确 `backend_enabled=true` 且记录 `backend_profile` 的结果，
 不因出现 `backend_*` 检查而推断后端能力。后端汇总按真实后端名保留最近一次已执行的后端检查，
 第一列显示 `backend_profile`（如 `sophgo-cmodel`），Triton/Profile 单列显示 `profile`（如 `triton-3.0`）。
-性能来源和全量算子标题同样分别标注后端与 Profile；各性能指标独立保留最近一次有效测量。
+性能来源和全量算子标题同样分别标注后端与 Profile；三项性能指标使用同一次有效测量。
 单环境结果读取同层的 `backend_enabled`、`backend_profile` 及 `profile`/`generation`。
 缺少后端身份的记录仍在任务视图中保留，不借用 base 或通用 Profile 推断；缺少 Triton/Profile 时显示“未记录”。
-仓库中的初始 feed 为空，没有展示样例成功数据。
+历史样例只为保证全量算子模块在首个新 full 完成前保持可解析、可展示；真实结果一旦可用即优先展示。
 接收器也读取结果仓库 `runs/` 中的历史结果及旧版 `delivery-summary.txt` 对应的真实算子/性能报告。
 旧版摘要明确记录的 `backend_profile` 转为候选后端身份；只有该字段存在时才标记后端能力，
 `triton_profile`、`triton_version` 按原始记录保留，缺失时不从后端名或分支名补造。
-历史记录只用于展示，不重跑、不回写旧任务的 GitHub 门禁；全量算子和各性能指标分别保留最近一次有效数据，
+历史记录只用于展示，不重跑、不回写旧任务的 GitHub 门禁；全量算子和性能快照分别保留最近一次有效数据，
 标注来源提交与测量时间，新任务未选择或尚未完成这些检查时不会清空历史数据。
+性能页仅接受同一次合规 push 的三项固定 runner 结果；编译时间显示四个固定 kernel，
+Pass 过滤汇总项后显示前 10 个热点，IR 显示五个固定指标在四个 kernel 上的中位数。
 
 “未通过”（fail）和“执行错误”（infra_error）分别展示和筛选：前者表示检查或审查明确未通过，
 后者表示执行过程出错。算子统计分别计数，后端状态也保留此区别；未知错误不根据非零退出码猜测根因。

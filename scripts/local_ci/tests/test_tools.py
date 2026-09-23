@@ -245,6 +245,10 @@ ir_benchmark = load(
     "local_ci_tool_ir_benchmark",
     ROOT / "tools/basic_tools/performance/ir_serialization_benchmark.py",
 )
+ir_compare = load(
+    "local_ci_tool_ir_compare",
+    ROOT / "tools/basic_tools/performance/compare_ir_serialization.py",
+)
 profile_compare = load(
     "local_ci_tool_profile_compare",
     ROOT / "tools/basic_tools/performance/compare_pass_profile.py",
@@ -260,6 +264,24 @@ compile_benchmark = load(
 
 
 class MeasurementValidationTests(unittest.TestCase):
+    def test_ir_comparison_covers_every_dashboard_metric(self):
+        metrics = ("serialize", "write_text", "read_text", "deserialize", "roundtrip")
+        baseline = {"summary": {"add": {"metrics": {
+            name: {"median_ms": index + 1} for index, name in enumerate(metrics)
+        }}}}
+        candidate = {"summary": {"add": {"metrics": {
+            name: {"median_ms": index + 2} for index, name in enumerate(metrics)
+        }}}}
+        result = ir_compare.compare(
+            baseline, candidate, ["add"], list(ir_compare.DEFAULT_METRICS),
+            0.2, 0.05, 0.05, "base", "candidate",
+        )
+        self.assertEqual(ir_compare.DEFAULT_METRICS, metrics)
+        self.assertEqual(
+            {(row["kernel"], row["metric"]) for row in result["rows"]},
+            {("add", metric) for metric in metrics},
+        )
+
     def test_profile_compare_rejects_missing_candidate_passes(self):
         with self.assertRaises(ValueError):
             profile_compare.compare(

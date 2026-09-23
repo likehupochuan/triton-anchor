@@ -270,7 +270,10 @@ def minimum_checks(
         level = "non_executable"
 
     unavailable = BACKEND if not backend_enabled else set()
-    required = set(TOOLS) - unavailable if full else set()
+    # `full` names the FlagGems coverage mode.  Codex still owns the execution
+    # plan (including build/install preparation) and decides whether a separate
+    # performance suite is relevant.
+    required = {"flaggems"} if full else set()
     return {
         "categories": sorted(groups),
         "classification_evidence": classification_evidence,
@@ -282,16 +285,17 @@ def minimum_checks(
             "active_categories": sorted(runtime_groups),
         },
         "required_checks": ["change_validation", *ordered(required)],
-        "required_parameters": {"flaggems": {"mode": "full"}} if full and backend_enabled else {},
+        "required_parameters": {"flaggems": {"mode": "full"}} if full else {},
         "recommended_checks": ordered(recommended - required - unavailable),
-        "recommended_parameters": {} if full else recommended_parameters,
-        "not_applicable": ordered((set(TOOLS) if full else recommended) & unavailable),
+        "recommended_parameters": recommended_parameters,
+        "not_applicable": ordered((recommended | required) & unavailable),
         "capabilities": [t for t in CHECK_ORDER if t not in unavailable],
         "required_reviews": (["pr_info"] if event_kind == "pull_request" else []) + ["architecture"],
         "reason": (
             "Path categories only suggest checks. Codex must inspect the actual diff, choose relevant "
             "validation and record its reasoning and evidence in change_validation. Ordinary comments "
             "may use lightweight checks; real compiler/runtime changes need relevant builds and smoke/JIT. "
-            "Only explicit full requires every supported tool."
+            "Explicit full requires FlagGems full; Codex prepares its dependencies and still decides "
+            "whether separate performance measurements are relevant."
         ),
     }

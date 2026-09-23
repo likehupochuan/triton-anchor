@@ -61,6 +61,10 @@ pytest 参数为 `paths`（相对路径或 node ID）、`keyword`；FlagGems 为
 超过上限直接提示使用 full，不自动截断。空 impact 固定使用 `abs`、`maximum`、`mm`、
 `arange`、`exponential_`、`embedding` 六个样本。需要更广覆盖时说明原因并显式使用 full，
 不要拆批规避上限。full 保留完整算子目录，每个算子仍可包含多个参数化用例。
+full 的 runner 输出沿用 `triton-anchor-local-ci/flaggems-v1`：`summary` 保存总数及
+通过/失败/超时计数，`results` 保存逐算子记录。Worker 会把该 JSON 独立发布到
+`runs/ci_full_flaggems/<tested_sha>/<run_id>/flaggems-summary.json`，不并入任务
+`result.json`，也不占普通证据附件预算。
 
 普通 pytest 输出简单计数，失败、空收集和全部跳过都不会显示为通过。
 后端选测使用 pytest 的 prepend 导入模式，以兼容测试对同目录 conftest 的导入；
@@ -82,6 +86,9 @@ Worker 为 base/candidate 分别提供完整 `runtime_env`、LLVM、profile、�
 性能基线由 `performance_baselines[tool_id]` 指定文件、提交与环境信息；比较时核对
 后端、算子和采样条件。没有可比基线时报告 `not_comparable`；有效性能回退只报告，
 测量无效或正确性失败则返回失败。
+Codex 决定是否调用这三项固定 runner；Worker 直接读取并校验 runner 的结果文件，
+使用四个固定 kernel、默认采样次数和 warmup 封存 Dashboard 数据，不接受手工填写的数值。
+IR 比较覆盖页面展示的 `serialize`、`write_text`、`read_text`、`deserialize`、`roundtrip`。
 
 ## 审查与补充验证
 
@@ -89,5 +96,6 @@ Worker 为 base/candidate 分别提供完整 `runtime_env`、LLVM、profile、�
 专项方向依据描述和实际 diff 选择，标签仅供参考。
 Codex 可以直接运行已有测试、编写定向复现或使用其他命令，自主选择范围和顺序。
 真实编译器、运行时及后端接口改动仍需对应构建与 smoke/JIT；文档和普通注释可轻量验证。
-显式 full 任务保留全部可用工具对应的覆盖要求。
+显式 full 任务要求 Codex 完成 FlagGems full 及其必要的构建、安装和后端 smoke；
+性能测试仍由 Codex 根据实际改动决定是否执行。
 最终摘要列出实际改动影响、选测理由、已完成检查、审查结论、未完成项与所选重要证据。

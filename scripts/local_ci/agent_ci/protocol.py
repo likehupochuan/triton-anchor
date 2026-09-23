@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 TASK_SCHEMA = "triton-anchor-local-ci-task"
 RESULT_SCHEMA = "triton-anchor-local-ci"
+FULL_FLAGGEMS_ROOT = "runs/ci_full_flaggems"
 PREINSTALLED_SUBMODULES = frozenset({"FlagGems"})
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 ID = re.compile(r"[0-9a-f]{64}\Z")
@@ -146,6 +147,16 @@ def result_task_prefixes(task: dict) -> tuple[str, ...]:
         result_task_prefix(task, legacy=True),
         f"runs/{task['task_id']}",
     )
+
+
+def full_flaggems_result_path(task: dict, run_id: str) -> str:
+    """Return the independent business-result path for one completed full run."""
+    tested_sha = task.get("tested_sha")
+    if not isinstance(tested_sha, str) or not SHA.fullmatch(tested_sha):
+        raise ContractError("Invalid full FlagGems result SHA")
+    if not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id):
+        raise ContractError("Invalid full FlagGems result run id")
+    return f"{FULL_FLAGGEMS_ROOT}/{tested_sha}/{run_id}/flaggems-summary.json"
 
 
 def is_legacy_task(task: dict) -> bool:

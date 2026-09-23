@@ -15,7 +15,13 @@ if str(SCRIPT_DIR) not in sys.path:
 from common import DEFAULT_KERNELS, load_json, write_projected_csv  # noqa: E402
 
 
-DEFAULT_METRICS = ("serialize", "deserialize")
+DEFAULT_METRICS = (
+    "serialize",
+    "write_text",
+    "read_text",
+    "deserialize",
+    "roundtrip",
+)
 
 
 def parse_args() -> argparse.Namespace:

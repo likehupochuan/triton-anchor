@@ -47,7 +47,7 @@ from agent_ci.protocol import (
     within,
 )
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dashboard_history import history_rows
+from dashboard_history import FULL_FLAGGEMS_DEMO_SHA, attach_full_flaggems, history_rows
 
 CONTROL_BRANCH = "local-ci-control"
 RESULTS_BRANCH = "local-ci-results"
@@ -1951,6 +1951,7 @@ def collect_results(
         rows.append(row)
     dashboard.mkdir(parents=True, exist_ok=True)
     rows.extend(history_rows(results, rows))
+    attach_full_flaggems(results, rows)
     (dashboard / "tasks.json").write_bytes(
         canonical(
             {

@@ -25,7 +25,8 @@ flowchart TD
 构建、测试和审查按依赖与相关度交错执行。路径分类提供选测建议，Codex 阅读实际 diff，
 选择范围、命令与补充用例，并在 `change_validation` 中说明影响、选测理由和实际证据。
 文档和普通注释可轻量验证；可独立运行的 Python 可直接验证源码；
-编译器、运行时和后端行为变化需要相关构建与 smoke/JIT。显式 full 要求全部可用工具对应的覆盖。
+编译器、运行时和后端行为变化需要相关构建与 smoke/JIT。显式 full 仍由 Codex 完成必要的
+构建、安装与 smoke，然后运行 FlagGems full；它不自动强制执行性能测试。
 
 所有任务都须完成架构审查与实际变更验证。PR 任务另需校验 PR 信息，最低要求为概述、
 范围和验证情况，支持中英文及自定义字段；push/manual 任务的 `pr_info` 为
@@ -115,6 +116,7 @@ state_dir/
 | 发布内容 | 范围与限制 |
 | --- | --- |
 | `result.json` | 必传，单独不超过 2 MiB，不占附件名额 |
+| full 算子结果 | `runs/ci_full_flaggems/<tested_sha>/<run_id>/flaggems-summary.json`，沿用旧版 schema，单独不超过 10 MiB |
 | 必传证据 | `change_validation` 报告及 `checks.evidence` 引用文件，最多 32 份 |
 | 选传附件 | `artifacts` 按重要性选择的摘要、失败片段、用例或性能数据，最多 8 份 |
 | 附件预算 | 路径去重；单文件不超过 2 MiB，合计不超过 10 MiB；仅成功上传文件占名额 |
@@ -122,6 +124,8 @@ state_dir/
 必传证据优先使用预算。缺失或无法上传时保留检查实际状态，但整体通过结论改为
 `infra_error`；选传文件超限保留在本机，不改变结论。省略原因写入 `evidence_delivery`。
 报告沿用任务实际文件名，文件从 `sealed/` 与结果一起发布。
+显式 full 的逐算子明细从可信 runner 产物独立封存；`result.json` 只保留检查结论、
+参数和独立文件路径。Dashboard 生成 feed 时再关联两者，任务报告不会重复携带 127 项明细。
 `findings` 按独立问题保存结论、分析及代码证据；`blocking_reasons` 使用阻塞 findings 的简短结论，
 不重复追加检查和审查诊断。无阻塞 finding 时，优先保留 Agent 的阻塞说明，否则以失败检查、
 必要审查的诊断或失败摘要兜底。详细诊断与证据保留在 `checks`、`reviews` 中。

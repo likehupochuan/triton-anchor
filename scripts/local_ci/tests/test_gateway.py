@@ -1231,6 +1231,19 @@ class GatewayBehaviorTests(unittest.TestCase):
         folder = store.root / "runs/pr/branch-main/pr-7" / self.head / "run-1"
         folder.mkdir(parents=True)
         result = self.result()
+        result["task"]["full"] = True
+        result["task"]["metadata_digest"] = g.metadata_digest(result["task"])
+        result["task"]["task_id"] = g.compute_task_id(result["task"])
+        prefix = f"ci/pr-{result['task']['pr_number']}/{result['task']['task_id']}"
+        result["task"].update(
+            task_ref=prefix + "/tested",
+            base_task_ref=prefix + "/base",
+            head_task_ref=prefix + "/head",
+        )
+        result["checks"].append({
+            "tool_id": "flaggems", "status": "pass", "summary": "full",
+            "parameters": {"mode": "full"},
+        })
         (folder / "result.json").write_text(json.dumps(result))
         legacy = store.root / "runs/ci_full/main" / self.head / "20260724T112410Z-old"
         legacy.mkdir(parents=True)
@@ -1238,7 +1251,12 @@ class GatewayBehaviorTests(unittest.TestCase):
             f"target_sha: {self.head}\nbranch: old-main\nstatus: 1\nbackend_profile: sophgo-cmodel\n"
             "flaggems_test_mode: full\nflaggems_status: fail\ncompile_time_status: pass\n"
             "backend_rebuild_status: pass\nprivate_path: /private/credentials\n")
-        (legacy / "flaggems-summary.json").write_text(json.dumps({"mode": "full", "results": [{"op": "add", "test_status": "失败"}]}))
+        full_document = {
+            "schema": "triton-anchor-local-ci/flaggems-v1", "mode": "full",
+            "summary": {"total": 1, "passed": 0, "failed": 1, "timed_out": 0, "status": "fail"},
+            "results": [{"op": "add", "test_status": "失败"}],
+        }
+        (legacy / "flaggems-summary.json").write_text(json.dumps(full_document))
         (legacy / "compile-benchmark.json").write_text(json.dumps({"summary": {"add": {"compile_est": {"median_ms": 12}}}}))
         rows = g.history_rows(store, [])
         self.assertEqual(len(rows), 2)
@@ -1250,7 +1268,55 @@ class GatewayBehaviorTests(unittest.TestCase):
         })
         self.assertEqual(old["result"]["checks"][1]["details"]["flaggems-summary"]["mode"], "full")
         self.assertTrue(old["artifact_urls"]["flaggems-summary.json"].startswith("https://gitee.com/"))
-        self.assertEqual(len(g.history_rows(store, [{"task": self.task, "result": result}])), 1)
+
+        nested = store.root / "runs/ci_full_flaggems" / result["task"]["tested_sha"] / result["run_id"]
+        nested.mkdir(parents=True)
+        (nested / "flaggems-summary.json").write_text(json.dumps(full_document))
+        demo_document = copy.deepcopy(full_document)
+        demo = store.root / "runs/ci_full_flaggems" / g.FULL_FLAGGEMS_DEMO_SHA
+        demo.mkdir(parents=True)
+        (demo / "flaggems-summary.json").write_text(json.dumps(demo_document))
+        impact = {
+            "task": {"tested_sha": g.FULL_FLAGGEMS_DEMO_SHA, "full": False},
+            "result": {"run_id": "impact-run", "checks": [{
+                "tool_id": "flaggems", "status": "pass",
+                "parameters": {"mode": "impact"},
+                "details": {"flaggems-summary": {"mode": "impact", "results": []}},
+            }]},
+            "historical": True,
+        }
+        live_demo_sha = {
+            "task": {"tested_sha": g.FULL_FLAGGEMS_DEMO_SHA, "full": True},
+            "result": {"run_id": "20260923-live", "checks": [{
+                "tool_id": "flaggems", "status": "pass",
+                "parameters": {"mode": "full"},
+            }]},
+            "historical": True,
+        }
+        live_demo_path = demo / live_demo_sha["result"]["run_id"]
+        live_demo_path.mkdir()
+        (live_demo_path / "flaggems-summary.json").write_text(json.dumps(full_document))
+        rows.extend([impact, live_demo_sha])
+        g.attach_full_flaggems(store, rows)
+        modern = next(row for row in rows if row["task"].get("task_id") == result["task"]["task_id"])
+        modern_full = next(check for check in modern["result"]["checks"] if check["tool_id"] == "flaggems")
+        self.assertEqual(modern_full["details"]["flaggems-summary"], full_document)
+        self.assertEqual(modern["business_full"]["data_mode"], "live")
+        self.assertNotIn("business_full", impact)
+        self.assertEqual(
+            impact["result"]["checks"][0]["details"]["flaggems-summary"]["mode"],
+            "impact",
+        )
+        self.assertEqual(live_demo_sha["business_full"]["data_mode"], "live")
+        sample = next(
+            row for row in rows
+            if row["task"].get("tested_sha") == g.FULL_FLAGGEMS_DEMO_SHA
+            and row.get("business_full", {}).get("data_mode") == "mock"
+        )
+        self.assertTrue(sample["historical"])
+        self.assertEqual(sample["business_full"]["data_mode"], "mock")
+        self.assertEqual(sample["task"]["target_branch"], "ci/full/jiwang-delivery-ci")
+        self.assertEqual(len(g.history_rows(store, [{"task": result["task"], "result": result}])), 1)
 
     def test_result_comment_retries_ignore_presentation_and_recognize_legacy_report(self):
         client = g.GitHub(g.REPOSITORY, token="fixture")

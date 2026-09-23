@@ -3,10 +3,33 @@ const assert = require('node:assert/strict');
 const { normalize, business, blockerGroups, environmentProfile } = require('../../../dashboard/data.js');
 const { assess: assessHealth, readSnapshot, readAlerts, readHealth, monitorReading, source: healthSource,
   taskFacts } = require('../../../dashboard/health.js');
-const task = (id, date) => ({task_id:id, repository:'example/repo',pr_number:7,target_branch:'main',head_sha:('f'+id).repeat(20),tested_sha:id.repeat(40),captured_at:date});
+const task = (id, date, extra = {}) => ({task_id:id, repository:'likehupochuan/triton-anchor',event_kind:'push',pr_number:0,
+  target_branch:'triton_v3.0',head_sha:('f'+id).repeat(20),tested_sha:id.repeat(40),captured_at:date,full:false,...extra});
 const backendEnvironment = (backend = 'sophgo-cmodel', profile = 'triton-3.0') => ({variants:{candidate:{
-  backend_enabled:true, backend_profile:backend, profile,
+  backend_enabled:true, backend_profile:backend, profile, llvm_hash:'e'.repeat(40), environment_fingerprint:'env-1',
 }}});
+const performanceDetails = (id, tool, summary, extra = {}) => ({candidate:{metadata:{
+  commit_sha:id.repeat(40), environment_fingerprint:'env-1', profile_id:'triton-3.0',
+  llvm_revision:'e'.repeat(40), kernels:['add','mm','softmax','layernorm'],
+  repeat:tool === 'ir_serialization' ? 20 : 3, warmup:1,
+},summary},...extra});
+const standardCompileSummary = value => Object.fromEntries(
+  ['add','mm','softmax','layernorm'].map((kernel,index)=>[kernel,{
+    all_correct:true,compile_est:{median_ms:value+index},
+  }]),
+);
+const standardPassSummary = value => Object.fromEntries(
+  ['add','mm','softmax','layernorm'].map((kernel,index)=>[kernel,{passes:{
+    ['pass-'+index]:{wall_ms:{median_ms:value+index}},
+  }}]),
+);
+const standardIrSummary = value => Object.fromEntries(
+  ['add','mm','softmax','layernorm'].map((kernel,kernelIndex)=>[kernel,{metrics:Object.fromEntries(
+    ['serialize','write_text','read_text','deserialize','roundtrip'].map((metric,metricIndex)=>[
+      metric,{median_ms:value+kernelIndex+metricIndex},
+    ]),
+  )}]),
+);
 
 const healthNow = Date.parse('2026-09-17T10:00:00Z');
 function healthyWorker() {
@@ -305,21 +328,55 @@ test('dashboard preserves not-selected, skipped, and not-applicable as distinct 
 });
 
 test('full view excludes impact-only selection and preserves failing operator details', () => {
-  const run = {task:task('a','2026-09-10'),result:{environment:{profile:'fixture',backend_enabled:true,backend_profile:'fixture-backend'},checks:[{tool_id:'flaggems',status:'fail',details:{"flaggems-summary":{mode:'full',results:[{op:'softmax',test_status:'失败',first_failed_stage:'准确率验证',duration_seconds:2}]}}}]}};
+  const run = {task:task('a','2026-09-10',{full:true}),business_full:{data_mode:'live'},result:{environment:{profile:'triton-3.0',backend_enabled:true,backend_profile:'fixture-backend'},checks:[{tool_id:'flaggems',status:'fail',details:{"flaggems-summary":{mode:'full',results:[{op:'softmax',test_status:'失败',first_failed_stage:'准确率验证',duration_seconds:2}]}}}]}};
   let data = business(normalize({schema:'triton-anchor-dashboard',tasks:[run]}));
   assert.equal(data.fullTest.operators[0].status,'failed');
   assert.equal(data.fullTest.operators[0].failure_stage,'准确率验证');
   assert.equal(data.fullTest.run.backend,'fixture-backend');
-  assert.equal(data.fullTest.run.profile,'fixture');
+  assert.equal(data.fullTest.run.profile,'triton-3.0');
   run.result.checks[0].details["flaggems-summary"].mode='impact';
   data = business(normalize({schema:'triton-anchor-dashboard',tasks:[run]}));
   assert.equal(data.fullTest.operators.length,0);
 });
 
+test('full view prefers a valid release result and otherwise labels the preserved demo as historical sample', () => {
+  const demo = {task:task('d','2026-09-09',{target_branch:'CI_dev',tested_sha:'3d4c586307dcc3c1f11e650c67529b85da3dd22f'}),
+    business_full:{data_mode:'mock',source_path:'runs/ci_full_flaggems/3d4c586307dcc3c1f11e650c67529b85da3dd22f',source_note:'历史样例结果'},
+    result:{environment:backendEnvironment('sophgo-cmodel',''),checks:[{tool_id:'flaggems',status:'pass',details:{'flaggems-summary':{
+      mode:'full',results:[{op:'demo-add',test_status:'通过',duration_seconds:1}],
+    }}}]}};
+  const invalidLive = {task:task('x','2026-09-11',{full:true}),business_full:{data_mode:'live'},
+    result:{environment:backendEnvironment(),checks:[{tool_id:'flaggems',status:'pass',details:{'flaggems-summary':{mode:'impact',results:[{op:'impact-only'}]}}}]}};
+  let normalized = normalize({schema:'triton-anchor-dashboard',tasks:[invalidLive,demo]});
+  assert.equal(normalized.runs.find(run=>run.tested_sha===demo.task.tested_sha).business_full.source_note,'历史样例结果');
+  let data = business(normalized);
+  assert.equal(data.fullTest.data_mode,'mock');
+  assert.equal(data.fullTest.source_note,'历史样例结果');
+  assert.equal(data.fullTest.run.sha,demo.task.tested_sha);
+  assert.equal(data.fullTest.run.profile,'');
+  assert.equal(data.fullTest.operators[0].name,'demo-add');
+
+  const live = {task:task('l','2026-09-12',{full:true,tested_sha:'3d4c586307dcc3c1f11e650c67529b85da3dd22f'}),business_full:{data_mode:'live',source_note:'新全量实测'},
+    result:{environment:backendEnvironment(),checks:[{tool_id:'flaggems',status:'pass',details:{'flaggems-summary':{
+      mode:'full',results:[{op:'live-add',test_status:'通过',duration_seconds:1}],
+    }}}]}};
+  const foreign = {task:task('z','2026-09-13',{full:true,repository:'another/triton-anchor'}),
+    business_full:{data_mode:'live'},result:{environment:backendEnvironment(),checks:[
+      {tool_id:'flaggems',status:'pass',details:{'flaggems-summary':{
+        mode:'full',results:[{op:'foreign-add',test_status:'通过',duration_seconds:1}],
+      }}},
+    ]}};
+  data = business(normalize({schema:'triton-anchor-dashboard',tasks:[demo,live,foreign]}));
+  assert.equal(data.fullTest.data_mode,'live');
+  assert.equal(data.fullTest.source_note,'新全量实测');
+  assert.equal(data.fullTest.run.sha,'3d4c586307dcc3c1f11e650c67529b85da3dd22f');
+  assert.equal(data.fullTest.operators[0].name,'live-add');
+});
+
 test('variant environments preserve both sources and use candidate for business results', () => {
   const environment = {variants:{base:{profile:'triton-3.0',backend_enabled:true,backend_profile:'sophgo-cmodel'},
     candidate:{profile:'triton-3.2',backend_enabled:false,backend_profile:'sophgo-cmodel'}}};
-  const feed = {schema:'triton-anchor-dashboard',tasks:[{task:task('a','2026-09-10'),result:{environment,checks:[
+  const feed = {schema:'triton-anchor-dashboard',tasks:[{task:task('a','2026-09-10',{full:true}),business_full:{data_mode:'live'},result:{environment,checks:[
     {tool_id:'backend_tests',status:'fail'},
     {tool_id:'compile_time',status:'pass',details:{candidate:{summary:{add:{compile_est:{median_ms:7}}}}}},
   ]}}]};
@@ -345,7 +402,7 @@ test('variant environments preserve both sources and use candidate for business 
   environment.backend_profile = 'sophgo-cmodel';
   assert.equal(environmentProfile(environment),'');
   data = business(normalize(feed));
-  assert.equal(data.fullTest.run.backend,'未记录后端');
+  assert.equal(data.fullTest.run.backend,'尚无全量算子结果');
   assert.equal(data.backends.backends.length,0);
 });
 
@@ -361,14 +418,14 @@ test('historical operator and per-metric results survive pending or partially se
     {task:task('c','2026-09-12'),status:'pending'},
     {task:task('b','2026-09-11'),historical:true,result:{completed_at:'2026-09-11',environment:backendEnvironment(),checks:[
       {tool_id:'backend_tests',status:'pass'},
-      {tool_id:'compile_time',status:'pass',details:{candidate:{summary:{add:{compile_est:{median_ms:7}}}}}},
+      {tool_id:'compile_time',status:'pass',details:performanceDetails('b','compile_time',standardCompileSummary(7))},
+      {tool_id:'pass_profile',status:'pass',details:performanceDetails('b','pass_profile',standardPassSummary(2))},
+      {tool_id:'ir_serialization',status:'pass',details:performanceDetails('b','ir_serialization',standardIrSummary(1))},
       {tool_id:'flaggems',status:'not_selected'},
     ]}},
-    {task:task('a','2026-09-10'),historical:true,result:{completed_at:'2026-09-10',environment:backendEnvironment('sophgo-cmodel',''),checks:[
+    {task:task('a','2026-09-10',{full:true}),historical:true,business_full:{data_mode:'live'},result:{completed_at:'2026-09-10',environment:backendEnvironment(),checks:[
       {tool_id:'backend_tests',status:'pass'},
       {tool_id:'flaggems',status:'fail',details:{'flaggems-summary':{mode:'full',results:[{op:'add',test_status:'失败'}]}}},
-      {tool_id:'compile_time',status:'pass',details:{candidate:{summary:{add:{compile_est:{median_ms:12}}}}}},
-      {tool_id:'pass_profile',status:'pass',details:{candidate:{summary:{add:{hotspots:[{name:'old-pass',median_ms:3}]}}}}},
     ]}},
   ]};
   const normalized=normalize(feed), data=business(normalized);
@@ -381,27 +438,63 @@ test('historical operator and per-metric results survive pending or partially se
   assert.equal(data.backends.backends[0].sha,'b'.repeat(40));
   assert.equal(data.performance.compile_time.kernels[0].candidate_ms,7);
   assert.equal(data.performance.compile_time.sha,'b'.repeat(40));
-  assert.equal(data.performance.pass_profile.hotspots[0].median_ms,3);
-  assert.equal(data.performance.pass_profile.sha,'a'.repeat(40));
+  assert.equal(data.performance.pass_profile.hotspots[0].median_ms,5);
+  assert.equal(data.performance.pass_profile.sha,'b'.repeat(40));
   assert.equal(data.performance.compile_time.backend,'sophgo-cmodel');
   assert.equal(data.performance.compile_time.profile,'triton-3.0');
   assert.equal(data.performance.pass_profile.backend,'sophgo-cmodel');
-  assert.equal(data.performance.pass_profile.profile,'');
+  assert.equal(data.performance.pass_profile.profile,'triton-3.0');
 });
 
 
 test('performance views read runner candidate and comparison report keys', () => {
+  const kernels=['add','mm','softmax','layernorm'];
+  const metrics=['serialize','write_text','read_text','deserialize','roundtrip'];
+  const compileSummary=Object.fromEntries(kernels.map((kernel,index)=>[kernel,{all_correct:true,compile_est:{median_ms:12+index}}]));
+  const passSummary=Object.fromEntries(kernels.map((kernel,index)=>{
+    const hotspots=[
+      {name:'Total',median_ms:100-index},{name:'Rest',median_ms:90-index},{name:'(A) Analysis',median_ms:80-index},
+      {name:'pass-'+index+'-a',median_ms:20-index},{name:'pass-'+index+'-b',median_ms:10-index},{name:'pass-'+index+'-c',median_ms:5-index},
+    ];
+    return [kernel,{hotspots,passes:{
+      ...Object.fromEntries(hotspots.map(row=>[
+        row.name,{wall_ms:{median_ms:row.median_ms}},
+      ])),
+      ['complete-only-'+index]:{wall_ms:{median_ms:200-index}},
+    }}];
+  }));
+  const irSummary=Object.fromEntries(kernels.map((kernel,kernelIndex)=>[kernel,{metrics:Object.fromEntries(
+    metrics.map((metric,metricIndex)=>[metric,{median_ms:1+kernelIndex*2+metricIndex}]))}]));
+  const irComparisons=kernels.flatMap((kernel,kernelIndex)=>metrics.map((metric,metricIndex)=>({kernel,metric,
+    baseline_median_ms:(1+kernelIndex*2+metricIndex)/2,candidate_median_ms:1+kernelIndex*2+metricIndex,
+    change_percent:100,status:'warning',exceeds_threshold:true})));
   const data = business(normalize({schema:'triton-anchor-dashboard',tasks:[{
     task:task('a','2026-09-10'),status:'pass',result:{environment:backendEnvironment(),checks:[
-      {tool_id:'compile_time',status:'pass',details:{candidate:{summary:{add:{compile_est:{median_ms:12}}}},comparison:{kernels:[{kernel:'add',change_ratio:0.2}]}}},
-      {tool_id:'pass_profile',status:'pass',details:{candidate:{summary:{add:{passes:{canonicalize:{wall_ms:{median_ms:3}}}}}}}},
-      {tool_id:'ir_serialization',status:'pass',details:{candidate:{summary:{add:{metrics:{serialize:{median_ms:2}}}}}}}
+      {tool_id:'compile_time',status:'pass',details:performanceDetails('a','compile_time',compileSummary,{comparison:{kernels:kernels.map((kernel,index)=>({
+        kernel,baseline_median_ms:10+index,candidate_median_ms:12+index,change_percent:index ? 10 : 25,exceeds_threshold:index===0,
+      }))}})},
+      {tool_id:'pass_profile',status:'pass',details:performanceDetails('a','pass_profile',passSummary,{comparison:{passes:[{
+        kernel:'add',pass:'pass-0-a',baseline_median_ms:10,candidate_median_ms:20,change_percent:100,status:'warning',exceeds_threshold:true,
+      }]}})},
+      {tool_id:'ir_serialization',status:'pass',details:performanceDetails('a','ir_serialization',irSummary,{comparison:{rows:irComparisons}})}
     ]}
   }]}));
+  assert.deepEqual(data.performance.compile_time.kernels.map(row=>row.name),kernels);
   assert.equal(data.performance.compile_time.kernels[0].candidate_ms,12);
-  assert.equal(data.performance.compile_time.kernels[0].delta_percent,20);
-  assert.equal(data.performance.pass_profile.hotspots[0].median_ms,3);
-  assert.equal(data.performance.ir_serialization.metrics[0].median_ms,2);
+  assert.equal(data.performance.compile_time.kernels[0].baseline_ms,10);
+  assert.equal(data.performance.compile_time.kernels[0].delta_percent,25);
+  assert.equal(data.performance.compile_time.kernels[0].status,'warning');
+  assert.equal(data.performance.pass_profile.hotspots.length,10);
+  assert.equal(data.performance.pass_profile.hotspots[0].name,'add / complete-only-0');
+  const comparedPass=data.performance.pass_profile.hotspots.find(row=>row.name==='add / pass-0-a');
+  assert.equal(comparedPass.delta_percent,100);
+  assert.equal(comparedPass.status,'warning');
+  assert.ok(data.performance.pass_profile.hotspots.every(row=>!/(Total|Rest|\(A\))/.test(row.name)));
+  assert.deepEqual(data.performance.ir_serialization.metrics.map(row=>row.name),metrics);
+  assert.equal(data.performance.ir_serialization.metrics[0].median_ms,4);
+  assert.equal(data.performance.ir_serialization.metrics[0].baseline_ms,2);
+  assert.equal(data.performance.ir_serialization.metrics[0].delta_percent,100);
+  assert.equal(data.performance.ir_serialization.metrics[0].status,'warning');
 });
 
 
@@ -412,7 +505,8 @@ const errorRun = result => normalize({schema:'triton-anchor-dashboard', tasks:[{
 test('execution errors and failed checks stay separate through task filters and business views', () => {
   const vm=require('node:vm'), fs=require('node:fs');
   const runs=normalize({schema:'triton-anchor-dashboard',tasks:['fail','infra_error'].map((status,index)=>({
-    task:{...task(String(index),'2026-09-10'),pr_number:index+1},status,
+    task:task(String(index),'2026-09-10',{full:true}),status,
+    business_full:{data_mode:'live'},
     result:{status,environment:backendEnvironment('backend-'+index),checks:[
       {tool_id:'backend_tests',status},
       {tool_id:'flaggems',status,details:{'flaggems-summary':{mode:'full',results:[
@@ -424,6 +518,7 @@ test('execution errors and failed checks stay separate through task filters and 
   const projected=business({runs});
   assert.deepEqual(projected.backends.backends.map(row=>row.state),['failure','error']);
   assert.deepEqual(projected.fullTest.operators.map(row=>row.status),['failed','error']);
+  runs.forEach(run=>{ run.is_current=true; });
 
   const nodes=new Map();
   const document={createElement:()=>({}),querySelectorAll:()=>[],getElementById:id=>{
@@ -434,7 +529,7 @@ test('execution errors and failed checks stay separate through task filters and 
     window:{location:{search:''}},fetch:()=>new Promise(()=>{}),setInterval(){},runs});
   vm.runInContext(fs.readFileSync(require.resolve('../../../dashboard/local-ci.js'),'utf8'),context);
   vm.runInContext('model.data={runs};',context);
-  assert.equal(vm.runInContext('displaySha(runs[0])',context),runs[0].head_sha);
+  assert.equal(vm.runInContext('displaySha(runs[0])',context),runs[0].tested_sha);
   nodes.get('historyFilter').value='current';
   for(const filter of ['failure','error']){
     nodes.get('resultFilter').value=filter;

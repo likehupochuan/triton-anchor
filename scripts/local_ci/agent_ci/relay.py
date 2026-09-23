@@ -18,12 +18,19 @@ from .protocol import (
     TRITON_VERSION_PATH,
     triton_version_from_source,
     current_key,
+    full_flaggems_result_path,
     result_task_prefix,
     result_task_prefixes,
     within,
     validate_result,
 )
-from .delivery import MAX_FILE_BYTES, MAX_TOTAL_BYTES, MAX_RESULT_BYTES
+from .delivery import (
+    MAX_FILE_BYTES,
+    MAX_FULL_FLAGGEMS_BYTES,
+    MAX_TOTAL_BYTES,
+    MAX_RESULT_BYTES,
+    validate_full_flaggems,
+)
 
 
 class GitRelay:
@@ -401,6 +408,34 @@ class GitRelay:
                 prefix = old_run.as_posix()
                 break
         files = {f"{prefix}/result.json": raw}
+        business = directory / "business" / "flaggems-summary.json"
+        declarations = [
+            row for row in result["checks"] if "business_result" in row
+        ]
+        if declarations and (
+            len(declarations) != 1
+            or declarations[0].get("tool_id") != "flaggems"
+        ):
+            raise ContractError("Only the full FlagGems check may declare a business result")
+        if declarations and not business.is_file():
+            raise ContractError("Sealed full FlagGems business result is missing")
+        if business.is_file():
+            destination = full_flaggems_result_path(task, run_id)
+            check = declarations[0] if declarations else {}
+            if (
+                not task.get("full")
+                or (check.get("parameters") or {}).get("mode") != "full"
+                or check.get("business_result") != destination
+            ):
+                raise ContractError("Full FlagGems business result has no matching sealed check")
+            content = business.read_bytes()
+            if len(content) > MAX_FULL_FLAGGEMS_BYTES:
+                raise ContractError("Full FlagGems report exceeds the business-result budget")
+            try:
+                validate_full_flaggems(json.loads(content))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ContractError("Full FlagGems report is not valid JSON") from exc
+            files[destination] = content
         total = 0
         for artifact in result["artifacts"]:
             if artifact.get("omitted"):

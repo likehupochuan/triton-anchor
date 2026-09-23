@@ -401,6 +401,25 @@ def compare_performance(payload: dict[str, Any]) -> None:
     )
     write_json(out / "candidate.json", candidate)
     baseline = context.get("performance_baselines", {}).get(tool)
+    if baseline is None and context.get("variant") == "candidate":
+        # Codex controls whether to measure performance.  When selected, its
+        # base run is the nearest trustworthy comparison input for the
+        # candidate run; the existing identity checks below still decide
+        # whether the two measurements are comparable.
+        path = Path(context["artifact_dir"]).parent / "base" / tool / "candidate.json"
+        if path.is_file():
+            try:
+                before = read_json(path).get("metadata", {})
+                baseline = {
+                    "path": str(path),
+                    "sha256": digest(path),
+                    "base_sha": before.get("commit_sha"),
+                    "profile_id": before.get("profile_id"),
+                    "llvm_revision": before.get("llvm_revision"),
+                    "environment_fingerprint": before.get("environment_fingerprint"),
+                }
+            except (OSError, ValueError, TypeError):
+                baseline = None
     profile = context.get("profile", {})
     baseline_path = None
     reason = "baseline_missing"

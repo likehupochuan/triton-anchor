@@ -186,10 +186,11 @@ GitHub 会使用历史运行原来的工作流代码重跑，因此部署前的�
 
 - PR：`runs/pr/branch-<目标分支>/pr-<PR号>/<head_sha>/<run_id>/result.json`。
 - push/manual：`runs/push/branch-<目标分支>/<head_sha>/<run_id>/result.json`。
+- full 算子业务结果：`runs/ci_full_flaggems/<tested_sha>/<run_id>/flaggems-summary.json`。
 
 分支名中的 `/` 使用 URL 编码，head SHA 为完整 40 位。
 接收器按结果中的 task ID 匹配，不混用同一 SHA 的不同任务。
-`result.json` 与重要文件一次提交，标题为
+`result.json`、重要文件和同次 full 算子业务结果一次提交，标题为
 `local-ci: <status> <head_sha前12位> <run_id>`。
 
 `result.json`、`change_validation` 报告及 `checks.evidence` 文件必传，

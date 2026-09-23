@@ -118,8 +118,10 @@ async function loadData() {
 
 function renderHeader() {
   $("#generatedAt").textContent = (state.manifest.mode === "mock" ? "界面样例（非真实验证结果） · " : "") + `数据更新：${formatDate(state.manifest.generated_at)}`;
-  $("#schemaVersion").textContent = "全量算子与后端性能结果";
-  $("#fullRunBackend").textContent = [state.fullTest.run.backend, state.fullTest.run.profile].filter(Boolean).join(' · ');
+  $("#schemaVersion").textContent = `全量算子与后端性能结果 · 发布分支：${state.manifest.source_branch}`;
+  const historicalSample = state.fullTest.data_mode === 'mock';
+  $("#operatorHeading").textContent = historicalSample ? '全量算子测试（历史样例）' : '全量算子测试';
+  $("#fullRunBackend").textContent = [state.fullTest.run.backend, state.fullTest.run.profile, state.fullTest.source_note].filter(Boolean).join(' · ');
   $("#fullRunSha").textContent = [state.fullTest.run.sha.slice(0, 12),
     state.fullTest.run.measured_at ? formatDate(state.fullTest.run.measured_at) : ''].filter(Boolean).join(' · ');
   const csv = [["序号","算子","状态","失败阶段","耗时(ms)"],...state.fullTest.operators.map(row => [row.index,row.name,row.status,row.failure_stage,row.duration_ms])]

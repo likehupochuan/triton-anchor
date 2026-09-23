@@ -72,6 +72,110 @@ def seal(tmp_path, value, event_kind="pull_request"):
     )
 
 
+def performance_environment():
+    return {"variants": {"candidate": {
+        "profile": "triton-3.0",
+        "llvm_hash": "e" * 40,
+        "backend_enabled": True,
+        "backend_profile": "sophgo-cmodel",
+        "environment_fingerprint": "performance-environment",
+    }}}
+
+
+def performance_runner_result(tool_id):
+    kernels = ["add", "mm", "softmax", "layernorm"]
+    metrics = ["serialize", "write_text", "read_text", "deserialize", "roundtrip"]
+    repeat = 20 if tool_id == "ir_serialization" else 3
+    metadata = {
+        "commit_sha": "a" * 40,
+        "environment_fingerprint": "performance-environment",
+        "profile_id": "triton-3.0",
+        "llvm_revision": "e" * 40,
+        "kernels": kernels,
+        "repeat": repeat,
+        "warmup": 1,
+    }
+    if tool_id == "compile_time":
+        summary = {kernel: {
+            "all_correct": True,
+            "compile_est": {"median_ms": 10.0, "count": 3},
+        } for kernel in kernels}
+    elif tool_id == "pass_profile":
+        summary = {kernel: {"passes": {
+            "Canonicalizer": {"wall_ms": {"median_ms": 2.0, "count": 3}},
+        }} for kernel in kernels}
+    else:
+        summary = {kernel: {"metrics": {
+            metric: {"median_ms": float(index + 1), "count": 20}
+            for index, metric in enumerate(metrics)
+        }} for kernel in kernels}
+    return {
+        "tool_id": tool_id,
+        "status": "pass",
+        "parameters": {},
+        "target_sha": "a" * 40,
+        "variant": "candidate",
+        "llvm_hash": "e" * 40,
+        "environment_fingerprint": "performance-environment",
+        "details": {
+            "candidate": {"metadata": metadata, "summary": summary},
+            "comparison": {"status": "not_comparable", "reason": "baseline_missing"},
+        },
+    }
+
+
+def test_standard_performance_is_sealed_from_trusted_runner_results(tmp_path):
+    run = tmp_path / "run/artifacts/candidate"
+    for tool_id in ("compile_time", "pass_profile", "ir_serialization"):
+        directory = run / tool_id
+        directory.mkdir(parents=True)
+        (directory / "result.json").write_text(
+            json.dumps(performance_runner_result(tool_id))
+        )
+    value = answer()
+    value["checks"].append({
+        "tool_id": "compile_time",
+        "status": "fail",
+        "summary": "Agent summary remains human-authored",
+        "parameters": {"kernels": ["mm"]},
+        "details": {"candidate": {"summary": {"spoofed": {}}}},
+    })
+    result = seal_result(
+        task(), "20260911-performance", value,
+        {"required_checks": ["frontend_tests"]}, performance_environment(),
+        tmp_path / "run", tmp_path / "sealed",
+    )
+    checks = {check["tool_id"]: check for check in result["checks"]}
+    assert set(checks) >= {
+        "compile_time", "pass_profile", "ir_serialization",
+    }
+    for tool_id, repeat in (
+        ("compile_time", 3), ("pass_profile", 3), ("ir_serialization", 20),
+    ):
+        check = checks[tool_id]
+        assert check["status"] == "pass"
+        assert check["parameters"] == {
+            "kernels": ["add", "mm", "softmax", "layernorm"],
+            "repeat": repeat,
+            "warmup": 1,
+        }
+        assert set(check["details"]["candidate"]["summary"]) == {
+            "add", "mm", "softmax", "layernorm",
+        }
+    assert "spoofed" not in checks["compile_time"]["details"]["candidate"]["summary"]
+    assert checks["compile_time"]["summary"] == "Agent summary remains human-authored"
+
+    invalid = performance_runner_result("ir_serialization")
+    invalid["parameters"] = {"repeat": 19}
+    (run / "ir_serialization/result.json").write_text(json.dumps(invalid))
+    with pytest.raises(ContractError, match="standard Dashboard parameters"):
+        seal_result(
+            task(), "20260911-performance-invalid", value,
+            {"required_checks": ["frontend_tests"]}, performance_environment(),
+            tmp_path / "run", tmp_path / "invalid-sealed",
+        )
+
+
 @pytest.mark.parametrize("missing", ["check", "architecture", "pr_info"])
 @pytest.mark.parametrize("event_kind", ["pull_request", "push", "manual"])
 def test_incomplete_minimum_or_review_cannot_claim_pass(tmp_path, missing, event_kind):
@@ -356,6 +460,64 @@ def test_git_result_and_selected_file_commit_together_and_retry_is_idempotent(tm
     published = json.loads(subprocess.check_output(["git", "show", prefix + "/result.json"], cwd=remote))
     assert published == result
     assert subprocess.check_output(["git", "show", prefix + "/artifacts/report.txt"], cwd=remote) == b"ok"
+
+    full_task = task("push")
+    full_task.update(target_branch="triton_v3.0", full=True)
+    full_task["metadata_digest"] = metadata_digest(full_task)
+    full_task["task_id"] = task_id(full_task)
+    full_task.update(
+        task_ref=f"ci/branch/{full_task['task_id']}/tested",
+        base_task_ref=f"ci/branch/{full_task['task_id']}/base",
+        head_task_ref=f"ci/branch/{full_task['task_id']}/head",
+    )
+    document = {
+        "schema": "triton-anchor-local-ci/flaggems-v1",
+        "mode": "full",
+        "sample_size": 1,
+        "seed": "",
+        "summary": {"total": 1, "passed": 1, "failed": 0, "timed_out": 0, "status": "pass"},
+        "results": [{"index": 1, "op": "add", "test_status": "成功"}],
+    }
+    tool_dir = tmp_path / "full-run/artifacts/candidate/flaggems"
+    tool_dir.mkdir(parents=True)
+    (tool_dir / "flaggems-summary.json").write_text(json.dumps(document))
+    (tool_dir / "result.json").write_text(json.dumps({
+        "tool_id": "flaggems", "status": "pass", "target_sha": full_task["tested_sha"],
+        "parameters": {"mode": "full"}, "details": {"flaggems-summary": document},
+    }))
+    full_answer = answer()
+    full_answer["checks"] = [{
+        "tool_id": "flaggems", "status": "pass", "summary": "Full suite passed",
+        "parameters": {"mode": "full"},
+        "evidence": ["candidate/flaggems/flaggems-summary.json"],
+        "details": {"flaggems-summary": document},
+    }]
+    full_answer["artifacts"] = ["candidate/flaggems/flaggems-summary.json"]
+    full_result = seal_result(
+        full_task, "20260911-full", full_answer,
+        {"required_checks": ["flaggems"], "required_parameters": {"flaggems": {"mode": "full"}}},
+        {"profile": "triton-3.0"}, tmp_path / "full-run", tmp_path / "full-sealed",
+    )
+    full_check = full_result["checks"][0]
+    assert "flaggems-summary" not in full_check.get("details", {})
+    assert full_check["evidence"] == []
+    assert full_result["artifacts"] == []
+    business_file = tmp_path / "full-sealed/business/flaggems-summary.json"
+    assert json.loads(business_file.read_text()) == document
+    business_bytes = business_file.read_bytes()
+    business_file.unlink()
+    with pytest.raises(ContractError, match="business result is missing"):
+        relay.publish_result(full_task, full_result["run_id"], tmp_path / "full-sealed")
+    business_file.write_bytes(business_bytes)
+    relay.publish_result(full_task, full_result["run_id"], tmp_path / "full-sealed")
+    relay.publish_result(full_task, full_result["run_id"], tmp_path / "full-sealed")
+    business_path = (
+        f"{branch}:runs/ci_full_flaggems/{full_task['tested_sha']}/"
+        f"{full_result['run_id']}/flaggems-summary.json"
+    )
+    assert json.loads(subprocess.check_output(["git", "show", business_path], cwd=remote)) == document
+    assert subprocess.check_output(["git", "rev-list", "--count", branch], cwd=remote).strip() == b"2"
+
     (tmp_path / "sealed/artifacts/report.txt").write_text("changed")
     with pytest.raises(ContractError):
         relay.publish_result(task(), result["run_id"], tmp_path / "sealed")

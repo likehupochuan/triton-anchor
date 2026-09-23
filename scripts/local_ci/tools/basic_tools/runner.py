@@ -275,6 +275,7 @@ def plan(
             for key in (
                 "source_dir",
                 "artifact_dir",
+                "variant",
                 "task_id",
                 "target_sha",
                 "triton_version",

@@ -77,15 +77,17 @@ class PolicyTests(unittest.TestCase):
         without_backend = self.classify("triton/cmake/llvm-hash.txt", backend=False)
         self.assertNotIn("flaggems", without_backend["recommended_checks"])
 
-    def test_explicit_full_requires_every_available_tool(self):
+    def test_explicit_full_requires_flaggems_without_forcing_performance(self):
         selected = self.classify("README.md", full=True)
-        self.assertEqual(set(runner.TOOL_IDS) | {"change_validation"}, set(selected["required_checks"]))
+        self.assertEqual(["change_validation", "flaggems"], selected["required_checks"])
         self.assertEqual(selected["required_parameters"]["flaggems"], {"mode": "full"})
-        self.assertEqual(selected["recommended_checks"], [])
         self.assertEqual(selected["recommended_parameters"], {})
+        for tool in ("compile_time", "pass_profile", "ir_serialization"):
+            self.assertNotIn(tool, selected["required_checks"])
         without = self.classify("README.md", full=True, backend=False)
-        self.assertNotIn("flaggems", without["required_checks"])
-        self.assertNotIn("flaggems", without["required_parameters"])
+        self.assertIn("flaggems", without["required_checks"])
+        self.assertEqual(without["required_parameters"]["flaggems"], {"mode": "full"})
+        self.assertIn("flaggems", without["not_applicable"])
 
     def test_empty_diff_is_not_implicitly_documentation(self):
         with self.assertRaises(policy.ContractError):

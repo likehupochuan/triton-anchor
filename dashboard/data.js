@@ -1,6 +1,14 @@
 /* Shared result projection for task, operator and performance views. */
 (function (global) {
   const array = value => Array.isArray(value) ? value : [];
+  const BUSINESS_REPOSITORY = 'likehupochuan/triton-anchor';
+  const BUSINESS_SOURCE_BRANCH = 'triton_v3.0';
+  const BUSINESS_PROFILE = 'triton-3.0';
+  const FULL_DEMO_SHA = '3d4c586307dcc3c1f11e650c67529b85da3dd22f';
+  const FULL_DEMO_RUN = '20260724T112410Z-3d4c586307dc';
+  const PERFORMANCE_TOOLS = ['compile_time','pass_profile','ir_serialization'];
+  const PERFORMANCE_KERNELS = ['add','mm','softmax','layernorm'];
+  const IR_METRICS = ['serialize','write_text','read_text','deserialize','roundtrip'];
   // Keep selection semantics distinct in the dashboard.  A check that was
   // not selected is not the same as a selected check that was skipped.
   const status = value => ({pass:'passed',fail:'failed',infra_error:'error',pending:'waiting'}[value] || value || 'unknown');
@@ -14,6 +22,41 @@
   function backendProfile(environment = {}) {
     const candidate = environment.variants ? environment.variants.candidate : environment;
     return candidate?.backend_enabled === true ? candidate.backend_profile || '' : '';
+  }
+  const number = value => typeof value === 'number' && Number.isFinite(value) ? value : null;
+  function median(values) {
+    const sorted = values.map(number).filter(value => value !== null).sort((a,b) => a-b);
+    if (!sorted.length) return null;
+    const middle = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[middle] : (sorted[middle-1] + sorted[middle]) / 2;
+  }
+  function percentDelta(candidate, baseline) {
+    return candidate !== null && baseline !== null && baseline !== 0 ? ((candidate / baseline) - 1) * 100 : null;
+  }
+  function comparisonDelta(row, candidate, baseline) {
+    return number(row?.change_percent) ?? (number(row?.change_ratio) === null ? percentDelta(candidate, baseline) : row.change_ratio * 100);
+  }
+  function measurementStatus(row, delta, correct = true) {
+    if (!correct || ['fail','failure','failed'].includes(row?.status)) return 'failure';
+    if (row?.status === 'warning' || row?.exceeds_threshold === true) return 'warning';
+    if (row && (['pass','success','new','removed'].includes(row.status) || row.exceeds_threshold === false)) return 'success';
+    if (delta !== null && Math.abs(delta) > 20) return 'warning';
+    return 'success';
+  }
+  function validPerformanceSummary(tool, summary) {
+    if (!summary || typeof summary !== 'object') return false;
+    return PERFORMANCE_KERNELS.every(kernel => {
+      const row = summary[kernel];
+      if (!row || typeof row !== 'object') return false;
+      if (tool === 'compile_time') {
+        return row.all_correct === true && number(row.compile_est?.median_ms) !== null;
+      }
+      if (tool === 'pass_profile') {
+        const timings = Object.values(row.passes || {}).map(value => value?.wall_ms?.median_ms);
+        return timings.length > 0 && timings.every(value => number(value) !== null);
+      }
+      return IR_METRICS.every(metric => number(row.metrics?.[metric]?.median_ms) !== null);
+    });
   }
   const blockerCategories = {
     environment: {label:'服务器环境问题', hint:'检查服务器配置、容器、依赖版本、权限和资源；不据此认定 PR 代码有问题。'},
@@ -159,6 +202,7 @@
             .map(kind => [kind, {...reviews[kind], status: status(reviews[kind].status)}])),
           findings: array(result.findings)},
         environment: result.environment || {}, raw: result, receiver_message: item.receiver_message || '',
+        business_full: item.business_full && typeof item.business_full === 'object' ? {...item.business_full} : null,
         result_url: safeUrl(item.result_url), artifacts_url: '', worker_revision_sha: task.worker_revision_sha};
     });
     return {schema:feed.schema, data_mode:feed.data_mode || 'live', generated_at:feed.generated_at,
@@ -166,14 +210,28 @@
   }
   function business(data) {
     const runs = [...data.runs].sort((a,b)=>timestamp(b.completed_at)-timestamp(a.completed_at));
-    const full = runs.find(run => run.checks.some(check => check.details?.["flaggems-summary"]?.mode === 'full' && array(check.details["flaggems-summary"].results).length));
+    // The two business views are release snapshots. PR measurements remain in
+    // their task details and never replace the selected Triton 3.0 branch.
+    const releaseRuns = runs.filter(run => run.repository === BUSINESS_REPOSITORY &&
+      run.pr_number === 0 && run.target_branch === BUSINESS_SOURCE_BRANCH &&
+      environmentProfile(run.environment) === BUSINESS_PROFILE && backendProfile(run.environment));
+    const fullSummary = run => run?.checks.find(check =>
+      check.id === 'flaggems' && ['passed','failed'].includes(check.status) &&
+      check.details?.["flaggems-summary"]?.mode === 'full' &&
+      array(check.details["flaggems-summary"].results).length)?.details["flaggems-summary"];
+    const liveFull = releaseRuns.find(run => run.full === true && run.business_full?.data_mode === 'live' && fullSummary(run));
+    const demoFull = runs.find(run => run.repository === BUSINESS_REPOSITORY &&
+      run.tested_sha === FULL_DEMO_SHA &&
+      (run.business_full?.data_mode === 'mock' || (!run.business_full && run.run_id === FULL_DEMO_RUN)) &&
+      fullSummary(run));
+    const full = liveFull || demoFull;
     const fg = full?.checks.find(check => check.details?.["flaggems-summary"]?.mode === 'full')?.details["flaggems-summary"];
     const operators = array(fg?.results).map((row,index) => ({index:row.index || index+1, name:row.op,
       status:({'通过':'passed','成功':'passed','失败':'failed','未通过':'failed','执行错误':'error','infra_error':'error','error':'error','超时':'timeout'}[row.test_status] || (row.exit_code === 0 && row.passed > 0 ? 'passed' : 'failed')),
       failure_stage:(row.first_failed_stage === '全部通过' ? '' : row.first_failed_stage) || row.timeout_reason || '', duration_ms:row.duration_seconds * 1000,
       log_url:full?.artifacts.find(a => row.log_file && a.path.endsWith(row.log_file) && a.url)?.url || ''}));
     const latestBackends = new Map();
-    const backendRuns = runs.filter(run => backendProfile(run.environment));
+    const backendRuns = releaseRuns.filter(run => run.event_kind === 'push');
     for (const run of backendRuns) {
       const backend = backendProfile(run.environment);
       if (run.checks.some(c => c.id.startsWith('backend_') && ['passed','failed','error','cancelled'].includes(c.status)) && !latestBackends.has(backend)) latestBackends.set(backend,run);
@@ -183,26 +241,71 @@
       tests:{backend:run.checks.find(c => c.id === 'backend_tests')?.status || 'unknown',
         ...Object.fromEntries(['compile_time','pass_profile','ir_serialization'].map(id => [id,run.checks.find(c => c.id === id)?.status || 'unknown']))},
       result_url:run.result_url}));
-    const measurements = Object.fromEntries(['compile_time','pass_profile','ir_serialization'].map(id=>[id,
-      backendRuns.find(run=>run.checks.some(c=>c.id===id && Object.keys(c.details?.candidate?.summary || {}).length))]));
-    const measured = measurements.compile_time || measurements.pass_profile || measurements.ir_serialization;
+    const performanceRun = backendRuns.find(run => PERFORMANCE_TOOLS.every(id => {
+      const check = run.checks.find(item => item.id === id);
+      const summary = check?.details?.candidate?.summary || {};
+      const metadata = check?.details?.candidate?.metadata || {};
+      const environment = run.environment?.variants?.candidate || run.environment || {};
+      const expectedRepeat = id === 'ir_serialization' ? 20 : 3;
+      return check?.status === 'passed' && validPerformanceSummary(id,summary) &&
+        metadata.commit_sha === run.tested_sha &&
+        metadata.environment_fingerprint === environment.environment_fingerprint &&
+        metadata.profile_id === environment.profile && metadata.llvm_revision === environment.llvm_hash &&
+        array(metadata.kernels).join(',') === PERFORMANCE_KERNELS.join(',') &&
+        metadata.repeat === expectedRepeat && metadata.warmup === 1;
+    }));
+    const measurements = Object.fromEntries(PERFORMANCE_TOOLS.map(id=>[id,performanceRun]));
+    const measured = performanceRun;
     const compile = measurements.compile_time?.checks.find(c => c.id === 'compile_time')?.details || {};
     const passes = measurements.pass_profile?.checks.find(c => c.id === 'pass_profile')?.details || {};
     const ir = measurements.ir_serialization?.checks.find(c => c.id === 'ir_serialization')?.details || {};
-    const compileRows = Object.entries(compile.candidate?.summary || {}).map(([name,value]) => {
+    const compileRows = PERFORMANCE_KERNELS.flatMap(name => {
+      const value = compile.candidate?.summary?.[name];
+      if (!value) return [];
       const compare = array(compile.comparison?.kernels).find(row => row.kernel === name || row.name === name);
-      return {name,candidate_ms:value.compile_est?.median_ms,delta_percent:compare?.change_ratio == null ? null : compare.change_ratio * 100,status:compare?.status || 'passed'};
-    }).filter(row => Number.isFinite(row.candidate_ms));
-    const passRows = Object.entries(passes.candidate?.summary || {}).flatMap(([kernel,value]) =>
-      Object.keys(value.passes || {}).length
-        ? Object.entries(value.passes).map(([name,timing]) => ({name:kernel + ' · ' + name,median_ms:timing.wall_ms?.median_ms}))
-        : array(value.hotspots).map(row=>({name:kernel+' · '+row.name,median_ms:row.median_ms})))
-      .filter(row => Number.isFinite(row.median_ms)).sort((a,b) => b.median_ms-a.median_ms).slice(0,20);
-    const irRows = Object.entries(ir.candidate?.summary || {}).flatMap(([kernel,value]) =>
-      Object.entries(value.metrics || {}).map(([name,timing]) => ({name:kernel + ' · ' + name,median_ms:timing.median_ms})))
-      .filter(row => Number.isFinite(row.median_ms));
-    return {manifest:{generated_at:data.generated_at,mode:data.data_mode === 'fixture' ? 'mock' : 'live',downloads:{}},
-      fullTest:{run:{backend:full ? backendProfile(full.environment) || '未记录后端' : '尚无全量算子结果',profile:environmentProfile(full?.environment),sha:full?.tested_sha || '',measured_at:full?.completed_at},operators},
+      const candidate = number(value.compile_est?.median_ms);
+      if (candidate === null) return [];
+      const baseline = number(compare?.baseline_median_ms);
+      const delta = comparisonDelta(compare,candidate,baseline);
+      return [{name,baseline_ms:baseline,candidate_ms:candidate,delta_percent:delta,
+        status:measurementStatus(compare,delta,value.all_correct !== false)}];
+    });
+    const passComparison = [...array(passes.comparison?.passes),...array(passes.comparison?.hotspots)];
+    const passRows = PERFORMANCE_KERNELS.flatMap(kernel => {
+      const value = passes.candidate?.summary?.[kernel] || {};
+      const hotspots = Object.keys(value.passes || {}).length
+        ? Object.entries(value.passes).map(([name,timing]) => ({name,median_ms:timing.wall_ms?.median_ms}))
+        : array(value.hotspots);
+      return hotspots.filter(row => row?.name && !['Total','Rest'].includes(row.name) && !row.name.startsWith('(A)')).map(row => {
+        const compare = passComparison.find(item => item.kernel === kernel && (item.pass === row.name || item.name === row.name));
+        const candidate = number(row.median_ms) ?? number(compare?.candidate_median_ms);
+        const baseline = number(compare?.baseline_median_ms);
+        const delta = comparisonDelta(compare,candidate,baseline);
+        return {name:kernel+' / '+row.name,median_ms:candidate,baseline_ms:baseline,delta_percent:delta,
+          status:measurementStatus(compare,delta)};
+      });
+    }).filter(row => row.median_ms !== null).sort((a,b) => b.median_ms-a.median_ms).slice(0,10);
+    const irComparison = array(ir.comparison?.rows);
+    const irRows = IR_METRICS.flatMap(name => {
+      const candidate = median(PERFORMANCE_KERNELS.map(kernel => ir.candidate?.summary?.[kernel]?.metrics?.[name]?.median_ms));
+      if (candidate === null) return [];
+      const comparisons = irComparison.filter(row => PERFORMANCE_KERNELS.includes(row.kernel) && row.metric === name);
+      const baseline = median(comparisons.map(row => row.baseline_median_ms));
+      const delta = percentDelta(candidate,baseline);
+      const aggregate = comparisons.find(row => ['fail','failure','failed'].includes(row.status)) ||
+        comparisons.find(row => row.status === 'warning' || row.exceeds_threshold === true) || comparisons[0];
+      return [{name,median_ms:candidate,baseline_ms:baseline,delta_percent:delta,
+        status:measurementStatus(aggregate,delta)}];
+    });
+    const declaredFullMode = full?.business_full?.data_mode;
+    const fullDataMode = full ? (['live','mock'].includes(declaredFullMode)
+      ? declaredFullMode : full.tested_sha === FULL_DEMO_SHA ? 'mock' : 'live') : 'empty';
+    const fullSourceNote = full?.business_full?.source_note || (fullDataMode === 'mock'
+      ? '暂无新的全量算子实测，当前展示历史样例。' : '');
+    return {manifest:{generated_at:data.generated_at,mode:data.data_mode === 'fixture' ? 'mock' : 'live',
+        source_branch:BUSINESS_SOURCE_BRANCH,downloads:{}},
+      fullTest:{data_mode:fullDataMode,source_note:fullSourceNote,source_path:full?.business_full?.source_path || '',
+        run:{backend:full ? backendProfile(full.environment) || '未记录后端' : '尚无全量算子结果',profile:environmentProfile(full?.environment),sha:full?.tested_sha || '',measured_at:full?.completed_at},operators},
       backends:{backends},performance:{backend:measured ? backendProfile(measured.environment) : '尚无有效测量',
         compile_time:{kernels:compileRows,backend:backendProfile(measurements.compile_time?.environment),profile:environmentProfile(measurements.compile_time?.environment),sha:measurements.compile_time?.tested_sha,measured_at:measurements.compile_time?.completed_at},
         pass_profile:{hotspots:passRows,backend:backendProfile(measurements.pass_profile?.environment),profile:environmentProfile(measurements.pass_profile?.environment),sha:measurements.pass_profile?.tested_sha,measured_at:measurements.pass_profile?.completed_at},

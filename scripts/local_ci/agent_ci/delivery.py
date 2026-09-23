@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from .protocol import (
     RESULT_STATUSES,
     RUN_ID,
     atomic_json,
+    full_flaggems_result_path,
     validate_result,
     validate_task,
     within,
@@ -24,6 +26,21 @@ MAX_OPTIONAL_FILES = 8
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_TOTAL_BYTES = 10 * 1024 * 1024
 MAX_RESULT_BYTES = 2 * 1024 * 1024
+MAX_FULL_FLAGGEMS_BYTES = 10 * 1024 * 1024
+FULL_FLAGGEMS_ARTIFACT = "candidate/flaggems/flaggems-summary.json"
+PERFORMANCE_KERNELS = ("add", "mm", "softmax", "layernorm")
+PERFORMANCE_METRICS = (
+    "serialize",
+    "write_text",
+    "read_text",
+    "deserialize",
+    "roundtrip",
+)
+PERFORMANCE_TOOLS = {
+    "compile_time": 3,
+    "pass_profile": 3,
+    "ir_serialization": 20,
+}
 
 
 def _redactor(redact):
@@ -84,6 +101,266 @@ def _records(value, identity):
     return result
 
 
+def required_parameters_match(check, expected):
+    """Match the small trusted policy parameter set against an Agent check."""
+    if not expected:
+        return True
+    actual = check.get("parameters", {})
+    if not isinstance(actual, dict):
+        return False
+    if check.get("tool_id") == "flaggems" and "mode" not in actual:
+        actual = {
+            **actual,
+            "mode": check.get("details", {})
+            .get("flaggems-summary", {})
+            .get("mode"),
+        }
+    return all(actual.get(name) == value for name, value in expected.items())
+
+
+def validate_full_flaggems(document):
+    """Validate the stable raw document consumed by the full-operator Dashboard."""
+    if (
+        not isinstance(document, dict)
+        or document.get("schema") != "triton-anchor-local-ci/flaggems-v1"
+        or document.get("mode") != "full"
+    ):
+        raise ContractError("Full FlagGems report must use mode=full")
+    rows = document.get("results")
+    summary = document.get("summary")
+    if (
+        not isinstance(rows, list)
+        or not rows
+        or any(not isinstance(row, dict) for row in rows)
+        or not isinstance(summary, dict)
+        or summary.get("total") != len(rows)
+    ):
+        raise ContractError("Full FlagGems report is missing complete operator results")
+    counts = (summary.get("passed"), summary.get("failed"), summary.get("timed_out"))
+    if any(type(value) is not int or value < 0 for value in counts) or sum(counts) != len(rows):
+        raise ContractError("Full FlagGems summary counts do not match its operator results")
+    if summary.get("status") not in {"pass", "fail"}:
+        raise ContractError("Full FlagGems report needs a terminal summary status")
+    return document
+
+
+def _seal_full_flaggems(task, run_id, checks, source, destination, redact):
+    """Seal trusted full data separately and remove its large body from result.json."""
+    target = destination / "business" / "flaggems-summary.json"
+    target.unlink(missing_ok=True)
+    check = next((row for row in checks if row.get("tool_id") == "flaggems"), None)
+    if not task.get("full") or check is None:
+        return
+
+    full_parameters = required_parameters_match(check, {"mode": "full"})
+    details = check.get("details")
+    if isinstance(details, dict):
+        # result.json keeps the check conclusion; the operator table has its own
+        # immutable publication path and is joined back only in the Dashboard feed.
+        details.pop("flaggems-summary", None)
+        if not details:
+            check.pop("details", None)
+    check["evidence"] = [
+        path for path in check.get("evidence", []) if path != FULL_FLAGGEMS_ARTIFACT
+    ]
+    if check.get("status") not in {"pass", "fail"}:
+        return
+    if not full_parameters:
+        raise ContractError("Completed full FlagGems check is missing mode=full")
+
+    tool_dir = source / "candidate" / "flaggems"
+    raw_path, tool_path = tool_dir / "flaggems-summary.json", tool_dir / "result.json"
+    if not raw_path.is_file() or not tool_path.is_file():
+        raise ContractError("Completed full FlagGems check is missing its runner report")
+    raw = raw_path.read_bytes()
+    if len(raw) > MAX_FULL_FLAGGEMS_BYTES:
+        raise ContractError("Full FlagGems report exceeds the business-result budget")
+    try:
+        document = validate_full_flaggems(json.loads(raw))
+        tool = json.loads(tool_path.read_bytes())
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError("Full FlagGems runner report is not valid JSON") from exc
+    if (
+        not isinstance(tool, dict)
+        or tool.get("tool_id") != "flaggems"
+        or tool.get("target_sha") != task["tested_sha"]
+        or tool.get("status") != check["status"]
+        or (tool.get("parameters") or {}).get("mode") != "full"
+        or (tool.get("details") or {}).get("flaggems-summary") != document
+    ):
+        raise ContractError("Full FlagGems report does not match the trusted runner result")
+    document = _clean(document, redact)
+    check["business_result"] = full_flaggems_result_path(task, run_id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    atomic_json(target, document, pretty=True)
+
+
+def _finite_number(value):
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    )
+
+
+def _valid_timing(value):
+    return (
+        isinstance(value, dict)
+        and _finite_number(value.get("median_ms"))
+        and type(value.get("count")) is int
+        and value["count"] > 0
+    )
+
+
+def _performance_parameters(tool_id, value):
+    """Resolve omitted runner defaults and reject non-standard Dashboard runs."""
+    if not isinstance(value, dict) or set(value) - {"kernels", "repeat", "warmup"}:
+        raise ContractError(f"{tool_id} has unsupported performance parameters")
+    expected = {
+        "kernels": list(PERFORMANCE_KERNELS),
+        "repeat": PERFORMANCE_TOOLS[tool_id],
+        "warmup": 1,
+    }
+    resolved = {key: value.get(key, default) for key, default in expected.items()}
+    if resolved != expected:
+        raise ContractError(f"{tool_id} does not use the standard Dashboard parameters")
+    return expected
+
+
+def _validate_performance_details(tool_id, document, task, environment):
+    """Validate the compact trusted runner payload consumed by the Dashboard."""
+    details = document.get("details")
+    candidate = details.get("candidate") if isinstance(details, dict) else None
+    comparison = details.get("comparison") if isinstance(details, dict) else None
+    if not isinstance(candidate, dict) or not isinstance(comparison, dict):
+        raise ContractError(f"{tool_id} is missing candidate or comparison details")
+    metadata, summary = candidate.get("metadata"), candidate.get("summary")
+    runtime = environment.get("variants", {}).get("candidate", environment)
+    if (
+        not isinstance(metadata, dict)
+        or not isinstance(summary, dict)
+        or set(summary) != set(PERFORMANCE_KERNELS)
+        or metadata.get("commit_sha") != task["tested_sha"]
+        or metadata.get("environment_fingerprint")
+        != runtime.get("environment_fingerprint")
+        or metadata.get("profile_id") != runtime.get("profile")
+        or metadata.get("llvm_revision") != runtime.get("llvm_hash")
+        or metadata.get("kernels") != list(PERFORMANCE_KERNELS)
+        or metadata.get("repeat") != PERFORMANCE_TOOLS[tool_id]
+        or metadata.get("warmup") != 1
+    ):
+        raise ContractError(f"{tool_id} candidate identity or sampling metadata differs")
+
+    for kernel in PERFORMANCE_KERNELS:
+        row = summary[kernel]
+        if not isinstance(row, dict):
+            raise ContractError(f"{tool_id} has an invalid {kernel} summary")
+        if tool_id == "compile_time":
+            timing = row.get("compile_est", {})
+            valid = row.get("all_correct") is True and _valid_timing(timing)
+        elif tool_id == "pass_profile":
+            passes = row.get("passes")
+            timings = [
+                item.get("wall_ms")
+                for item in passes.values()
+                if isinstance(item, dict)
+            ] if isinstance(passes, dict) else []
+            valid = bool(timings) and all(_valid_timing(timing) for timing in timings)
+        else:
+            metrics = row.get("metrics")
+            valid = isinstance(metrics, dict) and all(
+                _valid_timing(metrics.get(metric))
+                for metric in PERFORMANCE_METRICS
+            )
+        if not valid:
+            raise ContractError(f"{tool_id} has an invalid {kernel} measurement")
+
+    if comparison.get("status") == "not_comparable":
+        if not isinstance(comparison.get("reason"), str):
+            raise ContractError(f"{tool_id} has an invalid comparison reason")
+        return details
+    if comparison.get("candidate_sha") != task["tested_sha"]:
+        raise ContractError(f"{tool_id} comparison belongs to another candidate")
+    if tool_id == "compile_time":
+        rows = comparison.get("kernels")
+        keys = {
+            row.get("kernel") for row in rows if isinstance(row, dict)
+        } if isinstance(rows, list) else set()
+        expected = set(PERFORMANCE_KERNELS)
+    elif tool_id == "pass_profile":
+        rows = comparison.get("passes")
+        keys = {
+            row.get("kernel") for row in rows if isinstance(row, dict)
+        } if isinstance(rows, list) else set()
+        expected = set(PERFORMANCE_KERNELS)
+    else:
+        rows = comparison.get("rows")
+        keys = {
+            (row.get("kernel"), row.get("metric"))
+            for row in rows if isinstance(row, dict)
+        } if isinstance(rows, list) else set()
+        expected = {
+            (kernel, metric)
+            for kernel in PERFORMANCE_KERNELS
+            for metric in PERFORMANCE_METRICS
+        }
+    if not isinstance(rows, list) or not expected <= keys:
+        raise ContractError(f"{tool_id} comparison is missing standard Dashboard rows")
+    return details
+
+
+def _seal_standard_performance(task, checks, source, environment):
+    """Replace Agent-projected performance data with trusted runner results."""
+    indexed = {row.get("tool_id"): row for row in checks}
+    runtime = environment.get("variants", {}).get("candidate", environment)
+    for tool_id in PERFORMANCE_TOOLS:
+        check = indexed.get(tool_id)
+        path = source / "candidate" / tool_id / "result.json"
+        if not path.is_file():
+            if check is not None:
+                check.pop("details", None)
+                if check.get("status") in {"pass", "fail", "infra_error", "cancelled"}:
+                    raise ContractError(f"{tool_id} check is missing its trusted runner result")
+            continue
+        try:
+            document = json.loads(path.read_bytes())
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ContractError(f"{tool_id} runner result is not valid JSON") from exc
+        if (
+            not isinstance(document, dict)
+            or document.get("tool_id") != tool_id
+            or document.get("target_sha") != task["tested_sha"]
+            or document.get("variant") != "candidate"
+            or document.get("llvm_hash") != runtime.get("llvm_hash")
+            or document.get("environment_fingerprint")
+            != runtime.get("environment_fingerprint")
+            or document.get("status") not in CHECK_STATUSES
+        ):
+            raise ContractError(f"{tool_id} runner identity or status differs")
+        parameters = _performance_parameters(tool_id, document.get("parameters"))
+        if document["status"] == "pass":
+            details = _validate_performance_details(
+                tool_id, document, task, environment
+            )
+        else:
+            details = document.get("details") if isinstance(document.get("details"), dict) else None
+        if check is None:
+            check = {
+                "tool_id": tool_id,
+                "status": document["status"],
+                "summary": "固定性能脚本结果由 Worker 校验并封存",
+                "evidence": [],
+            }
+            checks.append(check)
+            indexed[tool_id] = check
+        check["status"] = document["status"]
+        check["parameters"] = parameters
+        if details:
+            check["details"] = details
+        else:
+            check.pop("details", None)
+
+
 def seal_result(
     task,
     run_id,
@@ -105,6 +382,8 @@ def seal_result(
         raise ContractError("Invalid run or Agent result")
     redact = _redactor(redact)
     checks = _records(agent_result.get("checks", []), "tool_id")
+    source = Path(source_dir) / "artifacts"
+    _seal_standard_performance(task, checks, source, environment)
     reviews = _records(agent_result.get("reviews", []), "kind")
     findings = agent_result.get("findings", [])
     if not isinstance(findings, list):
@@ -145,6 +424,11 @@ def seal_result(
             not check["summary"].strip() or not check["evidence"]
         ):
             limitations.append("变更验证必须说明影响范围、选测理由并提供实际证据文件")
+            incomplete = True
+        elif not required_parameters_match(
+            check, policy.get("required_parameters", {}).get(tool_id, {})
+        ):
+            limitations.append(f"最低必检参数不符合任务要求：{tool_id}")
             incomplete = True
     for check in checks:
         if check["status"] == "limited" and check["tool_id"] not in policy.get("required_checks", []):
@@ -201,12 +485,23 @@ def seal_result(
     elif status in {"infra_error", "cancelled"} and not limitations:
         limitations.append(summary or status)
 
-    source = Path(source_dir) / "artifacts"
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
+    _seal_full_flaggems(task, run_id, checks, source, destination, redact)
     selected = agent_result.get("artifacts", [])
     if not isinstance(selected, list):
         raise ContractError("Agent artifacts must be a list")
+    if task.get("full"):
+        selected = [
+            entry
+            for entry in selected
+            if (
+                entry
+                if isinstance(entry, str)
+                else entry.get("path", "") if isinstance(entry, dict) else None
+            )
+            != FULL_FLAGGEMS_ARTIFACT
+        ]
     required = [path for check in checks for path in check["evidence"]]
     # Required check evidence is copied first so optional files cannot consume
     # its byte budget. Agent-selected files use the remaining budget.
