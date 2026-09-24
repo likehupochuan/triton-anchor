@@ -189,6 +189,7 @@ def run_child(
     env["FLAGGEMS_ROOT"] = args.flaggems_root
     env["GEMS_VENDOR"] = args.vendor or args.backend
     env["TRITON_ANCHOR_PROFILE"] = "1"
+    env["MLIR_ENABLE_TIMING"] = "1"
 
     print(f"[{kernel}] {phase} pass-profile run {run_index}: starting")
     completed = subprocess.run(
