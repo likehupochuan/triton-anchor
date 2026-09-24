@@ -1903,8 +1903,10 @@ def collect_results(
                     result_url=result_url,
                     artifact_urls=artifact_urls,
                 )
-                control.refresh()
                 if task["task_id"] == task_id and active:
+                    # Only GitHub writes require a fresh control snapshot.
+                    # Display-only rows reuse the snapshot fetched at collection start.
+                    control.refresh()
                     active = current_task(gh, control, task)
                     if not active:
                         row.update(status=inactive_task_status(control, task), historical=True)
