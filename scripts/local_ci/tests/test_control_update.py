@@ -9,7 +9,7 @@ import pytest
 from prepare import control_update, deployment_config
 from prepare.control_update import (
     REQUEST_SCHEMA,
-    oldest_forward_request,
+    control_request_plan,
     update_control,
 )
 from prepare.runtime import EnvironmentManager
@@ -141,18 +141,41 @@ def test_control_checkout_fast_forwards_and_restarts_once(tmp_path, monkeypatch)
     assert restarts == ["worker"]
 
 
-def test_control_checkout_refuses_local_changes(tmp_path):
-    config, control, _, new = fixture_checkout(tmp_path)
-    (control / "local-note.txt").write_text("do not overwrite")
-    with pytest.raises(ValueError, match="local changes"):
+@pytest.mark.parametrize("rollback", [False, True])
+def test_control_checkout_overwrites_local_changes(tmp_path, rollback):
+    config, control, old, new = fixture_checkout(tmp_path)
+    target = old if rollback else new
+    if rollback:
         update_control(
-            config,
-            config_path=tmp_path / "local-ci.json",
-            apply=True,
-            allow_local=True,
-            expected_revision=new,
-            restart_worker=lambda: None,
+            config, config_path=tmp_path / "local-ci.json", apply=True,
+            allow_local=True, expected_revision=new, restart_worker=lambda: None,
         )
+        git(tmp_path / "source", "update-ref", "refs/heads/local-ci-unified", old, new)
+    current = git(control, "rev-parse", "HEAD")
+    (control / "control.txt").write_text("staged local changes")
+    git(control, "add", "control.txt")
+    (control / "control.txt").write_text("unstaged local changes")
+    (control / deployment_config.CONFIG_SOURCE).unlink()
+    (control / "local-note.txt").write_text("unrelated untracked file")
+    restarts = []
+    preview = update_control(
+        config, config_path=tmp_path / "local-ci.json", allow_local=True,
+        expected_revision=target, restart_worker=lambda: restarts.append("worker"),
+    )
+    assert not preview["changed"] and not restarts
+    assert git(control, "rev-parse", "HEAD") == current
+    assert (control / "control.txt").read_text() == "unstaged local changes"
+    result = update_control(
+        config, config_path=tmp_path / "local-ci.json", apply=True,
+        allow_local=True, expected_revision=target,
+        restart_worker=lambda: restarts.append("worker"),
+    )
+    assert result["changed"] and result["restarted"]
+    assert git(control, "rev-parse", "HEAD") == target
+    assert (control / "control.txt").read_text() == ("old" if rollback else "new")
+    assert not git(control, "diff", "HEAD", "--")
+    assert (control / deployment_config.CONFIG_SOURCE).is_file()
+    assert restarts == ["worker"]
 
 
 def test_applied_control_update_requires_an_exact_requested_revision(tmp_path):
@@ -164,88 +187,123 @@ def test_applied_control_update_requires_an_exact_requested_revision(tmp_path):
         )
 
 
-def test_oldest_forward_request_uses_control_history_not_timestamp_or_task_id(
-    tmp_path,
-):
-    config, _, current, older = fixture_checkout(tmp_path)
-    newer = commit(tmp_path / "source", "newer", "newer")
-    requests = [
+def control_candidates():
+    return [
         {
-            "revision": newer,
-            "task_id": "0" * 64,
-            "captured_at": "2026-09-11T00:00:00Z",
-        },
-        {
-            "revision": older,
-            "task_id": "f" * 64,
-            "captured_at": "2026-09-11T00:00:00Z",
-        },
-    ]
-    selected = oldest_forward_request(
-        config, current, requests, allow_local=True
-    )
-    assert selected["revision"] == older
-
-
-def test_oldest_forward_request_ignores_divergent_candidate(tmp_path):
-    config, _, current, forward = fixture_checkout(tmp_path)
-    source = tmp_path / "source"
-    subprocess.run(["git", "switch", "-q", "-c", "side", current], cwd=source, check=True)
-    side = commit(source, "side", "side")
-    subprocess.run(
-        ["git", "switch", "-q", "local-ci-unified"], cwd=source, check=True
-    )
-    requests = [
-        {
-            "revision": forward,
             "task_id": "a" * 64,
             "captured_at": "2026-09-11T00:00:00Z",
+            # Deliberately unrelated: task provenance must not select control.
+            "revision": "9" * 40,
         },
         {
-            "revision": side,
             "task_id": "b" * 64,
-            "captured_at": "2026-09-11T00:00:00Z",
+            "captured_at": "2026-09-12T00:00:00Z",
+            "revision": "8" * 40,
         },
     ]
-    selected = oldest_forward_request(config, current, requests, allow_local=True)
-    assert selected["revision"] == forward
 
 
-def test_oldest_forward_request_skips_stale_revision_without_blocking_newer(tmp_path):
-    config, control, stale, current = fixture_checkout(tmp_path)
+def test_new_task_requests_latest_control_branch_tip_not_task_revision(tmp_path):
+    config, _, current, tip = fixture_checkout(tmp_path)
+    requests = control_candidates()
+    plan = control_request_plan(config, current, requests, allow_local=True)
+    assert plan == {
+        "checked_task_ids": (),
+        "request": {
+            "task_id": requests[0]["task_id"],
+            "captured_at": requests[0]["captured_at"],
+            "revision": tip,
+        },
+    }
+
+
+def test_new_task_uses_current_control_or_requests_trusted_rollback(tmp_path):
+    config, control, _, tip = fixture_checkout(tmp_path)
     update_control(
         config,
         config_path=tmp_path / "local-ci.json",
         apply=True,
         allow_local=True,
-        expected_revision=current,
+        expected_revision=tip,
         restart_worker=lambda: None,
     )
-    newer = commit(tmp_path / "source", "newer", "newer")
-    requests = [
-        {
-            "revision": stale,
-            "task_id": "a" * 64,
-            "captured_at": "2026-09-10T00:00:00Z",
-        },
-        {
-            "revision": newer,
-            "task_id": "b" * 64,
-            "captured_at": "2026-09-11T00:00:00Z",
-        },
-    ]
-    selected = oldest_forward_request(config, current, requests, allow_local=True)
-    assert git(control, "rev-parse", "HEAD") == current
-    assert selected["revision"] == newer
+    requests = control_candidates()
+    expected = {
+        "checked_task_ids": tuple(row["task_id"] for row in requests),
+        "request": None,
+    }
+    assert control_request_plan(config, tip, requests, allow_local=True) == expected
 
-    assert oldest_forward_request(config, current, requests[:1], allow_local=True) is None
-
-    unknown = {**requests[1], "revision": "f" * 40}
-    with pytest.raises(ValueError, match="no usable forward"):
-        oldest_forward_request(config, current, [requests[0], unknown], allow_local=True)
+    ahead = commit(control, "installed ahead", "installed ahead")
+    rollback = control_request_plan(config, ahead, requests, allow_local=True)
+    assert rollback["checked_task_ids"] == ()
+    assert rollback["request"]["revision"] == tip
 
 
-def test_task_requested_revision_can_precede_remote_branch_tip(tmp_path):
+def test_control_checkout_follows_multiple_trusted_rollbacks(tmp_path):
+    config, control, old, first = fixture_checkout(tmp_path)
+    source = tmp_path / "source"
+    second = commit(
+        source,
+        "second forward",
+        "second forward",
+        config={**config, "poll_interval_seconds": 20},
+    )
+    third = commit(
+        source,
+        "third forward",
+        "third forward",
+        config={**config, "poll_interval_seconds": 10},
+    )
+    assert len({old, first, second, third}) == 4
+    config_path = tmp_path / "local-ci.json"
+    restarts = []
+    update_control(
+        config,
+        config_path=config_path,
+        apply=True,
+        allow_local=True,
+        expected_revision=third,
+        restart_worker=lambda: restarts.append("forward"),
+    )
+    assert git(control, "rev-parse", "HEAD") == third
+
+    # The trusted branch withdraws three commits before the next task arrives.
+    subprocess.run(
+        ["git", "update-ref", "refs/heads/local-ci-unified", old, third],
+        cwd=source,
+        check=True,
+    )
+    plan = control_request_plan(
+        config, third, control_candidates(), allow_local=True
+    )
+    assert plan["request"]["revision"] == old
+
+    result = update_control(
+        config,
+        config_path=config_path,
+        apply=True,
+        allow_local=True,
+        expected_revision=old,
+        restart_worker=lambda: restarts.append("rollback"),
+    )
+    assert result["previous_revision"] == third
+    assert result["remote_revision"] == result["revision"] == old
+    assert result["changed"] and result["restarted"]
+    assert git(control, "rev-parse", "HEAD") == old
+    assert json.loads(config_path.read_text())["poll_interval_seconds"] == 60
+    assert restarts == ["forward", "rollback"]
+
+
+def test_new_task_blocks_when_control_branch_diverged(tmp_path):
+    config, control, current, _ = fixture_checkout(tmp_path)
+    subprocess.run(["git", "switch", "-q", "-c", "installed-side", current], cwd=control, check=True)
+    side = commit(control, "installed side", "installed side")
+    with pytest.raises(ValueError, match="diverged"):
+        control_request_plan(config, side, control_candidates(), allow_local=True)
+
+
+def test_explicit_requested_revision_can_precede_remote_branch_tip(tmp_path):
     config, control, old, requested = fixture_checkout(tmp_path)
     remote_tip = commit(
         tmp_path / "source", "newer", "newer",
@@ -366,7 +424,7 @@ def test_same_revision_repairs_drift_and_retries_failed_restart(
     assert restarts == ["worker"] * (2 if restart_fails else 1)
 
 
-def test_requested_revision_must_be_on_branch_and_must_not_downgrade(tmp_path):
+def test_requested_revision_must_be_on_branch_and_rollback_must_be_current_tip(tmp_path):
     config, control, old, current = fixture_checkout(tmp_path)
     update_control(
         config,
@@ -390,7 +448,7 @@ def test_requested_revision_must_be_on_branch_and_must_not_downgrade(tmp_path):
             expected_revision=side,
             restart_worker=lambda: None,
         )
-    with pytest.raises(ValueError, match="only fast-forward"):
+    with pytest.raises(ValueError, match="branch tip"):
         update_control(
             config,
             config_path=tmp_path / "local-ci.json",

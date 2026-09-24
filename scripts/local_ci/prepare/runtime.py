@@ -845,10 +845,6 @@ class EnvironmentManager:
         ):
             raise EnvironmentError("Invalid task/run identity")
         revision = self._control_revision()
-        if task.get("control_policy") != "worker" and task.get("worker_revision_sha") != revision:
-            raise EnvironmentError(
-                "Task worker revision differs from installed control"
-            )
         sources = task.get("variants", {})
         if set(sources) != {"base", "candidate"}:
             raise EnvironmentError("Both frozen source variants are required")

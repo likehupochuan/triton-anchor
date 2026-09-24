@@ -397,7 +397,9 @@ def test_runtime_probe_does_not_execute_wheel_validation_commands(tmp_path):
 
 
 @pytest.mark.parametrize("different_llvm", [False, True])
-def test_task_mounts_expose_only_work_artifacts_and_readonly_control(tmp_path, different_llvm):
+def test_task_mounts_expose_only_work_artifacts_and_readonly_control(
+    tmp_path, different_llvm
+):
     cfg = {
         "runtime": {
             "kind": "docker-rootless",
@@ -437,7 +439,6 @@ def test_task_mounts_expose_only_work_artifacts_and_readonly_control(tmp_path, d
         target_branch="main",
         llvm_hash="b" * 40,
         worker_revision_sha="f" * 40,
-        control_policy="worker",
         variants={
             "base": dict(source_sha="a" * 40, llvm_hash="e" * 40 if different_llvm else "b" * 40,
                          triton_version="3.3.0" if different_llvm else "3.0.0"),
@@ -467,6 +468,7 @@ def test_task_mounts_expose_only_work_artifacts_and_readonly_control(tmp_path, d
     assert ensure.call_count == (2 if different_llvm else 1)
     assert handle["target_branch"] == "main"
     assert handle["control_revision"] == "c" * 40
+    assert task["worker_revision_sha"] == "f" * 40
     assert handle["profile_branch"] == "triton_v3.0"
     create = next(c for c in calls if c[0] == "create")
     mounts = [create[i + 1] for i, x in enumerate(create) if x == "--mount"]
@@ -488,7 +490,6 @@ def test_task_mounts_expose_only_work_artifacts_and_readonly_control(tmp_path, d
     assert create[create.index("--user") + 1] == "11001:11001"
     assert handle["attempt_id"] == handle["run_id"] == "run-1"
     assert handle["uids"] == {"task": 11001}
-
 
 def test_control_mount_uses_checkout_and_repairs_only_tracked_permissions(tmp_path):
     control = tmp_path / "control_anchor"

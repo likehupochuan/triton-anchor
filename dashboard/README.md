@@ -19,13 +19,10 @@ Gateway 在生成 feed 时读取独立的
 后端与性能只读取该分支的 push；性能只接受同一次任务完成的三项标准测量，
 四个 kernel 与采样参数必须一致，无有效数据时明确留空。
 任务详情分别展示 `environment.variants.base` 与 `candidate` 的 Profile；
-后端汇总及性能视图只使用 candidate 明确 `backend_enabled=true` 且记录 `backend_profile` 的结果，
-不因出现 `backend_*` 检查而推断后端能力。后端汇总按真实后端名保留最近一次已执行的后端检查，
-第一列显示 `backend_profile`（如 `sophgo-cmodel`），Triton/Profile 单列显示 `profile`（如 `triton-3.0`）。
-性能来源和全量算子标题同样分别标注后端与 Profile；三项性能指标使用同一次有效测量。
-单环境结果读取同层的 `backend_enabled`、`backend_profile` 及 `profile`/`generation`。
-缺少后端身份的记录仍在任务视图中保留，不借用 base 或通用 Profile 推断；缺少 Triton/Profile 时显示“未记录”。
-历史样例只为保证全量算子模块在首个新 full 完成前保持可解析、可展示；真实结果一旦可用即优先展示。
+后端汇总及性能视图使用 candidate 明确 `backend_enabled=true` 且记录 `backend_profile` 的结果，
+分别标注后端（如 `sophgo-cmodel`）和 Profile（如 `triton-3.0`）。单环境结果读取同层字段。
+缺少后端身份的记录只保留在任务视图中，缺少 Profile 时显示“未记录”。
+后端汇总保留各后端最近一次已执行检查；三项性能指标使用同一次有效测量。
 接收器也读取结果仓库 `runs/` 中的历史结果及旧版 `delivery-summary.txt` 对应的真实算子/性能报告。
 旧版摘要明确记录的 `backend_profile` 转为候选后端身份；只有该字段存在时才标记后端能力，
 `triton_profile`、`triton_version` 按原始记录保留，缺失时不从后端名或分支名补造。
@@ -41,21 +38,27 @@ Pass 过滤汇总项后显示前 10 个热点，IR 显示五个固定指标在�
 审查诊断重复列为缺陷。没有阻塞 finding 时，展示封存结果中的 `blocking_reasons`；
 失败报告仍缺少原因时使用任务摘要兜底。检查状态、诊断与证据保留在详情和完整执行报告中。
 `limitations` 单列“限制说明”，保留环境、工具、验证或证据发布限制及其对结论的影响。
-即使存在明确缺陷或整体检查通过，也展示已记录的限制；展示不改变 CI 状态和最低验证要求。
+限制说明独立于整体通过或失败结论。
 未提供 `limitations` 的结果兼容原有诊断分类，结合检查、审查及任务摘要展示原因。
 缺少审查不等于审查发现代码问题，普通超时也不自动归因于网络。
-页面测试：`node --test scripts/local_ci/tests/dashboard.test.cjs`。
-“非阻塞发现”与其他发现项显示结果中记录的风险等级（严重/高/中/低/提示）；未提供等级显示“未标注”，展示不改变阻塞判定。
+发现项保留风险等级（严重/高/中/低/提示），缺失时显示“未标注”。
 
 ```bash
 python3 -m http.server 8000 --directory dashboard --bind 127.0.0.1
 ```
 
 Gateway 发布时将 `_site/data/tasks.json` 复制到页面的 `data/`。
-`worker.html` 独立加载 `health.js`，展示运行概览、当前异常、服务与资源、当前任务和 Cloudflare 告警；业务页面只保留导航入口，不加载健康数据。Worker 页面每五分钟匿名读取 Gitee 文件 API 的 `snapshot/<worker>/worker-health.json`，不等待任务发布，不增加 Actions 定时任务。健康仓库、Worker ID 和 20 分钟过期阈值集中在 `health.js` 的 `source` 中；普通 raw URL 没有浏览器跨域许可，不能替代文件 API。
-Gitee 读取失败时，页面从 `source.cacheUrl` 读取 Cloudflare 定时保存的合并缓存，只补充读取失败的部分。遇到 Gitee 429 或 403 限流响应后冷却 15 分钟，期间直接读取备用缓存，之后恢复优先读取 Gitee。页面注明缓存来源与更新时间，心跳仍按原始采集时间判断；两边都不可用时保留已读取的数据并标记状态待确认。浏览器不写 KV，也不触发 Cloudflare 即时抓取 Gitee。启用此功能需先部署 Cloudflare Worker，再发布 Dashboard；仅更新页面不会自动部署缓存接口。
-服务、Gitee 访问、环境/磁盘、任务交付与 Codex 异常分别展示；Codex 连接、认证、限流等分类需要服务器更新后的结构化健康字段，旧快照显示未上报，不推测错误原因。心跳过期时不继续展示旧的绿色状态，浏览器读取失败也不判成服务器断网。按需 oneshot 服务未运行不算故障；不再读取旧 watchdog 文件。
-「Cloudflare 告警记录」匿名读取同一健康仓库最近 50 条更新的 Issues，筛选当前 Worker 的自动告警标记，展示最近 10 条及详情入口。它与实时健康快照分开展示：Issue 已关闭不代表服务已经恢复，没有 Issue 也不表示外部监测已启用。页面不触发通知；无人打开页面时的检测和 Issue 写入由独立 [Cloudflare Worker](../scripts/local_ci/maintenance/cloudflare/README.md) 执行，无需为每次告警重新发布 Pages。
-本地静态预览不代表已部署 Pages，也不代表真实工具链或生产门禁验收通过。
+`worker.html` 独立加载 `health.js`，每五分钟匿名读取 Gitee 文件 API 的
+`snapshot/<worker>/worker-health.json`。健康仓库、Worker ID、缓存地址和 20 分钟过期阈值
+集中在 `health.js` 的 `source` 中；普通 raw URL 无浏览器跨域许可，不能替代文件 API。
+页面展示运行概览、服务与资源、任务执行和恢复状态，结果上传等待单独列出。
+预算内的自动恢复显示进展，耗尽后显示异常；缺字段或采集失败显示未知，心跳过期不沿用旧的正常状态。
 
-任务执行与恢复区展示动作、次数、截止时间和真实容器状态；结果上传等待独立显示。预算内的 Codex 内部恢复只显示当前恢复状态，不建立 Cloudflare 告警；连接异常在前 9 次和仍在执行的第 10 次只显示自动重连状态，第 10 次失败后才进入当前异常和 Cloudflare 告警。页面读取缓存不写 KV。任务/上传采集失败显示未知，不用空列表宣告恢复。健康页面测试：`node --test scripts/local_ci/tests/dashboard.test.cjs`。
+Gitee 读取失败时使用 Cloudflare 缓存，限流后冷却 15 分钟。页面标明来源和更新时间，
+两边均不可用时保留旧数据并标记待确认。缓存接口须先部署，操作及告警规则见
+[Cloudflare 文档](../scripts/local_ci/maintenance/cloudflare/README.md)。
+
+告警记录读取健康仓库最近 50 条更新的 Issues，按 Worker 标记筛选后展示最近 10 条。
+Issue 状态与实时健康快照分别展示；外部监测及通知由 Cloudflare 执行。
+
+页面测试：`node --test scripts/local_ci/tests/dashboard.test.cjs`。

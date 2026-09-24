@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely fast-forward the dedicated Local CI control checkout from Gitee."""
+"""Safely follow the trusted Gitee control branch along one commit history."""
 
 from __future__ import annotations
 
@@ -139,30 +139,34 @@ def read_update_request(path: Path) -> dict:
     return request
 
 
-def oldest_forward_request(
+def control_request_plan(
     config: dict,
     current_revision: str,
     requests: list[dict],
     *,
     allow_local: bool = False,
-) -> dict | None:
-    """Select the oldest requested descendant, or skip requests for older revisions."""
+) -> dict:
+    """Check the trusted branch tip when new tasks arrive.
+
+    Task manifests identify only what source to validate.  Their dispatch
+    revision is deliberately not consulted when selecting server control code.
+    """
     if not isinstance(current_revision, str) or not SHA_RE.fullmatch(current_revision):
         raise ValueError("Current control revision must be an exact commit")
     if not requests:
         raise ValueError("At least one control update request is required")
-    grouped: dict[str, list[dict]] = {}
+    candidates = []
     for request in requests:
-        revision = request.get("revision") if isinstance(request, dict) else None
         task_id = request.get("task_id") if isinstance(request, dict) else None
+        captured_at = request.get("captured_at") if isinstance(request, dict) else None
         if (
-            not isinstance(revision, str)
-            or not SHA_RE.fullmatch(revision)
-            or not isinstance(task_id, str)
+            not isinstance(task_id, str)
             or not re.fullmatch(r"[0-9a-f]{64}", task_id)
+            or not isinstance(captured_at, str)
+            or not captured_at
         ):
             raise ValueError("Control update candidate is invalid")
-        grouped.setdefault(revision, []).append(request)
+        candidates.append({"task_id": task_id, "captured_at": captured_at})
     root = Path(config["control_root"])
     state_dir = Path(config["state_dir"])
     source = validate_control_source(
@@ -181,19 +185,6 @@ def oldest_forward_request(
     head = _git(root, ["rev-parse", "HEAD^{commit}"], environment).stdout.strip()
     if head != current_revision:
         raise ValueError("Worker control revision changed during request selection")
-    # Older requests need neither a downgrade nor another fetch of the control mirror.
-    grouped = {
-        revision: rows
-        for revision, rows in grouped.items()
-        if _git(
-            root,
-            ["merge-base", "--is-ancestor", revision, current_revision],
-            environment,
-            check=False,
-        ).returncode != 0
-    }
-    if not grouped:
-        return None
     _git(
         root,
         [
@@ -209,56 +200,30 @@ def oldest_forward_request(
     tip = _git(
         root, ["rev-parse", "refs/local-ci/control-order^{commit}"], environment
     ).stdout.strip()
-
-    forward_revisions = []
-    revisions = tuple(grouped)
-    for revision in revisions:
-        present = _git(
-            root,
-            ["cat-file", "-e", f"{revision}^{{commit}}"],
-            environment,
-            check=False,
-        )
-        on_branch = _git(
-            root,
-            ["merge-base", "--is-ancestor", revision, tip],
-            environment,
-            check=False,
-        )
-        if present.returncode or on_branch.returncode:
-            continue
-        forward = _git(
-            root,
-            ["merge-base", "--is-ancestor", current_revision, revision],
-            environment,
-            check=False,
-        )
-        if forward.returncode == 0:
-            forward_revisions.append(revision)
-
-    if not forward_revisions:
-        raise ValueError("Waiting tasks have no usable forward control revision")
-
-    oldest = []
-    for revision in forward_revisions:
-        if all(
-            revision == other
-            or _git(
-                root,
-                ["merge-base", "--is-ancestor", revision, other],
-                environment,
-                check=False,
-            ).returncode
-            == 0
-            for other in forward_revisions
-        ):
-            oldest.append(revision)
-    if len(oldest) != 1:
-        raise ValueError("Waiting control revisions do not form one forward history")
-    return min(
-        grouped[oldest[0]], key=lambda row: (row["captured_at"], row["task_id"])
+    checked = tuple(row["task_id"] for row in candidates)
+    if tip == current_revision:
+        return {"checked_task_ids": checked, "request": None}
+    forward = _git(
+        root,
+        ["merge-base", "--is-ancestor", current_revision, tip],
+        environment,
+        check=False,
     )
-
+    rollback = _git(
+        root,
+        ["merge-base", "--is-ancestor", tip, current_revision],
+        environment,
+        check=False,
+    )
+    if forward.returncode and rollback.returncode:
+        raise ValueError(
+            "Configured control branch diverged from the installed trusted checkout"
+        )
+    trigger = min(candidates, key=lambda row: (row["captured_at"], row["task_id"]))
+    return {
+        "checked_task_ids": (),
+        "request": {**trigger, "revision": tip},
+    }
 
 def update_control(
     config: dict,
@@ -270,7 +235,7 @@ def update_control(
     restart_worker: Callable[[], None] = _restart_worker,
     on_success: Callable[[], None] = _noop,
 ) -> dict:
-    """Update only a clean checkout and never cross a non-fast-forward boundary."""
+    """Replace checkout contents with a trusted related branch revision."""
     import fcntl
 
     root = Path(config["control_root"])
@@ -297,12 +262,6 @@ def update_control(
     current = _git(root, ["rev-parse", "HEAD^{commit}"], environment).stdout.strip()
     if not SHA_RE.fullmatch(current):
         raise ValueError("control_root HEAD is not an exact commit")
-    dirty = _git(
-        root, ["status", "--porcelain=v1", "--untracked-files=all"], environment
-    ).stdout.strip()
-    if dirty:
-        raise ValueError("control_root has local changes; automatic update refused")
-
     remote = _git(
         root, ["ls-remote", "--exit-code", source, f"refs/heads/{branch}"], environment
     ).stdout.split()
@@ -332,11 +291,6 @@ def update_control(
 
         # Recheck mutable local state after acquiring the deployment lock.
         current = _git(root, ["rev-parse", "HEAD^{commit}"], environment).stdout.strip()
-        dirty = _git(
-            root, ["status", "--porcelain=v1", "--untracked-files=all"], environment
-        ).stdout.strip()
-        if dirty:
-            raise ValueError("control_root changed while waiting for the update lock")
         result["previous_revision"] = current
         if target != current or expected_revision is not None:
             _git(
@@ -377,7 +331,20 @@ def update_control(
                 root, ["merge-base", "--is-ancestor", current, target], environment, check=False
             )
             if ancestor.returncode:
-                raise ValueError("control_repo_url would replace history; only fast-forward updates are allowed")
+                rollback = _git(
+                    root,
+                    ["merge-base", "--is-ancestor", target, current],
+                    environment,
+                    check=False,
+                )
+                if rollback.returncode:
+                    raise ValueError(
+                        "Configured control branch diverged from the installed checkout"
+                    )
+                if target != fetched:
+                    raise ValueError(
+                        "Control rollback is allowed only to the configured branch tip"
+                    )
 
         desired = load_deployment_config(root, target)
         # These paths/runtime settings are also embedded in installed systemd units.
@@ -414,7 +381,9 @@ def update_control(
             # A failed restart must be retried even after repairing same-SHA drift.
             marker_path.unlink(missing_ok=True)
         if target != current:
-            _git(root, ["checkout", "--quiet", "--detach", target], environment)
+            # This dedicated deployment checkout follows the trusted revision;
+            # local edits and obstructing untracked files may be overwritten.
+            _git(root, ["checkout", "--quiet", "--force", "--detach", target], environment)
             if _git(root, ["rev-parse", "HEAD^{commit}"], environment).stdout.strip() != target:
                 raise RuntimeError("Control checkout did not reach the fetched commit")
             result["changed"] = True

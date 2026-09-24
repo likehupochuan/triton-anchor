@@ -96,6 +96,8 @@ class FakeGitHub:
             return copy.deepcopy(self.pull)
         if path == "git/commits/" + self.tested:
             return {"parents": [{"sha": self.base}, {"sha": self.head}]}
+        if path == "git/commits/" + self.head:
+            return {"parents": [{"sha": self.base}]}
         if path == "branches/main":
             return {"commit": {"sha": self.head}}
         raise AssertionError(path)
@@ -312,6 +314,17 @@ class GatewayBehaviorTests(unittest.TestCase):
         changed = {**self.task, "worker_revision_sha": "f" * 40}
         self.assertEqual(g.compute_task_id(changed), self.task["task_id"])
         g.validate_task(changed)
+        for event_kind in ("push", "manual"):
+            branch_task = g.prepare_task(
+                self.gh, self.base, branch="main", event_kind=event_kind
+            )
+            self.assertEqual(branch_task["control_policy"], "worker")
+            self.assertEqual(
+                g.compute_task_id(
+                    {**branch_task, "worker_revision_sha": "f" * 40}
+                ),
+                branch_task["task_id"],
+            )
         legacy = dict(self.task)
         legacy.pop("control_policy")
         self.assertNotEqual(g.compute_task_id(legacy),
@@ -588,6 +601,21 @@ class GatewayBehaviorTests(unittest.TestCase):
             control.get("tasks/" + self.task["task_id"] + ".json"), self.task
         )
 
+    def test_cancelled_task_identity_cannot_be_enqueued_again(self):
+        control = self.store(g.CONTROL_BRANCH)
+        control.put({
+            f"cancel/{self.task['task_id']}.json": {
+                "task_id": self.task["task_id"],
+                "reason": "superseded",
+                "created_at": "2026-09-23T00:00:00Z",
+            }
+        })
+        with self.assertRaisesRegex(ValueError, "fresh verification"):
+            g.enqueue(self.task, self.gh, control, self.source)
+        self.assertIsNone(control.get(f"tasks/{self.task['task_id']}.json"))
+        self.assertIsNone(control.get(f"current/{g.current_key(self.task)}.json"))
+        self.assertEqual(self.gh.writes, [])
+
     def test_legacy_current_does_not_block_new_dispatch_or_collection(self):
         control = self.store(g.CONTROL_BRANCH)
         legacy = {
@@ -612,7 +640,7 @@ class GatewayBehaviorTests(unittest.TestCase):
         before = git(control.root, "rev-parse", "HEAD")
         self.assertEqual(g.cancel_obsolete(self.gh, control, 8), 0)
         self.assertEqual(
-            g.collect_results(self.gh, control, results, self.root / "dashboard"), []
+            g.collect_results(self.gh, control, results, self.root / "dashboard", ""), []
         )
         self.assertEqual(git(control.root, "rev-parse", "HEAD"), before)
         self.assertEqual(self.gh.writes, [])
@@ -988,6 +1016,26 @@ class GatewayBehaviorTests(unittest.TestCase):
             )
         sleep.assert_not_called()
 
+    def test_receiver_waits_for_dispatch_visibility_instead_of_retiring_task(self):
+        control, results = self.publish_result(self.result())
+        with (
+            patch.object(
+                self.gh,
+                "latest_dispatch",
+                side_effect=[
+                    {"status": "in_progress", "conclusion": None},
+                    {"status": "completed", "conclusion": "success"},
+                ],
+            ),
+            patch.object(g.time, "sleep") as sleep,
+        ):
+            self.assertEqual(
+                g.receive_result(self.gh, str(self.remote), self.task["task_id"]),
+                "ready",
+            )
+        sleep.assert_called_once_with(g.RECEIVER_POLL_SECONDS)
+        self.assertIsNone(control.get(f"cancel/{self.task['task_id']}.json"))
+
     def test_receiver_continuations_are_bounded_and_keep_the_same_task(self):
         self.task = g.prepare_task(self.gh, self.base, 7, trigger_id="200:1")
         control = self.store(g.CONTROL_BRANCH)
@@ -1357,7 +1405,10 @@ class GatewayBehaviorTests(unittest.TestCase):
                          f"tasks/{task['task_id']}.json": task})
             result = {**self.result(), "task": task}
             results.put({f"runs/{task['task_id']}/{result['run_id']}/result.json": result})
-        with patch.object(g, "current_task", return_value=True):
+        with (
+            patch.object(g, "retired_task", return_value=False),
+            patch.object(g, "current_task", return_value=True),
+        ):
             published = g.collect_results(self.gh, control, results, self.root / "dashboard", self.task["task_id"])
             self.assertEqual([row["task_id"] for row in published], [self.task["task_id"]])
             self.assertEqual([row[0] for row in self.gh.statuses], [self.task["task_id"]])
@@ -1367,6 +1418,119 @@ class GatewayBehaviorTests(unittest.TestCase):
             self.assertEqual(self.gh.writes, [])
         feed = json.loads((self.root / "dashboard/tasks.json").read_bytes())
         self.assertEqual(len(feed["tasks"]), 2)
+
+    def test_manual_publish_reconciles_only_current_owned_pending_result(self):
+        control, results = self.publish_result(self.result())
+        client = RecordingGitHub(self.gh)
+        client.seed_status(
+            self.head,
+            g.SUMMARY_CONTEXT,
+            "pending",
+            self.task["task_id"],
+        )
+        with (
+            patch.object(g, "retired_task", return_value=False),
+            patch.object(g, "current_task", return_value=True),
+            patch.object(client, "restore_preflight"),
+            patch.object(client, "comment", return_value=False),
+        ):
+            published = g.collect_results(
+                client,
+                control,
+                results,
+                self.root / "dashboard",
+                "",
+                reconcile_pending=True,
+            )
+            self.assertEqual(
+                [row["task_id"] for row in published],
+                [self.task["task_id"]],
+            )
+            self.assertEqual(client.latest_summary(self.task)["state"], "success")
+            before = len(client.writes)
+            self.assertEqual(
+                g.collect_results(
+                    client,
+                    control,
+                    results,
+                    self.root / "dashboard",
+                    "",
+                    reconcile_pending=True,
+                ),
+                [],
+            )
+            self.assertEqual(len(client.writes), before)
+
+    def test_obsolete_receiver_closes_only_its_pending_summary_without_reusing_result(self):
+        control, results = self.publish_result(self.result())
+        control.put({
+            f"cancel/{self.task['task_id']}.json": {
+                "task_id": self.task["task_id"],
+                "reason": "superseded",
+                "superseded_by": "f" * 64,
+                "created_at": "2026-09-23T00:00:00Z",
+            }
+        })
+        client = RecordingGitHub(self.gh)
+        client.seed_status(
+            self.head,
+            g.SUMMARY_CONTEXT,
+            "pending",
+            self.task["task_id"],
+        )
+        self.assertEqual(
+            g.collect_results(
+                client,
+                control,
+                results,
+                self.root / "dashboard",
+                self.task["task_id"],
+            ),
+            [],
+        )
+        summary = client.latest_summary(self.task)
+        self.assertEqual(summary["state"], "error")
+        self.assertIn("superseded", summary["description"])
+        feed = json.loads((self.root / "dashboard/tasks.json").read_bytes())
+        row = next(row for row in feed["tasks"] if row["task"]["task_id"] == self.task["task_id"])
+        self.assertTrue(row["historical"])
+        self.assertEqual(row["status"], "superseded")
+        self.assertEqual(row["result"]["status"], "pass")
+
+    def test_collect_retries_visible_but_incomplete_dispatch_without_closing_summary(self):
+        control, results = self.publish_result(self.result())
+        client = RecordingGitHub(self.gh)
+        client.seed_status(
+            self.head,
+            g.SUMMARY_CONTEXT,
+            "pending",
+            self.task["task_id"],
+        )
+        output = self.root / "github-output"
+        with (
+            patch.object(
+                client,
+                "latest_dispatch",
+                return_value={"status": "in_progress", "conclusion": None},
+            ),
+            patch.dict(g.os.environ, {"GITHUB_OUTPUT": str(output)}),
+        ):
+            self.assertEqual(
+                g.collect_results(
+                    client,
+                    control,
+                    results,
+                    self.root / "dashboard",
+                    self.task["task_id"],
+                ),
+                [],
+            )
+        self.assertEqual(client.latest_summary(self.task)["state"], "pending")
+        self.assertIn("receiver_errors=1", output.read_text())
+        feed = json.loads((self.root / "dashboard/tasks.json").read_bytes())
+        row = next(row for row in feed["tasks"] if row["task"]["task_id"] == self.task["task_id"])
+        self.assertFalse(row["historical"])
+        self.assertEqual(row["status"], "pending")
 
     def test_pr_stage_statuses_and_summary_use_only_head_and_retry_idempotently(self):
         client = RecordingGitHub(self.gh)
@@ -1534,6 +1698,7 @@ class GatewayBehaviorTests(unittest.TestCase):
              "qualification": "初始化失败后未关闭句柄，与插件发现是独立问题",
              "code_evidence": "src/file.py:31-33"},
             {"summary": "可以改进错误提示", "blocking": False, "severity": "low",
+             "qualification": "错误信息没有说明应检查哪个配置字段",
              "code_evidence": ["../secret", "/absolute/path", "https://evil.invalid", "validation.md:1", "src/file.py:23", "src/file.py:23"]},
         ]
         result["blocking_reasons"].append(result["findings"][0]["summary"])
@@ -1550,7 +1715,12 @@ class GatewayBehaviorTests(unittest.TestCase):
                 f"- 【合入阻塞】{finding['summary']}  \n  分析：{finding['qualification']}  \n  代码位置：",
                 findings,
             )
-        self.assertIn("- 【风险：低】可以改进错误提示 · [src/file.py:23]", findings)
+        self.assertIn(
+            "- 【风险：低】可以改进错误提示  \n"
+            "  分析：错误信息没有说明应检查哪个配置字段  \n"
+            "  代码位置：[src/file.py:23]",
+            findings,
+        )
         self.assertIn("目录扫描遗漏独立安装的插件", findings)
         self.assertIn("异常路径丢失资源释放", findings)
         self.assertNotIn("工具拒绝仓内符号链接", findings)
@@ -1601,6 +1771,8 @@ class GatewayBehaviorTests(unittest.TestCase):
         self.assertNotIn("【合入阻塞】", rendered)
         self.assertNotIn("验证未完成（环境或执行异常）", rendered)
         self.assertIn("【风险：低】文档行尾空白", rendered)
+        findings = rendered.split("### 需要关注的发现", 1)[1].split("### 查看审查详情", 1)[0]
+        self.assertEqual(findings.strip(), "- 【风险：低】文档行尾空白")
         self.assertIn("| 格式检查 | 提示 |", rendered)
         self.assertIn("| CI 流程验证 | 验证受限 |", rendered)
         self.assertIn("标量内存定向验证", rendered)
@@ -1690,10 +1862,18 @@ class GatewayBehaviorTests(unittest.TestCase):
             with self.subTest(status=status), patch.object(self.gh, "latest_dispatch", return_value={
                 "status": status, "conclusion": conclusion,
             }), patch.object(g.time, "sleep") as sleep:
+                self.assertFalse(g.retired_task(self.gh, control, self.task))
                 self.assertFalse(g.current_task(self.gh, control, self.task))
                 self.assertEqual(g.collect_results(self.gh, control, results, self.root / "dashboard"), [])
-                self.assertEqual(g.receive_result(self.gh, str(self.remote), self.task["task_id"]), "obsolete")
-                sleep.assert_not_called()
+                self.assertFalse(g.finish_obsolete_summary(self.gh, control, self.task))
+                if status == "completed":
+                    self.assertEqual(
+                        g.receive_result(
+                            self.gh, str(self.remote), self.task["task_id"]
+                        ),
+                        "dispatch_failed",
+                    )
+                    sleep.assert_not_called()
             self.assertEqual((self.gh.statuses, self.gh.comments), before)
         with patch.object(self.gh, "latest_dispatch", return_value={"status": "completed", "conclusion": "success"}):
             self.assertTrue(g.current_task(self.gh, control, self.task))

@@ -28,12 +28,11 @@ FlagGems 使用服务器 profile 的固定只读目录；其子模块指针不�
 
 ### 新一轮验证与原任务恢复
 
-PR `reopened`、验证 Workflow 的 rerun、手动 Run workflow 发起验证时，
-以该入口的 `run_id:run_attempt` 生成一次 `trigger_id`，参与 task ID 计算。
+PR 同步、重开、转为可审查、正文或标签变化，分支创建或强推，以及 rerun、手动验证时，
+以入口的 `run_id:run_attempt` 生成 `trigger_id`，参与 task ID 计算。
 即使 head、merge 未变化，也会投递新任务并重新执行服务器测试。
 该编号写入冻结的 `task.json`，审批、派发、结果接收只传递这个文件及其 task ID。
-普通自动路由虽然使用 `workflow_dispatch`，不会因此生成新触发编号；
-源码、基线、PR 审查信息和 full 范围变化仍使用原有身份规则。
+其他自动路由按源码、基线、PR 审查信息和 full 范围计算任务身份。
 
 Gateway 的 Re-run all jobs 和 Re-run failed jobs 都转交一次完整的新验证。
 重跑 attempt 不执行原验证作业，也不读取上一轮成功 Prepare 留下的任务产物；
@@ -93,8 +92,7 @@ Summary 从 CI Request 确认有效请求后为 `pending`，覆盖 Gateway 排�
 关闭或转为草稿的 PR 只执行取消流程，不创建新的等待状态。
 直接派发 Gateway 时不填写 `request_id`，Summary 在可信任务初始化时创建。
 `trigger_id` 由入口传递；手动运行时留空，由 Prepare 确定，勿复制上一轮的值。
-新任务及完整重跑重新初始化 Summary，旧运行不能覆盖新运行的结论；
-重复初始化不会重新打开已结束的阶段。结果接收器只在成功投递后接管 Summary。
+新任务及完整重跑重新初始化 Summary；重复初始化不会重新打开已结束的阶段。
 `Local CI Approve` 只用于外部 fork，同仓库任务不创建该项。
 这些状态报告验证进度与结果，不配置强制合并规则，也不保证 Merge 按钮置灰。
 
@@ -106,17 +104,12 @@ Basic 状态标识当前执行归属，接收器还要求对应 Dispatch 已成�
 检查名称、状态与失败说明使用英文，审批卡、Agent 解释和 PR 结果使用中文。
 PR 结果按 `result + task_id + run_id + result_digest` 去重，每次运行追加一条结果评论。
 评论区分 PR 提交与合并后验证提交，列出实际执行的检查、阻塞项及报告链接；
-完整的选测原因和不适用项在 Dashboard 展示。发现保留风险等级，缺失时显示“未标注”。
-“需要关注的发现”按独立缺陷列出结论、分析和源码位置，代码链接指向本次验证提交的具体行；
-每项合入阻塞的结论独占首行，分析和代码位置各另起一行，仍属于同一个列表项；缺失部分不显示空标题。
-日志及复现证据通过完整执行报告查看，不在发现项中插入“证据 1”等日志链接。失败检查与审查是验证记录，
-不重复追加为新的合入阻塞。没有阻塞 findings 时，失败报告使用阻塞原因作为兜底。
-环境、工具和证据发布限制单列“限制说明”，说明对结论的影响；必要验证未完成仍保持非通过状态。
-按改动范围未选择的检查不自动构成限制，不追加未执行编译器构建或运行检查的通用免责声明。
-评论正文使用可读检查名称，自定义检查可提供 `display_name`；工具 ID、命令和原始异常保留在完整结果及证据中。
-版本比较使用“base”和“候选”。正文用“环境配置”“任务信息”“源码目录”等可读描述，
-不要求读者理解 profile、task-context、checkout 或内部状态枚举；代码名称与命令原文保留。
-`warning` 显示为提示，`limited` 显示为验证受限；检查条目反映最终验证结果，而不是已修复的早期尝试。
+完整选测记录在 Dashboard 展示，日志及复现证据见完整执行报告。
+每条发现分别列出结论、分析和代码位置，代码链接指向被测提交；保留风险等级，缺失时显示“未标注”。
+失败检查不重复列为缺陷；没有阻塞 findings 时使用阻塞原因兜底。
+环境、工具和证据不足单列“限制说明”，按范围未选择的检查不自动构成限制。
+正文使用可读检查名称，自定义检查可提供 `display_name`；版本比较使用“base”和“候选”。
+结果字段及表述要求见 [Agent 文档](../local_ci/AI_CI_PROGRAM.md#最终结果)。
 
 ## 手动派发与接收
 
@@ -139,7 +132,7 @@ PR 结果按 `result + task_id + run_id + result_digest` 去重，每次运行�
 | 字段 | 内容 |
 | --- | --- |
 | `mode` | `run` |
-| `worker_revision_sha` | 控制分支当前 HEAD 的完整 SHA，必须与工作流提交一致 |
+| `worker_revision_sha` | Gateway 工作流提交的完整 SHA，记录任务生成来源 |
 | `full` | `true` |
 | `pr_number` | PR 编号；分支任务填 `0` |
 | `source_branch` | 分支任务填写被测分支；PR 从自身信息确定 |
@@ -149,23 +142,12 @@ PR 结果按 `result + task_id + run_id + result_digest` 去重，每次运行�
 full 要求全部可用工具对应的验证，外部 fork 使用同一审批流程。
 base/candidate 的 profile 与能力见 [Local CI 环境](../local_ci/README.md#环境与生命周期)。
 
-### 触发身份改动的上线顺序
+### 更新入口与任务协议
 
-先把修复后的控制代码同步到 Gitee，再使用服务器现有 `control_update.py`
-按修复提交的完整 SHA 更新并重启 Worker；具体路径和命令见
-[更新已有服务器](../local_ci/prepare/README.md#更新已有服务器)。
-需要同步的是包含 `agent_ci/protocol.py` 的整套控制代码，不需要更新 profile、
-LLVM、镜像或重置任务状态。确认实际控制 SHA 已更新后再做 reopen/rerun 验收。
-旧 Worker 会拒绝新触发任务的身份，不能依赖这种任务本身触发自动升级；
-普通控制分支 push 的自动升级仍按已有规则执行。
-
-将修复后的 `ci-request.yml` 同步到默认分支 `main` 及需要路由的源码分支，
-使路由 Workflow 显式传递触发编号，并接受较旧运行的主动 rerun；
-旧路由传来的 `request_id` 中 attempt 大于 1 时，Prepare 也会沿用它作为触发编号。
-`main` 的接收工作流已读取控制分支代码，
-无需修改其 YAML；本次也不涉及 Cloudflare 或 Dashboard 部署。
-GitHub 会使用历史运行原来的工作流代码重跑，因此部署前的旧 Gateway 运行不能靠点击 rerun 获得修复；
-请从最新入口重新打开 PR 或 Run workflow 发起一次验证。
+任务身份协议变化时，先同步 Gitee 并[更新服务器控制代码](../local_ci/prepare/README.md#更新已有服务器)，
+再更新 `main` 和相关源码分支的 `ci-request.yml`，以及 `main` 的接收工作流。
+旧 Worker 可能拒绝新协议任务，需显式更新。历史运行的 rerun 使用原工作流代码，
+更新入口后应通过 Run workflow 发起新验证。
 
 ### 结果接收
 
@@ -177,8 +159,8 @@ GitHub 会使用历史运行原来的工作流代码重跑，因此部署前的�
 填写原 `task_id`，`receiver_round` 为 `1`。补收使用已有结果，不重新投递构建。
 
 每轮解析控制分支 SHA 并加载接收器。结果就绪后，串行 publish 作业复查任务身份、
-回写 PR 并生成页面；失效任务只刷新 Dashboard。
-`collect --task-id <ID>` 只回写指定任务，不带 task ID 时只汇总页面数据。
+回写 PR 并生成页面；失效任务只结束自身的 pending Summary 并刷新 Dashboard。
+`collect --task-id <ID>` 回写指定任务；不带 ID 时只汇总页面，加 `--reconcile-pending` 可补写当前有效任务的已有结果。
 
 ## 结果与页面发布
 
@@ -202,7 +184,7 @@ GitHub 会使用历史运行原来的工作流代码重跑，因此部署前的�
 
 页面发布比较 schema、tasks 和静态资源 `site_digest`，仅内容变化才部署 Pages。
 部署由独立 `deploy-dashboard` 作业完成，`github-pages` environment 允许 `main`。
-手动刷新页面使用 `main` 的 CI Gateway、`mode=publish`，不带 task ID。
+手动发布使用 `main` 的 CI Gateway、`mode=publish`，不带 task ID；同时补写当前有效任务遗留的 pending Summary。
 PR 任务以 head SHA 为展示标识，tested SHA 保留在验证详情中。
 
 PR 评论发送失败记录为 `receiver_error`，发布失败在接收轮次预算内重试。
@@ -222,10 +204,8 @@ PR 评论发送失败记录为 `receiver_error`，发布失败在接收轮次预
 `actions: read`，派发接续使用 `actions: write`，PR 评论使用 `pull-requests: write`。
 接收和发布还按 YAML 配置检查读取权限，Pages 部署使用 `pages: write` 与 `id-token: write`。
 
-PR 任务使用 `control_policy=worker`，在已安装的可信控制版本运行，
-实际版本写入结果的 `environment.control_revision`。
-push/manual 绑定精确控制提交，服务器按任务请求从 Gitee 快进更新。
-各侧源码需要匹配的可信 profile，部署操作见 [服务器准备](../local_ci/prepare/README.md)。
+新任务使用 `control_policy=worker`，不绑定服务器控制版本；Worker 按 Gitee 控制分支同步。
+控制更新和 profile 配置见 [服务器准备](../local_ci/prepare/README.md)。
 
 本地回归：
 

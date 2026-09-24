@@ -16,13 +16,8 @@ Keep the wheel checksums and build log alongside the foundation recipe. APT
 packages follow the Ubuntu repositories at build time.
 Pin the final image with the top-level `image` digest in the repository's
 `scripts/local_ci/prepare/config.example.json` and load it into the server's
-Rootless Docker daemon. This file is the complete non-sensitive
-deployment configuration for `jiwang_ci`; edits affect deployment. Commit changes
-in the development checkout and deploy through Gitee. The server's
-`/home/jiwang_ci/local_ci/config/local-ci.json` is generated from that source,
-without a local JSON override. Keep credentials in the separate `credentials.env`
-and `codex-source/` locations. Every profile uses this
-same image; the manager does not build per-profile derived images. An optional
+Rootless Docker daemon, following the [deployment procedure](../../README.md).
+Every profile uses this same image. An optional
 profile `local_image_tag` must resolve to the configured digest.
 
 `configure.py --config <repository-config.example.json> --image <digest> --flaggems-source <directory>

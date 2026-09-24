@@ -193,10 +193,10 @@ def validate_task(
             trigger and not TRIGGER_ID.fullmatch(trigger)
         ):
             raise ContractError("Invalid trigger_id")
-    if task.get("control_policy") not in {None, "worker"} or (
-        task.get("control_policy") == "worker" and not task["pr_number"]
-    ):
-        raise ContractError("Worker-selected control is only supported for PR tasks")
+    if task.get("control_policy") not in {None, "worker"}:
+        raise ContractError("Invalid control policy")
+    if "_use_installed_control" in task:
+        raise ContractError("Runtime-only control override is not valid task data")
     if task["repository"] not in repositories:
         raise ContractError("Task repository is not configured for this worker")
     if type(task["pr_number"]) is not int or task["pr_number"] < 0:

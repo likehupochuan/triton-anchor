@@ -266,6 +266,8 @@ def test_sha_layout_keeps_distinct_tasks_and_restart_history(tmp_path):
     for invalid in (None, 1, "0:1", "1:0", "1", "1:1\n", "1" * 159 + ":1"):
         with pytest.raises(ContractError, match="trigger_id"):
             validate_task({**first, "trigger_id": invalid})
+    with pytest.raises(ContractError, match="Runtime-only control override"):
+        validate_task({**first, "_use_installed_control": True})
     second = revised_manifest("f" * 40, "2026-09-12T00:00:00Z")
     journal = Journal(tmp_path)
     row1, row2 = journal.register(first), journal.register(second)
@@ -317,58 +319,6 @@ def test_heartbeat_exposes_head_without_replacing_task_identity(tmp_path):
     assert health["head_sha"] == task["head_sha"]
     assert health["tasks"][0]["head_sha"] == task["head_sha"]
     assert health["tasks"][0]["task_id"] == task["task_id"]
-
-
-@pytest.mark.parametrize("unpinned", [False, True])
-def test_task_waits_for_automatic_control_update(tmp_path, unpinned):
-    task = manifest()
-    if unpinned:
-        task["control_policy"] = "worker"
-        task["task_id"] = task_id(task)
-        prefix = f"ci/pr-7/{task['task_id']}"
-        task.update(task_ref=prefix + "/tested", base_task_ref=prefix + "/base", head_task_ref=prefix + "/head")
-
-    class Relay:
-        def refresh(self):
-            pass
-
-        def tasks(self):
-            return [task]
-
-        def validity(self, task):
-            return True, ""
-
-    class Manager:
-        def generations(self):
-            return {}
-
-        def collect_retired(self):
-            pass
-
-        def current_control_revision(self):
-            return "f" * 40
-
-    worker = Worker(
-        {"state_dir": str(tmp_path), "simulation": True},
-        relay=Relay(),
-        manager=Manager(),
-        driver=object(),
-        control_request_selector=lambda config, current, requests, **kwargs: requests[0],
-    )
-    request = worker.scan()
-    if unpinned:
-        assert request is None
-        assert worker.journal.tasks()[0]["task_id"] == task["task_id"]
-        assert not (tmp_path / "control-update/request.json").exists()
-        return
-    assert worker.journal.tasks() == []
-    assert request == {
-        "revision": task["worker_revision_sha"],
-        "task_id": task["task_id"],
-        "captured_at": task["captured_at"],
-    }
-    health = json.loads((tmp_path / "health/worker.json").read_text())
-    assert health["control_update"] == "required"
 
 
 def test_control_update_request_is_single_atomic_file_and_nonblocking(tmp_path):
@@ -428,49 +378,6 @@ def test_scan_releases_control_lock_before_trigger(tmp_path):
     assert events == ["scan", "trigger-after-unlock"]
 
 
-def test_cancelled_and_published_tasks_do_not_block_newer_control_update(tmp_path):
-    cancelled = revised_manifest("1" * 40, "2026-09-09T00:00:00Z")
-    published = revised_manifest("2" * 40, "2026-09-10T00:00:00Z")
-    waiting = revised_manifest("3" * 40, "2026-09-11T00:00:00Z")
-
-    class Relay:
-        def refresh(self):
-            pass
-
-        def tasks(self):
-            return [cancelled, published, waiting]
-
-        def validity(self, task):
-            return (False, "cancelled") if task is cancelled else (True, "")
-
-    class Manager:
-        def generations(self):
-            return {}
-
-        def collect_retired(self):
-            pass
-
-        def current_control_revision(self):
-            return "f" * 40
-
-    worker = Worker(
-        {"state_dir": str(tmp_path), "simulation": True},
-        relay=Relay(),
-        manager=Manager(),
-        driver=object(),
-        control_request_selector=lambda config, current, requests, **kwargs: requests[0],
-    )
-    worker.journal.register(published)
-    payload = tmp_path / "published-result.json"
-    payload.write_text('{"status":"pass"}')
-    worker.journal.queue_result(
-        published["task_id"], payload, hashlib.sha256(payload.read_bytes()).hexdigest()
-    )
-    worker.journal.published(published["task_id"])
-
-    assert worker.scan()["revision"] == waiting["worker_revision_sha"]
-
-
 def test_worker_uses_startup_revision_even_if_checkout_head_moves(tmp_path):
     task = revised_manifest("e" * 40, "2026-09-11T00:00:00Z")
 
@@ -502,7 +409,6 @@ def test_worker_uses_startup_revision_even_if_checkout_head_moves(tmp_path):
         relay=Relay(),
         manager=manager,
         driver=object(),
-        control_request_selector=lambda config, current, requests, **kwargs: requests[0],
     )
     manager.revision = task["worker_revision_sha"]
     trigger_control_update(
@@ -549,53 +455,6 @@ def test_restarted_worker_clears_already_satisfied_request(tmp_path):
         driver=object(),
     )
     assert worker.scan() is None
-    assert not (tmp_path / "control-update/request.json").exists()
-
-
-def test_control_selection_clears_blocked_when_only_old_tasks_remain(tmp_path):
-    task = manifest()
-
-    class Relay:
-        def refresh(self):
-            pass
-
-        def tasks(self):
-            return [task]
-
-        def validity(self, task):
-            return True, ""
-
-    class Manager:
-        def generations(self):
-            return {}
-
-        def collect_retired(self):
-            pass
-
-        def current_control_revision(self):
-            return "f" * 40
-
-    def unavailable(*args, **kwargs):
-        raise RuntimeError("control mirror unavailable")
-
-    worker = Worker(
-        {"state_dir": str(tmp_path), "simulation": True},
-        relay=Relay(),
-        manager=Manager(),
-        driver=object(),
-        control_request_selector=unavailable,
-    )
-    assert worker.scan() is None
-    heartbeat = json.loads((tmp_path / "health/worker.json").read_text())
-    assert heartbeat["control_update"] == "blocked"
-
-    worker.control_request_selector = lambda *args, **kwargs: None
-    for _ in range(2):
-        assert worker.scan() is None
-        heartbeat = json.loads((tmp_path / "health/worker.json").read_text())
-        assert "control_update" not in heartbeat
-        assert "error" not in heartbeat
-    assert worker.journal.tasks() == []
     assert not (tmp_path / "control-update/request.json").exists()
 
 
@@ -728,10 +587,119 @@ def recovery_worker(tmp_path, monkeypatch):
 
     monkeypatch.setattr("agent_ci.worker.changed_files", lambda *a: [{"path": "README.md"}])
     monkeypatch.setattr("agent_ci.worker.minimum_checks", lambda *a, **kw: {"required_checks": [], "required_reviews": []})
-    worker = Worker({"state_dir": str(tmp_path), "simulation": True, "retry_delay_seconds": 0},
-                    relay=Relay(), manager=Manager(), driver=Driver(), executor_factory=Executor)
+    worker = Worker(
+        {"state_dir": str(tmp_path), "simulation": True, "retry_delay_seconds": 0},
+        relay=Relay(),
+        manager=Manager(),
+        driver=Driver(),
+        executor_factory=Executor,
+        control_request_selector=lambda config, current, requests, **kwargs: {
+            "checked_task_ids": tuple(row["task_id"] for row in requests),
+            "request": None,
+        },
+    )
     return SimpleNamespace(worker=worker, task=task, calls=calls, uploads=uploads,
                            tasks=relay_tasks, credentials=credentials, write_report=write_report)
+
+
+def test_task_uses_installed_control_regardless_of_dispatch_revision(recovery_worker):
+    f = recovery_worker
+    worker = f.worker
+    current_revision = "f" * 40
+    worker.running_control_revision = current_revision
+    worker.manager.current_control_revision = lambda: current_revision
+    worker.control_request_selector = lambda config, current, requests, **kwargs: {
+        "checked_task_ids": (f.task["task_id"],),
+        "request": None,
+    }
+    acquired = worker.manager.acquire_task
+    runtime_tasks = []
+
+    def observe_task(task, run_id):
+        runtime_tasks.append(task)
+        return acquired(task, run_id)
+
+    worker.manager.acquire_task = observe_task
+    assert worker.scan() is None
+    assert len(f.calls) == 1
+    assert runtime_tasks[0]["worker_revision_sha"] == "d" * 40
+    frozen = json.loads(worker.journal.task(f.task["task_id"])["manifest"])
+    assert "_use_installed_control" not in frozen
+    assert not (worker.state_dir / "control-update/request.json").exists()
+    result = json.loads(
+        Path(worker.journal.delivery(f.task["task_id"])["payload_path"]).read_text()
+    )
+    assert result["task"]["worker_revision_sha"] == "d" * 40
+    assert result["environment"]["control_revision"] == current_revision
+    assert result["status"] == "fail"
+
+
+def test_remote_control_tip_requests_update_without_using_task_revision(recovery_worker):
+    f = recovery_worker
+    worker = f.worker
+    worker.running_control_revision = "c" * 40
+    worker.manager.current_control_revision = lambda: worker.running_control_revision
+    worker.control_request_selector = lambda config, current, requests, **kwargs: {
+        "checked_task_ids": (),
+        "request": {**requests[0], "revision": "f" * 40},
+    }
+    request = worker.scan()
+    assert request == {
+        "revision": "f" * 40,
+        "task_id": f.task["task_id"],
+        "captured_at": f.task["captured_at"],
+    }
+    assert request["revision"] != f.task["worker_revision_sha"]
+    assert not f.calls and worker.journal.tasks() == []
+
+    # After the updater installs the observed branch tip and restarts the
+    # Worker, the same task is admitted without changing its frozen manifest.
+    worker.running_control_revision = request["revision"]
+    worker.manager.current_control_revision = lambda: worker.running_control_revision
+    worker.control_request_selector = lambda config, current, requests, **kwargs: {
+        "checked_task_ids": (f.task["task_id"],),
+        "request": None,
+    }
+    assert worker.scan() is None
+    assert len(f.calls) == 1
+    result = json.loads(
+        Path(worker.journal.delivery(f.task["task_id"])["payload_path"]).read_text()
+    )
+    assert result["task"]["worker_revision_sha"] == "d" * 40
+    assert result["environment"]["control_revision"] == "f" * 40
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("control mirror unavailable"),
+        ValueError("control branch diverged from installed checkout"),
+    ],
+    ids=["network", "diverged"],
+)
+def test_control_freshness_failure_stays_retryable(recovery_worker, failure):
+    f = recovery_worker
+    worker = f.worker
+    worker.running_control_revision = "f" * 40
+    worker.manager.current_control_revision = lambda: worker.running_control_revision
+
+    def unavailable(*args, **kwargs):
+        raise failure
+
+    worker.control_request_selector = unavailable
+    assert worker.scan() is None
+    assert not f.calls and worker.journal.tasks() == []
+    health = json.loads((worker.state_dir / "health/worker.json").read_text())
+    assert health["control_update"] == "blocked"
+    assert str(failure) in health["error"]
+    assert not worker.journal.tasks()
+
+    worker.control_request_selector = lambda config, current, requests, **kwargs: {
+        "checked_task_ids": (f.task["task_id"],),
+        "request": None,
+    }
+    assert worker.scan() is None
+    assert len(f.calls) == 1
 
 
 def test_failed_report_is_final_even_when_cli_exits_with_connection_error(recovery_worker):
@@ -867,10 +835,12 @@ def test_long_execution_does_not_block_outbox_or_kill_silent_live_task(recovery_
 
 
 
-def test_recoverable_task_holds_control_revision_but_outbox_does_not(recovery_worker):
+def test_recoverable_task_holds_control_revision_but_outbox_does_not(
+    recovery_worker,
+):
     f = recovery_worker
     worker = f.worker
-    row = worker.journal.register(f.task)
+    worker.journal.register(f.task)
     worker.running_control_revision = f.task["worker_revision_sha"]
     worker.manager.current_control_revision = lambda: worker.running_control_revision
     worker.journal.update(f.task["task_id"], credentials_fingerprint="first")
@@ -878,14 +848,21 @@ def test_recoverable_task_holds_control_revision_but_outbox_does_not(recovery_wo
     newer = revised_manifest("f" * 40, "2026-09-12T00:00:00Z")
     f.tasks.append(newer)
     selected = []
+
     def select(config, current, waiting, **kwargs):
         selected.extend(waiting)
-        return waiting[0]
+        return {
+            "checked_task_ids": (),
+            "request": {**waiting[0], "revision": "f" * 40},
+        }
+
     worker.control_request_selector = select
     assert worker.scan() is None and not selected and not f.calls
+    row = worker.journal.task(f.task["task_id"])
     worker.finish(row, {"status": "infra_error", "summary": "no more recovery"})
+    worker.schedule_delivery(worker.journal.task(f.task["task_id"]))
     request = worker.scan()
-    assert request["revision"] == newer["worker_revision_sha"]
+    assert request["revision"] == "f" * 40
     assert selected and not f.calls
 
 
@@ -944,6 +921,7 @@ def test_sealing_exhaustion_preserves_report_and_manual_resume_does_not_reset_bu
     with pytest.raises(ValueError, match="预算已耗尽"):
         f.worker.journal.resume(f.task["task_id"])
     monkeypatch.setattr("maintenance.retention.retain_local", lambda config: {"pause_intake": True})
+    f.worker.running_control_revision = "f" * 40
     # A later disk outage must not revive the exhausted sealing budget or replace
     # its terminal reason with a generic dependency wait on every scan.
     for _ in range(2):

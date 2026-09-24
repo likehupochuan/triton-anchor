@@ -104,9 +104,6 @@ python3 scripts/local_ci/maintenance/health.py \
   --config /home/jiwang_ci/local_ci/config/local-ci.json
 ```
 
-Dashboard 优先读 Gitee，失败时使用 Cloudflare 缓存并按限流规则退避；
-页面 GET 不写 KV，也不触发即时采集。
-
 ## 结果保留
 
 `retention.py` 每天清理已发布满 30 天的本地大日志和证据，保留结果摘要。
@@ -131,9 +128,9 @@ Dashboard 发布使用 `main` 的 CI Gateway 手动 `mode=publish`，不带任�
 页面发布与服务器部署分别执行。等待健康采集和 Cloudflare 周期后，
 检查新鲜快照、服务/容器状态、页面及 Issues。
 
-回退前停止 Worker 并保存 Journal、封存结果和 outbox，
+手动回退前停止 Worker 并保存 Journal、封存结果和 outbox，
 确认目标代码能理解未完成任务。安装器的 `--rollback` 仅恢复 unit 文件；
-不能用清空状态、重置预算或强制 checkout 代替回退。
+代码回退使用控制更新器，保留任务状态与预算。
 
 ### 本地检查
 

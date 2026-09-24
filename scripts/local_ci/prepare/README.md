@@ -99,7 +99,7 @@ CI_CONFIG=/home/jiwang_ci/local_ci/config/local-ci.json
   --config "$CI_CONFIG" --expected-revision "$CONTROL_SHA"
 ```
 
-核对输出的 `revision` 与 `config_fields`。更新器检查 Gitee 可达性、快进关系及任务占用；
+核对输出的 `revision` 与 `config_fields`。更新器检查 Gitee 可达性、前进或撤回的同一历史关系及任务占用；
 通过后应用：
 
 ```bash
@@ -213,16 +213,15 @@ Worker 与两个 timer 应处于 active。health 和 control-update 是 oneshot�
 任务结束后清理临时工作目录和私有会话，保留持久化证据与其他运行。
 `runtime.py` 管理镜像和容器；`container_fs.py` 准备工作目录、venv 与 Codex 会话。
 
-PR 任务使用 `control_policy=worker`，由服务器已安装的可信代码执行，结果记录实际
-`environment.control_revision`。push/manual 任务绑定精确控制 SHA。
-需要更新时，Worker 释放共享锁，将任务身份和 SHA 原子写入
-`control-update/request.json`，由 control-update oneshot 处理；
-多个等待版本按提交祖先顺序选择最早的前向版本。
+新任务入场且无在途执行时，Worker 检查 Gitee `control_branch`；版本不同时，
+通过 `control-update/request.json` 请求同步并重启，支持前进及回退到祖先提交。
+访问失败或历史分叉时等待并报告原因，后续扫描重试。
 
 Worker 校验进程与磁盘代码版本一致，并在任务期间持有 `control.lock`。
 更新器取得独占锁且没有未清理任务容器后才切换 checkout；
+切换版本会覆盖本地代码修改。
 恢复中的有效未封存任务保留当前控制版本，只有封存上传等待不阻止升级。
-控制更新由具体任务或显式命令触发，不定时追随分支尖端。
+控制检查由新任务或显式命令触发，无独立定时器。
 
 ## 容器内 CI Python
 

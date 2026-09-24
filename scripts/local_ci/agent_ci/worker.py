@@ -30,7 +30,7 @@ from agent_ci.relay import GitRelay
 from agent_ci.state import Journal
 from prepare.control_update import (
     REQUEST_SCHEMA,
-    oldest_forward_request,
+    control_request_plan,
     read_update_request,
     update_request_lock_path,
     update_request_path,
@@ -134,7 +134,7 @@ class Worker:
         manager=None,
         driver=None,
         executor_factory=None,
-        control_request_selector=oldest_forward_request,
+        control_request_selector=control_request_plan,
         background=False,
     ):
         self.config, self.state_dir = config, Path(config["state_dir"])
@@ -155,6 +155,7 @@ class Worker:
         self.driver = driver or CodexDriver(config, self.state_dir)
         self.executor_factory = executor_factory or DockerExecutor
         self.control_request_selector = control_request_selector
+        self.control_checked_tasks = set()
         self.stop_event = threading.Event()
         self.active = None
         self.control_channel = "unknown"
@@ -740,6 +741,7 @@ class Worker:
         known = [json.loads(row["manifest"]) for row in self.journal.tasks()
                  if row["phase"] not in {"publish_pending", "published"}]
         tasks = {task["task_id"]: task for task in [*known, *self.relay.tasks()]}
+        self.control_checked_tasks.intersection_update(tasks)
         for task in tasks.values():
             if self.stop_event.is_set():
                 break
@@ -760,23 +762,30 @@ class Worker:
                     local = None
                 if local and local["phase"] in {"publish_pending", "published"}:
                     continue
+                if local and self.journal.record(
+                    task["task_id"], local["run_id"]
+                ).get("checkpoint", {}).get("complete"):
+                    # recover_local exclusively owns completed report sealing.
+                    # Control selection must never replace that checkpoint.
+                    continue
                 valid, invalid_reason = self.relay.validity(task)
                 if not valid:
                     if local and not (self.active and self.active.task["task_id"] == task["task_id"]):
                         self.finish(local, {"status": "cancelled", "summary": invalid_reason})
                     continue
-                if (task.get("control_policy") != "worker" and current_revision
-                        and task.get("worker_revision_sha") != current_revision):
+                if local and (local.get("recovery") or {}).get("state") != "exhausted":
+                    holds_control = True
+                    # A journaled task has already crossed the admission
+                    # boundary and must resume with this Worker snapshot.
+                    self.control_checked_tasks.add(task["task_id"])
+                if task["task_id"] not in self.control_checked_tasks and current_revision:
                     waiting.append(
                         {
-                            "revision": task["worker_revision_sha"],
                             "task_id": task["task_id"],
                             "captured_at": task["captured_at"],
                         }
                     )
                     continue
-                if local and (local.get("recovery") or {}).get("state") != "exhausted":
-                    holds_control = True
                 if self.active or runtime_blocked or disk_blocked:
                     if (local and not self.active
                             and (local.get("recovery") or {}).get("state") != "exhausted"
@@ -797,7 +806,7 @@ class Worker:
                 self.heartbeat(error=str(exc))
         if waiting and not holds_control and not self.active:
             try:
-                request = self.control_request_selector(
+                plan = self.control_request_selector(
                     self.config,
                     current_revision,
                     waiting,
@@ -810,18 +819,37 @@ class Worker:
                     error=str(exc),
                 )
                 return None
-            if request is None:
-                self.heartbeat()
-                return None
-            self.heartbeat(
-                control_revision=current_revision,
-                requested_control_revision=request["revision"],
-                control_update="required",
-            )
-            return request
-        else:
-            self.heartbeat()
-            return None
+            waiting_ids = {row["task_id"] for row in waiting}
+            if not isinstance(plan, dict):
+                raise ValueError("Control update selector returned an invalid plan")
+            checked = set(plan.get("checked_task_ids", ()))
+            request = plan.get("request")
+            if (
+                set(plan) != {"checked_task_ids", "request"}
+                or not checked <= waiting_ids
+                or (request is None and checked != waiting_ids)
+                or (request is not None and (
+                    not isinstance(request, dict)
+                    or request.get("task_id") not in waiting_ids
+                    or request.get("task_id") in checked
+                    or not SHA.fullmatch(str(request.get("revision", "")))
+                    or request["revision"] == current_revision
+                ))
+            ):
+                raise ValueError("Control update selector returned an invalid plan")
+            self.control_checked_tasks.update(checked)
+            if request is not None:
+                self.heartbeat(
+                    control_revision=current_revision,
+                    requested_control_revision=request["revision"],
+                    control_update="required",
+                )
+                return request
+            # The installed checkout matches the trusted branch tip.
+            # Admit the newly checked tasks in this poll.
+            return self.scan()
+        self.heartbeat()
+        return None
 
 
 def scan_once(worker: Worker, control_lock, *, trigger=trigger_control_update):

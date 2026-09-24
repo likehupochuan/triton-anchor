@@ -845,8 +845,9 @@ def prepare_task(
         external_fork=external,
     )
     task["metadata_digest"] = metadata_digest(task)
-    if pr_number:
-        task["control_policy"] = "worker"
+    # The dispatch revision records which Gateway created the manifest.  The
+    # server selects and refreshes its own trusted control checkout.
+    task["control_policy"] = "worker"
     if trigger_id:
         task["trigger_id"] = trigger_id
     task["task_id"] = compute_task_id(task)
@@ -1050,6 +1051,10 @@ def enqueue(task: dict, gh: GitHub, control: GitStore, source: Path) -> None:
     validate_task(task)
     if validate_pr_info(task) or not is_current(gh, task) or not gh.owns_task(task, workflow=True):
         raise ValueError("Task information or freshness no longer permits dispatch")
+    if control.get(f"cancel/{task['task_id']}.json"):
+        raise ValueError(
+            "Task identity was previously cancelled; request a fresh verification"
+        )
     gh.check(task, "dispatch", "in_progress", None, "Dispatching Local CI task",
              "Publishing the frozen task and code to Gitee.", workflow_url())
     checked_out = (
@@ -1328,10 +1333,10 @@ def result_comment(result: dict, result_url: str = "", artifact_urls: dict | Non
             has_blocking_findings |= bool(blocking)
             label = "合入阻塞" if blocking else f"风险：{risk}"
             if analysis := finding.get("qualification"):
-                text += ("  \n  分析：" if blocking else " 分析：") + feedback_prose(analysis)
+                text += "  \n  分析：" + feedback_prose(analysis)
             evidence = feedback_evidence(finding, task, artifact_urls or {})
             if evidence:
-                text += ("  \n  代码位置：" if blocking else " · ") + evidence
+                text += "  \n  代码位置：" + evidence
             findings.append(f"【{label}】{text}")
     # Findings are the reviewed issue list; failed checks are evidence, not extra defects.
     if not has_blocking_findings:
@@ -1689,16 +1694,28 @@ def finalize_preflight(gh: GitHub, task: dict, stages: dict) -> None:
         gh.status(task, "failure" if review else "error", description, workflow_url())
 
 
-def current_task(gh: GitHub, control: GitStore, task: dict) -> bool:
+def retired_task(gh: GitHub, control: GitStore, task: dict) -> bool:
+    """Return true only for a task that has definitively lost ownership."""
     pointer = control.get(f"current/{current_key(task)}.json")
     return bool(
-        pointer
-        and pointer.get("task_id") == task["task_id"]
-        and not control.get(f"cancel/{task['task_id']}.json")
-        and is_current(gh, task)
-        and gh.owns_task(task)
-        and (not (dispatch := gh.latest_dispatch(task)) or
-             (dispatch.get("status") == "completed" and dispatch.get("conclusion") == "success"))
+        not pointer
+        or pointer.get("task_id") != task["task_id"]
+        or control.get(f"cancel/{task['task_id']}.json")
+        or not is_current(gh, task)
+        or not gh.owns_task(task)
+    )
+
+
+def current_task(gh: GitHub, control: GitStore, task: dict) -> bool:
+    if retired_task(gh, control, task):
+        return False
+    dispatch = gh.latest_dispatch(task)
+    return bool(
+        not dispatch
+        or (
+            dispatch.get("status") == "completed"
+            and dispatch.get("conclusion") == "success"
+        )
     )
 
 
@@ -1768,17 +1785,24 @@ def receive_result(
                     raise ValueError(
                         "Receiver task identity does not match the request"
                     )
-                if not current_task(gh, control, task):
+                if retired_task(gh, control, task):
                     return "obsolete"
-                if results is None:
-                    results = GitStore(url, RESULTS_BRANCH)
-                else:
-                    results.refresh()
-                path = latest_result(task, results)
-                if path:
-                    read_result(path, task, results)
-                    return "ready"
-                progress.update(gh, task)
+                dispatch = gh.latest_dispatch(task)
+                if not dispatch or (
+                    dispatch.get("status") == "completed"
+                    and dispatch.get("conclusion") == "success"
+                ):
+                    if results is None:
+                        results = GitStore(url, RESULTS_BRANCH)
+                    else:
+                        results.refresh()
+                    path = latest_result(task, results)
+                    if path:
+                        read_result(path, task, results)
+                        return "ready"
+                    progress.update(gh, task)
+                elif dispatch.get("status") == "completed":
+                    return "dispatch_failed"
             except (OSError, RuntimeError) as error:
                 if (
                     isinstance(error, GitHubAPIError)
@@ -1869,48 +1893,117 @@ def inactive_task_status(control: GitStore, task: dict) -> str:
     return "cancelled" if cancellation and cancellation.get("reason") != "superseded" else "superseded"
 
 
+def owned_pending_summary(gh: GitHub, task: dict) -> dict | None:
+    """Return the pending Summary only while this exact task still owns it."""
+    row = gh.latest_summary(task) or {}
+    if (
+        row.get("state") == "pending"
+        and isinstance(row.get("id"), int)
+        and (row.get("creator") or {}).get("login") == "github-actions[bot]"
+        and status_identity(row).get("local-ci-task") == task["task_id"]
+    ):
+        return row
+    return None
+
+
+def finish_obsolete_summary(gh: GitHub, control: GitStore, task: dict) -> bool:
+    """CAS-close only an obsolete task's own pending Summary."""
+    if not retired_task(gh, control, task):
+        return False
+    previous = owned_pending_summary(gh, task)
+    if not previous:
+        return False
+    superseded = inactive_task_status(control, task) == "superseded"
+    gh.retire_open_checks(task)
+    description = (
+        "Local CI: task superseded; no new worker verification started"
+        if superseded
+        else "Local CI: task cancelled before worker verification"
+    )
+    gh.status(
+        task,
+        "error",
+        description,
+        workflow_url(),
+        existing_only=True,
+        expected_pending_id=previous["id"],
+    )
+    return True
+
+
 def collect_results(
     gh: GitHub, control: GitStore, results: GitStore, dashboard: Path,
-    task_id: str | None = None,
+    task_id: str | None = None, *, reconcile_pending: bool = False,
 ) -> list[dict]:
-    """Read all dashboard rows; publish only the explicitly received task."""
+    """Read all dashboard rows; publish only explicit or safely reconciled tasks."""
     task_id = os.getenv("RECEIVER_TASK_ID", "") if task_id is None else task_id
     if task_id and not ID.fullmatch(task_id):
         raise ValueError("Receiver task ID must be an exact task identity")
+    if not isinstance(reconcile_pending, bool):
+        raise ValueError("Pending-result reconciliation must be explicitly enabled")
+    requested_task = None
+    if task_id:
+        requested_task = validate_task(control.get(f"tasks/{task_id}.json"))
+        if requested_task["task_id"] != task_id:
+            raise ValueError("Receiver task manifest identity differs")
     rows, published = [], []
+    requested_seen = False
+    receiver_errors = 0
     for current in sorted((control.root / "current").glob("*.json")):
         pointer = json.loads(current.read_text())
         task = control.get(f"tasks/{pointer['task_id']}.json")
         if is_legacy_task(task):
             continue
         validate_task(task)
+        retired = retired_task(gh, control, task)
         active = current_task(gh, control, task)
+        requested = task["task_id"] == task_id
+        requested_seen |= requested
+        pending = owned_pending_summary(gh, task) if reconcile_pending and active else None
+        publication_selected = requested or pending is not None
+        waiting_dispatch = requested and not active and not retired
         row = {
             "task": task,
-            "status": "pending" if active else inactive_task_status(control, task),
-            "historical": not active,
+            "status": inactive_task_status(control, task) if retired else "pending",
+            "historical": retired,
             "result": None,
         }
         status_published = False
+        obsolete_checked = False
         try:
+            if requested and retired:
+                status_published = finish_obsolete_summary(gh, control, task)
+                obsolete_checked = True
+            elif waiting_dispatch:
+                raise ValueError(
+                    "Receiver task dispatch has not reached a publishable state"
+                )
             path = latest_result(task, results)
             if path:
                 result, result_digest = read_result(path, task, results)
                 result_url, artifact_urls = result_links(results, path, result)
                 row.update(
-                    status=result["status"] if active else inactive_task_status(control, task),
+                    status=(
+                        result["status"]
+                        if active
+                        else inactive_task_status(control, task) if retired else "pending"
+                    ),
                     result=result,
                     result_url=result_url,
                     artifact_urls=artifact_urls,
                 )
-                if task["task_id"] == task_id and active:
+                if publication_selected and active:
                     # Only GitHub writes require a fresh control snapshot.
                     # Display-only rows reuse the snapshot fetched at collection start.
                     control.refresh()
                     active = current_task(gh, control, task)
                     if not active:
-                        row.update(status=inactive_task_status(control, task), historical=True)
-                if task["task_id"] == task_id and active:
+                        retired = retired_task(gh, control, task)
+                        row.update(
+                            status=inactive_task_status(control, task) if retired else "pending",
+                            historical=retired,
+                        )
+                if publication_selected and active:
                     gh.restore_preflight(task)
                     state = GITHUB_STATES[result["status"]]
                     description = publication_description(
@@ -1918,11 +2011,21 @@ def collect_results(
                     )
                     unchanged = gh.status_matches(task, state, description)
                     if not unchanged:
-                        gh.status(task, state, description, result_url)
+                        gh.status(
+                            task,
+                            state,
+                            description,
+                            result_url,
+                            expected_pending_id=pending["id"] if pending else None,
+                        )
                     status_published = True
                     control.refresh()
                     if not current_task(gh, control, task):
-                        row.update(status=inactive_task_status(control, task), historical=True)
+                        retired = retired_task(gh, control, task)
+                        row.update(
+                            status=inactive_task_status(control, task) if retired else "pending",
+                            historical=retired,
+                        )
                         rows.append(row)
                         continue
                     changed = gh.comment(
@@ -1943,14 +2046,25 @@ def collect_results(
                         )
         except (ValueError, OSError, RuntimeError) as error:
             if not status_published:
-                row["status"] = "infra_error" if active else inactive_task_status(control, task)
+                row["status"] = (
+                    inactive_task_status(control, task)
+                    if retired
+                    else "pending" if waiting_dispatch else "infra_error"
+                )
             row.update(
                 receiver_error=type(error).__name__,
                 receiver_message="结果读取或 GitHub 发布未完成；稍后重试接收，不重跑构建。",
             )
-            if task["task_id"] == task_id and active and not status_published:
+            if publication_selected and (active or not obsolete_checked):
+                receiver_errors += 1
+            if requested and active and not status_published:
                 publication_error(gh, control, task)
         rows.append(row)
+    if requested_task and not requested_seen:
+        try:
+            finish_obsolete_summary(gh, control, requested_task)
+        except (ValueError, OSError, RuntimeError):
+            receiver_errors += 1
     dashboard.mkdir(parents=True, exist_ok=True)
     rows.extend(history_rows(results, rows))
     attach_full_flaggems(results, rows)
@@ -1964,7 +2078,7 @@ def collect_results(
         )
         + b"\n"
     )
-    output("receiver_errors", sum(bool(row.get("receiver_error")) and row["task"]["task_id"] == task_id for row in rows))
+    output("receiver_errors", receiver_errors)
     return published
 
 
@@ -2087,6 +2201,11 @@ def main() -> int:
     )
     parser.add_argument("--task", type=Path, default=Path("task.json"))
     parser.add_argument("--task-id", default=os.getenv("RECEIVER_TASK_ID", ""))
+    parser.add_argument(
+        "--reconcile-pending",
+        action="store_true",
+        default=os.getenv("RECONCILE_PENDING_RESULTS", "false") == "true",
+    )
     parser.add_argument(
         "--round", type=int, default=int(os.getenv("RECEIVER_ROUND") or 1)
     )
@@ -2275,7 +2394,14 @@ def main() -> int:
                         if received["task_id"] != args.task_id:
                             raise ValueError("Receiver task manifest identity differs")
                         cancel_obsolete(gh, control, received["pr_number"], received["target_branch"])
-                    collect_results(gh, control, results, args.dashboard, args.task_id)
+                    collect_results(
+                        gh,
+                        control,
+                        results,
+                        args.dashboard,
+                        args.task_id,
+                        reconcile_pending=args.reconcile_pending,
+                    )
             finally:
                 results.close()
     finally:

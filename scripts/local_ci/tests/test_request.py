@@ -35,7 +35,8 @@ const pull = {number: 7, state: input.closed ? 'closed' : 'open', draft: !!input
 const context = {repo: {owner: 'likehupochuan', repo: 'triton-anchor'}, runId: 100,
                  actor: 'maintainer', eventName: input.manual ? 'workflow_dispatch' : input.push ? 'push' : 'pull_request_target',
                  ref: 'refs/heads/main', sha: head,
-                 payload: input.manual || input.push ? {} : {pull_request: pull, action: input.action || 'opened'}};
+                 payload: input.push ? {created: !!input.created, forced: !!input.forced, deleted: false}
+                                     : input.manual ? {} : {pull_request: pull, action: input.action || 'opened'}};
 Object.assign(process.env, {SOURCE_BRANCH: 'main', REQUESTED_SHA: head, GITHUB_RUN_ATTEMPT: String(input.attempt || 1),
                            GITHUB_SERVER_URL: 'https://github.com', REQUEST_ID: '100:1',
                            ORIGINAL_INPUTS: JSON.stringify(input.original || {})});
@@ -89,8 +90,13 @@ async function run(script) { await new AsyncFunction('github', 'context', 'core'
 
 
 @pytest.mark.parametrize("options,trigger", [({}, ""), ({"manual": True}, "100:1"),
-    ({"action": "reopened"}, "100:1"), ({"attempt": 2}, "100:2"),
-    ({"push": True}, ""), ({"push": True, "attempt": 2}, "100:2"),
+    ({"action": "synchronize"}, "100:1"), ({"action": "reopened"}, "100:1"),
+    ({"action": "ready_for_review"}, "100:1"), ({"action": "edited"}, "100:1"),
+    ({"action": "labeled"}, "100:1"), ({"action": "unlabeled"}, "100:1"),
+    ({"attempt": 2}, "100:2"),
+    ({"push": True}, ""), ({"push": True, "created": True}, "100:1"),
+    ({"push": True, "forced": True}, "100:1"),
+    ({"push": True, "attempt": 2}, "100:2"),
     ({"attempt": 2, "rows": [status(URL.replace('100:1', '101:1'))]}, "100:2")])
 def test_request_publishes_pending_before_dispatch(options, trigger):
     events = execute(**options)

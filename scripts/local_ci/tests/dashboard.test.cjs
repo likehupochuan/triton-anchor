@@ -552,7 +552,7 @@ test('execution errors and failed checks stay separate through task filters and 
 });
 
 test('server failure in summary is separated from reviews that never completed', () => {
-  const run = errorRun({status:'infra_error', summary:'Task worker revision differs from installed control',
+  const run = errorRun({status:'infra_error', summary:'Worker preparation failed',
     blocking_reasons:['必要审查未通过：pr_info','必要审查未通过：architecture']});
   const before = JSON.stringify(run);
   const groups = blockerGroups(run);
@@ -642,7 +642,7 @@ test('task details preserve findings, limitations, environment and evidence stat
   const original = '未知异常 <img src=x onerror=alert(1)>';
   const context = {document,URLSearchParams,URL,setInterval:()=>{},fetch:()=>new Promise(()=>{}),
     location:{search:''},LocalCIData:{blockerGroups,environmentProfile},root,
-    run:errorRun({summary:'Task worker revision differs from installed control',
+    run:errorRun({summary:'Worker preparation failed',
       blocking_reasons:['必要审查未通过：architecture',original]})};
   vm.runInNewContext(fs.readFileSync(require.resolve('../../../dashboard/local-ci.js'),'utf8')+
     '\nrenderBlockers(root,run);',context);
