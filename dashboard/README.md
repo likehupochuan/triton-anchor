@@ -15,7 +15,7 @@ Gateway 在生成 feed 时读取独立的
 分支任务：PR 结果只留在任务详情，
 不能覆盖业务页。全量算子优先接受该分支显式 `full=true` 的真实 FlagGems full 结果；
 没有新结果时精确回退到 `3d4c586307dcc3c1f11e650c67529b85da3dd22f` 的历史样例，
-并明确标为历史样例，不把它冒充 Triton 3.0 新实测；
+页头保留来源提交与测量时间；
 后端与性能只读取该分支的 push；性能只接受同一次任务完成的三项标准测量，
 四个 kernel 与采样参数必须一致，无有效数据时明确留空。
 任务详情分别展示 `environment.variants.base` 与 `candidate` 的 Profile；
