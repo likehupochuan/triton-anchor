@@ -58,6 +58,19 @@ class TestHWCapability:
         )
         assert hw.gpgpu_cap.num_warps == 4
 
+    def test_string_anchor_ir_track_is_normalized(self):
+        hw = HWCapability(
+            name="sophgo-bm1684x",
+            arch_family="tpu",
+            compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
+            anchor_ir_track="linalg",
+            ptr_model="axis_info",
+            tensor_cap=TensorCapability(),
+        )
+
+        assert hw.anchor_ir_track is AnchorIRTrack.LINALG
+        assert hw.lowering_path == "linalg"
+
     def test_to_gpu_target(self):
         hw = HWCapability(
             name="sophgo-bm1684x",
