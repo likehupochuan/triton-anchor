@@ -106,20 +106,6 @@ class GPGPUCapability:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Module-level lookup table
-# Hoisted out of _infer_backend_name() so vendor plugins that call
-# to_gpu_target() on every compilation stop re-allocating it.
-# ═══════════════════════════════════════════════════════════════════════
-
-# arch_family → backend name for GPUTarget compatibility
-_FAMILY_TO_BACKEND = {
-    "tpu": "sophgo",
-    "riscv": "spacemit",
-    "gpu": "usc",
-}
-
-
-# ═══════════════════════════════════════════════════════════════════════
 # HWCapability — the unified hardware descriptor
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -200,7 +186,13 @@ class HWCapability:
 
     def _infer_backend_name(self) -> str:
         """Infer the backend name string for GPUTarget compatibility."""
-        return _FAMILY_TO_BACKEND.get(self.arch_family, self.name.split("-")[0])
+        # Map known hardware families to backend names
+        _family_to_backend = {
+            "tpu": "sophgo",
+            "riscv": "spacemit",
+            "gpu": "usc",
+        }
+        return _family_to_backend.get(self.arch_family, self.name.split("-")[0])
 
     def _infer_arch(self):
         """Infer architecture identifier for GPUTarget compatibility."""

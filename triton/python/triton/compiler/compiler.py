@@ -302,7 +302,6 @@ def compile(src, target=None, options=None):
     return CompiledKernel(src, metadata_group, hash)
 
 
-@functools.lru_cache()
 def make_backend(target):
     actives = [x.compiler for x in backends.values() if x.compiler.supports_target(target)]
     if len(actives) != 1:
