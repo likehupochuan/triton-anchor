@@ -80,7 +80,11 @@ jobs:
             }
             const attempt = Number(process.env.GITHUB_RUN_ATTEMPT || '1');
             const requestId = `${context.runId}:${attempt}`;
-            const triggerId = verify && (manual || action === 'reopened' || attempt > 1) ? requestId : '';
+            const freshPush = push && (context.payload.created || context.payload.forced);
+            const freshPullState = pull && [
+              'synchronize', 'reopened', 'ready_for_review', 'edited', 'labeled', 'unlabeled'
+            ].includes(action);
+            const triggerId = verify && (manual || freshPush || freshPullState || attempt > 1) ? requestId : '';
             if (verify) {
               const rows = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
                 owner, repo, ref: requestedSha, per_page: 100
