@@ -297,39 +297,54 @@ class Worker:
         if sealed.exists():
             self.queue_sealed(task_id, sealed, run_id)
             return True
+        attempts = record.get("sealing_attempts", 0)
+        maximum = self.config.get("sealing_attempts", 3)
+        if attempts >= maximum:
+            recovery = record.get("recovery", {})
+            if recovery.get("state") != "exhausted" or recovery.get("failure_code") != "sealing_failed":
+                self.journal.update(task_id, run_id=run_id, seal_next_retry_at=None)
+                self.recovery(task_id, "exhausted", "sealing_failed", "retry_sealing", run_id=run_id)
+            return False  # Keep the checkpoint for explicit recovery; never rerun tests.
         retry_at = record.get("seal_next_retry_at")
         if retry_at and retry_at > time.time():
             return False
-        attempts = record.get("sealing_attempts", 0)
-        if attempts >= self.config.get("sealing_attempts", 3) and record.get("recovery", {}).get("failure_code") == "sealing_failed":
-            return False  # Keep the checkpoint for explicit recovery; never rerun tests.
         report = checkpoint["report"]
-        self.journal.phase(task_id, "sealing", run_id=run_id)
-        self.journal.update(task_id, run_id=run_id, sealing_attempts=attempts + 1)
-        try:
-            seal_result(
-                json.loads(row["manifest"]), run_id, report,
-                checkpoint.get("policy", {}), checkpoint.get("environment", {}),
-                directory, directory / "sealed", redact=self.driver.redact,
-            )
-            self.queue_sealed(task_id, sealed, run_id)
-            return True
-        except (ValueError, TypeError) as exc:
-            # A malformed report cannot be repaired by rebuilding the tested code.
-            fallback = {"status": "infra_error", "summary": "结果契约无效：" + str(exc)}
-            if checkpoint.get("invalid_report"):
+        fallback = bool(checkpoint.get("invalid_report"))
+        contract_error = record.get("sealing_contract_error")
+        if contract_error is not None:
+            report = {"status": "infra_error", "summary": "结果契约无效：" + contract_error}
+            fallback = True
+        while attempts < maximum:
+            attempts += 1
+            self.journal.phase(task_id, "sealing", run_id=run_id)
+            self.journal.update(task_id, run_id=run_id, sealing_attempts=attempts)
+            try:
+                seal_result(
+                    json.loads(row["manifest"]), run_id, report,
+                    checkpoint.get("policy", {}), checkpoint.get("environment", {}),
+                    directory, directory / "sealed", redact=self.driver.redact,
+                    collect_business=not fallback,
+                )
+            except Exception as exc:
+                invalid_report = isinstance(exc, (ValueError, TypeError)) and not fallback
+                if invalid_report:
+                    # Preserve the original checkpoint while sealing a minimal failure.
+                    self.journal.update(task_id, run_id=run_id, sealing_contract_error=str(exc))
+                    report = {"status": "infra_error", "summary": "结果契约无效：" + str(exc)}
+                    fallback = True
+                exhausted = attempts >= maximum
+                delay = None if exhausted else 0 if invalid_report else (30, 60)[min(attempts - 1, 1)]
+                self.journal.update(task_id, run_id=run_id, seal_next_retry_at=None if delay is None else time.time() + delay)
+                self.recovery(task_id, "exhausted" if exhausted else "retry_wait", "sealing_failed", "retry_sealing", delay=delay, run_id=run_id)
                 self.journal.event(task_id, "sealing_error", {"error": str(exc)}, run_id=run_id)
+                if invalid_report and not exhausted:
+                    continue
                 return False
-            checkpoint = {**checkpoint, "report": fallback, "invalid_report": True}
-            self.journal.update(task_id, run_id=run_id, checkpoint=checkpoint)
-            return self.seal_checkpoint(row)
-        except OSError as exc:
-            maximum = self.config.get("sealing_attempts", 3)
-            delay = (30, 60)[min(attempts, 1)] if attempts + 1 < maximum else 3600
-            self.journal.update(task_id, run_id=run_id, seal_next_retry_at=time.time() + delay)
-            self.recovery(task_id, "retry_wait" if attempts + 1 < maximum else "exhausted", "sealing_failed", "retry_sealing", delay=delay, run_id=run_id)
-            self.journal.event(task_id, "sealing_error", {"error": str(exc)}, run_id=run_id)
-            return False
+            self.queue_sealed(task_id, sealed, run_id)
+            if self.journal.record(task_id, run_id).get("recovery", {}).get("failure_code") == "sealing_failed":
+                self.recovery(task_id, "recovered", action="continue_sealing", run_id=run_id)
+            return True
+        return False
 
     def finish(self, row, report, *, policy=None, environment=None):
         record = self.journal.record(row["task_id"], row["run_id"])

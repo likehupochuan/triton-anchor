@@ -213,22 +213,32 @@ def _valid_timing(value):
 
 
 def _performance_parameters(tool_id, value):
-    """Resolve omitted runner defaults and reject non-standard Dashboard runs."""
+    """Resolve runner defaults while allowing supported targeted measurements."""
     if not isinstance(value, dict) or set(value) - {"kernels", "repeat", "warmup"}:
         raise ContractError(f"{tool_id} has unsupported performance parameters")
-    expected = {
+    defaults = {
         "kernels": list(PERFORMANCE_KERNELS),
         "repeat": PERFORMANCE_TOOLS[tool_id],
         "warmup": 1,
     }
-    resolved = {key: value.get(key, default) for key, default in expected.items()}
-    if resolved != expected:
-        raise ContractError(f"{tool_id} does not use the standard Dashboard parameters")
-    return expected
+    resolved = {key: value.get(key, default) for key, default in defaults.items()}
+    kernels = resolved["kernels"]
+    if (
+        not isinstance(kernels, list)
+        or not kernels
+        or any(not isinstance(kernel, str) or kernel not in PERFORMANCE_KERNELS for kernel in kernels)
+        or type(resolved["repeat"]) is not int
+        or not 1 <= resolved["repeat"] <= 100
+        or type(resolved["warmup"]) is not int
+        or not 0 <= resolved["warmup"] <= 20
+    ):
+        raise ContractError(f"{tool_id} has unsupported performance parameters")
+    return resolved
 
 
-def _validate_performance_details(tool_id, document, task, environment):
-    """Validate the compact trusted runner payload consumed by the Dashboard."""
+def _validate_performance_details(tool_id, document, task, environment, parameters):
+    """Validate measurements against the runner's actual identity and sampling."""
+    kernels = parameters["kernels"]
     details = document.get("details")
     candidate = details.get("candidate") if isinstance(details, dict) else None
     comparison = details.get("comparison") if isinstance(details, dict) else None
@@ -239,19 +249,19 @@ def _validate_performance_details(tool_id, document, task, environment):
     if (
         not isinstance(metadata, dict)
         or not isinstance(summary, dict)
-        or set(summary) != set(PERFORMANCE_KERNELS)
+        or set(summary) != set(kernels)
         or metadata.get("commit_sha") != task["tested_sha"]
         or metadata.get("environment_fingerprint")
         != runtime.get("environment_fingerprint")
         or metadata.get("profile_id") != runtime.get("profile")
         or metadata.get("llvm_revision") != runtime.get("llvm_hash")
-        or metadata.get("kernels") != list(PERFORMANCE_KERNELS)
-        or metadata.get("repeat") != PERFORMANCE_TOOLS[tool_id]
-        or metadata.get("warmup") != 1
+        or metadata.get("kernels") != kernels
+        or metadata.get("repeat") != parameters["repeat"]
+        or metadata.get("warmup") != parameters["warmup"]
     ):
         raise ContractError(f"{tool_id} candidate identity or sampling metadata differs")
 
-    for kernel in PERFORMANCE_KERNELS:
+    for kernel in kernels:
         row = summary[kernel]
         if not isinstance(row, dict):
             raise ContractError(f"{tool_id} has an invalid {kernel} summary")
@@ -286,13 +296,13 @@ def _validate_performance_details(tool_id, document, task, environment):
         keys = {
             row.get("kernel") for row in rows if isinstance(row, dict)
         } if isinstance(rows, list) else set()
-        expected = set(PERFORMANCE_KERNELS)
+        expected = set(kernels)
     elif tool_id == "pass_profile":
         rows = comparison.get("passes")
         keys = {
             row.get("kernel") for row in rows if isinstance(row, dict)
         } if isinstance(rows, list) else set()
-        expected = set(PERFORMANCE_KERNELS)
+        expected = set(kernels)
     else:
         rows = comparison.get("rows")
         keys = {
@@ -301,15 +311,15 @@ def _validate_performance_details(tool_id, document, task, environment):
         } if isinstance(rows, list) else set()
         expected = {
             (kernel, metric)
-            for kernel in PERFORMANCE_KERNELS
+            for kernel in kernels
             for metric in PERFORMANCE_METRICS
         }
     if not isinstance(rows, list) or not expected <= keys:
-        raise ContractError(f"{tool_id} comparison is missing standard Dashboard rows")
+        raise ContractError(f"{tool_id} comparison is missing measured kernel rows")
     return details
 
 
-def _seal_standard_performance(task, checks, source, environment):
+def _seal_performance(task, checks, source, environment):
     """Replace Agent-projected performance data with trusted runner results."""
     indexed = {row.get("tool_id"): row for row in checks}
     runtime = environment.get("variants", {}).get("candidate", environment)
@@ -340,7 +350,7 @@ def _seal_standard_performance(task, checks, source, environment):
         parameters = _performance_parameters(tool_id, document.get("parameters"))
         if document["status"] == "pass":
             details = _validate_performance_details(
-                tool_id, document, task, environment
+                tool_id, document, task, environment, parameters
             )
         else:
             details = document.get("details") if isinstance(document.get("details"), dict) else None
@@ -355,6 +365,9 @@ def _seal_standard_performance(task, checks, source, environment):
             indexed[tool_id] = check
         check["status"] = document["status"]
         check["parameters"] = parameters
+        evidence = f"candidate/{tool_id}/result.json"
+        if evidence not in check["evidence"]:
+            check["evidence"] = [*check["evidence"], evidence]
         if details:
             check["details"] = details
         else:
@@ -371,6 +384,7 @@ def seal_result(
     destination,
     *,
     redact=None,
+    collect_business=True,
 ):
     """The host supplies identity; Codex supplies checks, reviews and selected files."""
     validate_task(task)
@@ -383,7 +397,8 @@ def seal_result(
     redact = _redactor(redact)
     checks = _records(agent_result.get("checks", []), "tool_id")
     source = Path(source_dir) / "artifacts"
-    _seal_standard_performance(task, checks, source, environment)
+    if collect_business:
+        _seal_performance(task, checks, source, environment)
     reviews = _records(agent_result.get("reviews", []), "kind")
     findings = agent_result.get("findings", [])
     if not isinstance(findings, list):
@@ -487,7 +502,11 @@ def seal_result(
 
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    _seal_full_flaggems(task, run_id, checks, source, destination, redact)
+    if collect_business:
+        _seal_full_flaggems(task, run_id, checks, source, destination, redact)
+    else:
+        # A previous attempt may have staged full data before failing later.
+        (destination / "business" / "flaggems-summary.json").unlink(missing_ok=True)
     selected = agent_result.get("artifacts", [])
     if not isinstance(selected, list):
         raise ContractError("Agent artifacts must be a list")

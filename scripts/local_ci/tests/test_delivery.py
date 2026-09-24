@@ -168,7 +168,7 @@ def test_standard_performance_is_sealed_from_trusted_runner_results(tmp_path):
     invalid = performance_runner_result("ir_serialization")
     invalid["parameters"] = {"repeat": 19}
     (run / "ir_serialization/result.json").write_text(json.dumps(invalid))
-    with pytest.raises(ContractError, match="standard Dashboard parameters"):
+    with pytest.raises(ContractError, match="sampling metadata differs"):
         seal_result(
             task(), "20260911-performance-invalid", value,
             {"required_checks": ["frontend_tests"]}, performance_environment(),
