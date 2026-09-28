@@ -1298,7 +1298,7 @@ class GatewayBehaviorTests(unittest.TestCase):
         (legacy / "delivery-summary.txt").write_text(
             f"target_sha: {self.head}\nbranch: old-main\nstatus: 1\nbackend_profile: sophgo-cmodel\n"
             "flaggems_test_mode: full\nflaggems_status: fail\ncompile_time_status: pass\n"
-            "backend_rebuild_status: pass\nprivate_path: /private/credentials\n")
+            "backend_rebuild_status: pass\nbackend_smoke_jit_status: pass\nprivate_path: /private/credentials\n")
         full_document = {
             "schema": "triton-anchor-local-ci/flaggems-v1", "mode": "full",
             "summary": {"total": 1, "passed": 0, "failed": 1, "timed_out": 0, "status": "fail"},
@@ -1314,7 +1314,10 @@ class GatewayBehaviorTests(unittest.TestCase):
         self.assertEqual(old["result"]["environment"]["variants"]["candidate"], {
             "backend_enabled": True, "backend_profile": "sophgo-cmodel", "profile": "", "triton_version": "",
         })
-        self.assertEqual(old["result"]["checks"][1]["details"]["flaggems-summary"]["mode"], "full")
+        old_checks = {check["tool_id"]: check for check in old["result"]["checks"]}
+        self.assertEqual(old_checks["flaggems"]["details"]["flaggems-summary"]["mode"], "full")
+        self.assertEqual(old_checks["backend_smoke"]["status"], "pass")
+        self.assertNotIn("backend_tests", old_checks)
         self.assertTrue(old["artifact_urls"]["flaggems-summary.json"].startswith("https://gitee.com/"))
 
         nested = store.root / "runs/ci_full_flaggems" / result["task"]["tested_sha"] / result["run_id"]

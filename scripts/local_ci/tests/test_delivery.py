@@ -82,6 +82,79 @@ def performance_environment():
     }}}
 
 
+def backend_smoke_result(tmp_path, status="pass", **changes):
+    value = {
+        "tool_id": "backend_smoke", "status": status, "exit_code": 0 if status == "pass" else 1,
+        "target_sha": task()["tested_sha"], "variant": "candidate",
+        "llvm_hash": "e" * 40, "environment_fingerprint": "performance-environment",
+        "details": {"smoke_success": {
+            "tool": "backend_smoke", "status": "passed",
+            "task_id": task()["task_id"], "target_sha": task()["tested_sha"],
+        }} if status == "pass" else {},
+        **changes,
+    }
+    path = tmp_path / "run/artifacts/candidate/backend_smoke/result.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value))
+    return path
+
+
+def seal_backend(tmp_path, value, **kwargs):
+    return seal_result(
+        task(), "20260911-backend", value, {"required_checks": ["frontend_tests"]},
+        performance_environment(), tmp_path / "run", tmp_path / "sealed", **kwargs,
+    )
+
+
+@pytest.mark.parametrize("status", ["pass", "fail", "infra_error", "cancelled"])
+def test_backend_smoke_is_collected_without_an_agent_named_check(tmp_path, status):
+    backend_smoke_result(tmp_path, status)
+    value = answer()
+    value["checks"].append({"tool_id": "custom_jit_validation", "status": "pass"})
+    result = seal_backend(tmp_path, value)
+    checks = {row["tool_id"]: row for row in result["checks"]}
+    assert checks["backend_smoke"]["status"] == status
+    assert checks["custom_jit_validation"]["status"] == "pass"
+    assert checks["backend_smoke"]["evidence"] == ["candidate/backend_smoke/result.json"]
+    assert (tmp_path / "sealed/artifacts/candidate/backend_smoke/result.json").is_file()
+    assert result["status"] == ("infra_error" if status == "cancelled" else status)
+
+
+@pytest.mark.parametrize("changes", [
+    {"target_sha": "b" * 40}, {"variant": "base"}, {"llvm_hash": "f" * 40},
+    {"environment_fingerprint": "old-environment"}, {"tool_id": "backend_build"},
+    {"status": "unknown"}, {"exit_code": 1}, {"details": {}},
+    {"details": {"smoke_success": {"tool": "backend_smoke", "status": "passed",
+                                  "task_id": "another-task", "target_sha": "a" * 40}}},
+])
+def test_backend_smoke_rejects_mismatched_or_incomplete_runner_evidence(tmp_path, changes):
+    backend_smoke_result(tmp_path, **changes)
+    with pytest.raises(ContractError, match="backend_smoke"):
+        seal_backend(tmp_path, answer())
+
+
+def test_backend_smoke_preserves_final_revalidation_and_does_not_invent_results(tmp_path):
+    assert all(row["tool_id"] != "backend_smoke" for row in seal_backend(tmp_path, answer())["checks"])
+    path = backend_smoke_result(tmp_path)
+    base = tmp_path / "run/artifacts/base/backend_smoke/result.json"
+    base.parent.mkdir(parents=True)
+    path.rename(base)
+    assert all(row["tool_id"] != "backend_smoke" for row in seal_backend(tmp_path, answer())["checks"])
+    backend_smoke_result(tmp_path, "infra_error")
+    value = answer()
+    value["checks"].append({"tool_id": "backend_smoke", "status": "pass",
+                            "summary": "Revalidated after repair", "evidence": []})
+    result = seal_backend(tmp_path, value)
+    smoke = [row for row in result["checks"] if row["tool_id"] == "backend_smoke"]
+    assert len(smoke) == 1
+    assert smoke[0]["status"] == result["status"] == "pass"
+    assert smoke[0]["summary"] == "Revalidated after repair"
+    assert all(row["tool_id"] != "backend_smoke" for row in
+               seal_backend(tmp_path, answer(), collect_business=False)["checks"])
+    # A front-end-only environment does not acquire a backend result from leftovers.
+    assert all(row["tool_id"] != "backend_smoke" for row in seal(tmp_path, answer())["checks"])
+
+
 def performance_runner_result(tool_id):
     kernels = ["add", "mm", "softmax", "layernorm"]
     metrics = ["serialize", "write_text", "read_text", "deserialize", "roundtrip"]

@@ -217,7 +217,7 @@ def history_rows(results, current):
             checks, artifacts, links = [], [], {}
             files = {"flaggems": "flaggems-summary.json", "compile_time": "compile-benchmark.json",
                      "pass_profile": "pass-profile.json", "ir_serialization": "ir-serialization.json"}
-            stages = {"backend_rebuild": "backend_rebuild_status", "backend_tests": "backend_smoke_jit_status",
+            stages = {"backend_rebuild": "backend_rebuild_status", "backend_smoke": "backend_smoke_jit_status",
                       **{name: name + "_status" for name in files}}
             for name, field in stages.items():
                 value = fields.get(field)

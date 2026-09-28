@@ -24,6 +24,7 @@ const statusLabels = {
   not_comparable: "无可比基线",
   not_applicable: "不适用",
   not_selected: "本次未选择",
+  not_recorded: "未记录",
   skipped: "未执行",
   stale: "已过期",
   healthy: "正常",

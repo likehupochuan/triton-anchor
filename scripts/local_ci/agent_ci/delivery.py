@@ -374,6 +374,61 @@ def _seal_performance(task, checks, source, environment):
             check.pop("details", None)
 
 
+def _seal_backend_smoke(task, checks, source, environment):
+    """Fill an omitted backend check from this run's candidate runner evidence.
+
+    An explicit Agent conclusion may include a later repair or native-command
+    revalidation, so an earlier runner attempt must not overwrite it.
+    """
+    if any(check["tool_id"] == "backend_smoke" for check in checks):
+        return
+    runtime = environment.get("variants", {}).get("candidate", environment)
+    if runtime.get("backend_enabled") is not True:
+        return
+    evidence = "candidate/backend_smoke/result.json"
+    path = within(source, evidence)
+    if not path.is_file():
+        return
+    if path.stat().st_size > MAX_FILE_BYTES:
+        raise ContractError("backend_smoke runner result exceeds the evidence budget")
+    try:
+        document = json.loads(path.read_bytes())
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError("backend_smoke runner result is not valid JSON") from exc
+    if (
+        not isinstance(document, dict)
+        or document.get("tool_id") != "backend_smoke"
+        or document.get("target_sha") != task["tested_sha"]
+        or document.get("variant") != "candidate"
+        or not runtime.get("llvm_hash")
+        or document.get("llvm_hash") != runtime["llvm_hash"]
+        or not runtime.get("environment_fingerprint")
+        or document.get("environment_fingerprint") != runtime["environment_fingerprint"]
+        or document.get("status") not in CHECK_STATUSES
+    ):
+        raise ContractError("backend_smoke runner identity or status differs")
+    details = document.get("details")
+    receipt = details.get("smoke_success") if isinstance(details, dict) else None
+    if document["status"] == "pass" and (
+        document.get("exit_code") != 0
+        or not isinstance(receipt, dict)
+        or receipt.get("tool") != "backend_smoke"
+        or receipt.get("status") != "passed"
+        or receipt.get("task_id") != task["task_id"]
+        or receipt.get("target_sha") != task["tested_sha"]
+    ):
+        raise ContractError("backend_smoke pass is missing its matching completion record")
+    checks.append({
+        "tool_id": "backend_smoke",
+        "display_name": "后端基本功能与 JIT 验证",
+        "status": document["status"],
+        "summary": "本次候选环境的后端基本功能与 JIT 工具结果，由 Worker 校验并补齐。"
+        + str(document.get("reason") or ""),
+        "evidence": [evidence],
+        "details": details if isinstance(details, dict) else {},
+    })
+
+
 def seal_result(
     task,
     run_id,
@@ -399,6 +454,7 @@ def seal_result(
     source = Path(source_dir) / "artifacts"
     if collect_business:
         _seal_performance(task, checks, source, environment)
+        _seal_backend_smoke(task, checks, source, environment)
     reviews = _records(agent_result.get("reviews", []), "kind")
     findings = agent_result.get("findings", [])
     if not isinstance(findings, list):

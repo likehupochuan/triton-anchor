@@ -406,6 +406,21 @@ test('variant environments preserve both sources and use candidate for business 
   assert.equal(data.backends.backends.length,0);
 });
 
+test('backend summary uses smoke results independently of the overall verdict and backend unit tests', () => {
+  for (const [smoke, expected] of [['pass','passed'],['fail','failed'],['infra_error','error'],
+    ['not_selected','not_selected'],['not_applicable','not_applicable'],['cancelled','cancelled'],[null,'not_recorded']]) {
+    const checks = [{tool_id:'backend_tests',status:'pass'}];
+    if (smoke) checks.push({tool_id:'backend_smoke',status:smoke});
+    const feed = {schema:'triton-anchor-dashboard',tasks:[{
+      task:task('a','2026-09-10'),
+      result:{status:'fail',environment:backendEnvironment(),checks},
+    }]};
+    const row = business(normalize(feed)).backends.backends[0];
+    assert.equal(row.tests.backend,expected);
+    assert.equal(row.state,'failure');
+  }
+});
+
 test('empty initial feed does not create placeholder success data', () => {
   const data = business(normalize({schema:'triton-anchor-dashboard',tasks:[]}));
   assert.equal(data.fullTest.operators.length,0);
@@ -540,6 +555,7 @@ test('execution errors and failed checks stay separate through task filters and 
   const app=vm.createContext({document,URLSearchParams,location:{search:''},LocalCIData:{normalize,business},window:{location:{search:''}},
     fetch:()=>new Promise(()=>{})});
   vm.runInContext(fs.readFileSync(require.resolve('../../../dashboard/app.js'),'utf8'),app);
+  assert.match(vm.runInContext("statusBadge('not_recorded')",app),/未记录/);
   vm.runInContext("state.fullTest={operators:[{name:'fail',status:'failed'},{name:'error',status:'infra_error'}]};",app);
   const stats=vm.runInContext('computeOperatorSummary(state.fullTest.operators)',app);
   assert.equal(stats.failed,1);

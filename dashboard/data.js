@@ -238,7 +238,7 @@
     }
     const backends = [...latestBackends].map(([backend,run]) => ({id:backend,name:backend,profile:environmentProfile(run.environment),
       state:run.conclusion === 'success' ? 'passed' : status(run.conclusion),sha:run.tested_sha,tested_at:run.completed_at,
-      tests:{backend:run.checks.find(c => c.id === 'backend_tests')?.status || 'unknown',
+      tests:{backend:run.checks.find(c => c.id === 'backend_smoke')?.status || 'not_recorded',
         ...Object.fromEntries(['compile_time','pass_profile','ir_serialization'].map(id => [id,run.checks.find(c => c.id === id)?.status || 'unknown']))},
       result_url:run.result_url}));
     const performanceRun = backendRuns.find(run => PERFORMANCE_TOOLS.every(id => {
