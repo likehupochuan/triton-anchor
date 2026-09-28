@@ -189,3 +189,37 @@ htmlcov/
 
 # temp
 ./docs/*triton/include/
+
+# Hardware/GPU portions of upstream Triton are intentionally not vendored by
+# the hardware-independent anchor core. Existing tracked legacy files are
+# unaffected; these rules prevent a source refresh from adding new ones.
+/triton/cmake/nvidia-toolchain-version.json
+/triton/include/triton/Analysis/
+/triton/include/triton/Conversion/TritonToTritonGPU/
+/triton/include/triton/Dialect/Gluon/
+/triton/include/triton/Dialect/TritonGPU/
+/triton/include/triton/Dialect/TritonInstrument/
+/triton/include/triton/Target/
+/triton/include/triton/Tools/GenericSwizzling.h
+/triton/include/triton/Tools/LayoutUtils.h
+/triton/lib/Analysis/
+/triton/lib/Conversion/TritonInstrumentToLLVM/
+/triton/lib/Conversion/TritonToTritonGPU/
+/triton/lib/Dialect/Gluon/
+/triton/lib/Dialect/TritonGPU/
+/triton/lib/Dialect/TritonInstrument/
+/triton/lib/Target/
+/triton/lib/Tools/GenericSwizzling.cpp
+/triton/lib/Tools/LayoutUtils.cpp
+/triton/third_party/f2reduce/
+/triton/python/src/gluon_ir.cc
+/triton/python/src/linear_layout.cc
+/triton/python/triton/_C/libtriton/
+/triton/python/triton/_filecheck.py
+/triton/python/triton/experimental/gluon/
+/triton/python/triton/experimental/gsan/
+/triton/python/triton/include/
+/triton/python/triton/tools/gsan.py
+/triton/python/triton/tools/ragged_tma.py
+/triton/python/triton/tools/triton_to_gluon_translator/
+/python/triton_anchor/include/

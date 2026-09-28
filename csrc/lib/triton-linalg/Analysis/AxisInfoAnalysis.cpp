@@ -73,14 +73,15 @@ ChangeResult AxisInfoLattice::join(const AxisInfoExt &rhs) {
 AxisInfoAnalysisExt::AxisInfoAnalysisExt(mlir::DataFlowSolver &solver)
     : dataflow::SparseForwardDataFlowAnalysis<AxisInfoLattice>(solver) {}
 
-void AxisInfoAnalysisExt::visitOperation(
+LogicalResult AxisInfoAnalysisExt::visitOperation(
     Operation *op, ArrayRef<const AxisInfoLattice *> operands,
     ArrayRef<AxisInfoLattice *> results) {
   LLVM_DEBUG(llvm::dbgs() << "Inferring axis info for " << *op << "\n");
 
   auto inferrable = dyn_cast<InferAxisInfoInterface>(op);
   if (!inferrable) {
-    return setAllToEntryStates(results);
+    setAllToEntryStates(results);
+    return success();
   }
 
   auto joinCallback = [op, results, this](Value v, const AxisInfoExt &info) {
@@ -108,11 +109,13 @@ void AxisInfoAnalysisExt::visitOperation(
         return val->getValue();
       }));
   inferrable.inferAxisInfos(argInfos, joinCallback);
+  return success();
 }
 
 void AxisInfoAnalysisExt::visitNonControlFlowArguments(
     Operation *op, const RegionSuccessor &successor,
-    ArrayRef<AxisInfoLattice *> argLattices, unsigned firstIndex) {
+    ValueRange nonSuccessorInputs,
+    ArrayRef<AxisInfoLattice *> argLattices) {
 
   auto getRank = [](Type type) {
     auto rank = 1;
@@ -138,7 +141,7 @@ void AxisInfoAnalysisExt::visitNonControlFlowArguments(
     auto step = forOp.getStep().getDefiningOp<arith::ConstantOp>();
     if (!iv || !lowerBound || !step) {
       return SparseForwardDataFlowAnalysis::visitNonControlFlowArguments(
-          op, successor, argLattices, firstIndex);
+          op, successor, nonSuccessorInputs, argLattices);
     }
 
     auto lowerBoundVal =
@@ -151,5 +154,5 @@ void AxisInfoAnalysisExt::visitNonControlFlowArguments(
     return joinCallback(iv.value(), divHint);
   }
   return SparseForwardDataFlowAnalysis::visitNonControlFlowArguments(
-      op, successor, argLattices, firstIndex);
+      op, successor, nonSuccessorInputs, argLattices);
 }

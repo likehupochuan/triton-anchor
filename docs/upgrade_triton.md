@@ -5,11 +5,12 @@
 ## 前提知识
 
 triton-anchor 将上游 `triton-lang/triton` 的源码以 vendor 方式放在 `triton/` 子目录中，
-并做了**极少量的定制修改**。升级时只需要：
+并在构建入口、Anchor 原生绑定和插件发现层保留少量定制。升级时需要：
 
 1. 替换 `triton/` 目录为新版上游源码
 2. 裁剪掉不需要的部分
-3. 重新应用定制修改（仅 2 个文件）
+3. 重新应用 `main.cc` 的 Anchor 子模块初始化
+4. 按新版绑定框架同步根 `CMakeLists.txt`、`setup.py` 和 Anchor binding
 
 当前基线版本记录在 `triton/TRITON_VERSION` 中。
 
@@ -23,7 +24,7 @@ triton-anchor 将上游 `triton-lang/triton` 的源码以 vendor 方式放在 `t
 
 - [ ] 明确发起厂商、当前/目标 Triton commit、目标版本分支（`triton_v<X.Y>`）和升级原因。
 - [ ] 对照 [Triton / LLVM 版本兼容性矩阵](compatibility_matrix.md)，列出目标版本分支的**全部**使用厂商。同一分支的其他厂商也属于受影响范围。
-- [ ] 记录升级前 `triton-anchor` commit、`triton/TRITON_VERSION`、`triton/cmake/llvm-hash.txt`、各受影响后端 commit 和已发布 wheel 版本，作为回退点。
+- [ ] 记录升级前 `triton-anchor` commit、`triton/TRITON_VERSION`、`triton/cmake/llvm-info.json`、各受影响后端 commit 和已发布 wheel 版本，作为回退点。
 - [ ] 保存升级前回归结果、已知失败列表和性能基线；没有可比较的基线时，先在旧版本上补跑一次。
 - [ ] 确认升级窗口、负责人、各厂商验证人和硬件测试资源。
 
@@ -33,7 +34,7 @@ triton-anchor 将上游 `triton-lang/triton` 的源码以 vendor 方式放在 `t
 |------|--------|------------|-------------|
 | triton-anchor 分支与 commit | `<branch>@<commit>` | `<branch>@<commit>` | `<PR/CI 链接>` |
 | Triton | `<version>@<commit>` | `<version>@<commit>` | `TRITON_VERSION` |
-| LLVM/MLIR | `<version>@<commit>` | `<version>@<commit>` | `llvm-hash.txt` / 厂商确认 |
+| LLVM/MLIR | `<version>@<commit>` | `<version>@<commit>` | `llvm-info.json` / 厂商确认 |
 | 厂商后端 | `<repo>@<commit>` | `<repo>@<commit>` | `<厂商验证人>` |
 | FlagGems | `<version>@<commit>` | `<version>@<commit>` | `<回归报告>` |
 | PyTorch/Python | `<versions>` | `<versions>` | `<环境清单>` |
@@ -41,7 +42,7 @@ triton-anchor 将上游 `triton-lang/triton` 的源码以 vendor 方式放在 `t
 
 ### 0.2 Triton / LLVM / 厂商后端兼容性确认（阻塞）
 
-- [ ] 从目标 Triton commit 的 `cmake/llvm-hash.txt` 读取 LLVM commit，不得只根据 LLVM 主版本号推断兼容。
+- [ ] 从目标 Triton commit 的 `cmake/llvm-info.json` 读取 LLVM commit，不得只根据 LLVM 主版本号推断兼容。
 - [ ] 对每个受影响厂商确认其 LLVM/MLIR 是目标 commit、目标 commit 的可验证派生版本，或已有明确的适配补丁；把差异和补丁链接写入 PR。
 - [ ] 使用厂商实际工具链完成 `triton-anchor` 全量构建和链接，确认 MLIR C++ API、Pass 注册、Dialect/Target 依赖及 ABI 均兼容。
 - [ ] 检查 Triton 插件接口变化，至少覆盖 `BaseBackend`、`DriverBase`、`GPUTarget`、`triton.backends` entry point、JIT/cache/launcher 接口。
@@ -82,22 +83,31 @@ git log -1 --format="%H %ci"
 
 ## 步骤二：替换 triton/ 目录
 
+> **Triton 3.8+ 主线注意事项：** main 只同步 TTIR 方言/Transforms、
+> `PluginUtils`、Python DSL/runtime。`TritonGPU`、
+> `TritonNvidiaGPU`、`TritonGPUToLLVM`、AMD/NVIDIA/Proton/Gluon/GSan 均由
+> OOT 后端承担，不进入 triton-anchor Wheel。
+
 ```bash
 cd <triton-anchor 项目根目录>
 
 # 备份当前的 triton/ 目录（可选）
 mv triton triton.bak
 
-# 从上游复制需要的目录
+# 从上游复制需要的 TTIR 目录
 mkdir -p triton
-cp -r /tmp/triton-upstream/include triton/
-cp -r /tmp/triton-upstream/lib triton/
 cp -r /tmp/triton-upstream/cmake triton/
+mkdir -p triton/include/triton/Dialect triton/include/triton/Tools/Sys
+cp -r /tmp/triton-upstream/include/triton/Dialect/Triton triton/include/triton/Dialect/
+cp /tmp/triton-upstream/include/triton/Version.h.in triton/include/triton/
+cp /tmp/triton-upstream/include/triton/Tools/PluginUtils.h triton/include/triton/Tools/
+cp /tmp/triton-upstream/include/triton/Tools/Sys/{Dump.h,GetEnv.h} triton/include/triton/Tools/Sys/
+mkdir -p triton/lib/Dialect triton/lib/Tools
+cp -r /tmp/triton-upstream/lib/Dialect/Triton triton/lib/Dialect/
+cp /tmp/triton-upstream/lib/Tools/PluginUtils.cpp triton/lib/Tools/
 mkdir -p triton/python
 cp -r /tmp/triton-upstream/python/src triton/python/
 cp -r /tmp/triton-upstream/python/triton triton/python/
-mkdir -p triton/third_party
-cp -r /tmp/triton-upstream/third_party/f2reduce triton/third_party/
 ```
 
 > **注意**: 只复制上面列出的目录。不要复制 `third_party/nvidia/`、`third_party/amd/`、
@@ -106,6 +116,9 @@ cp -r /tmp/triton-upstream/third_party/f2reduce triton/third_party/
 ---
 
 ## 步骤三：裁剪
+
+> 更新 3.8+ main 时还要同步裁掉依赖硬件方言的 Gluon/GSan Python 包和
+> 原生绑定；标准 Triton Python DSL、runtime 与 entry_points 接口保留。
 
 ### 3.1 删除不需要的目录和文件
 
@@ -122,8 +135,12 @@ rm -rf triton/python/test/
 rm -rf triton/python/tutorials/
 
 # 删除不需要的 cmake 文件
-rm -f triton/cmake/nvidia-toolchain-version.txt
+rm -f triton/cmake/nvidia-toolchain-version.json
 rm -f triton/cmake/pybind11-version.txt
+rm -f triton/python/src/gluon_ir.cc triton/python/src/linear_layout.cc
+rm -rf triton/python/triton/experimental/{gluon,gsan}
+rm -rf triton/python/triton/tools/triton_to_gluon_translator
+rm -f triton/python/triton/tools/{gsan.py,ragged_tma.py}
 ```
 
 ### 3.2 从 `__init__.py` 中移除 `ops` 导出
@@ -140,25 +157,13 @@ rm -f triton/cmake/pybind11-version.txt
   ]
 ```
 
-### 3.3 从 CMakeLists.txt 中移除 NVGPUIR 依赖
-
-编辑 `triton/lib/Conversion/TritonGPUToLLVM/CMakeLists.txt`，
-从 `LINK_LIBS PUBLIC` 列表末尾删除 `NVGPUIR`：
-
-```diff
-      TritonGPUTransforms
-      TritonNvidiaGPUTransforms
--     NVGPUIR
-  )
-```
-
-> **为什么?** `NVGPUIR` 是 NVIDIA 后端的 CMake target，裁掉 `third_party/nvidia/` 后该 target 不存在。
-> `TritonNvidiaGPUTransforms` 虽然名字带 nvidia，但它定义在 triton 核心代码中（非 third_party），
-> 所以需要保留。如果新版上游移除了该依赖或改了名字，请根据实际编译错误调整。
-
----
-
 ## 步骤四：应用定制修改
+
+> 以下 pybind11 示例是旧分支参考。Triton 3.8 已切换为 nanobind；main
+> 分支只在上游 `NB_MODULE(libtriton, m)` 中追加
+> `init_triton_anchor(nanobind::module_ &)`，并用 `TRITON_HAS_BACKENDS`
+> 保护空的静态后端 tuple。Python 后端发现直接沿用 3.8 上游的标准
+> `entry_points("triton.backends")` 协议。
 
 需要修改的文件**只有 2 个**。以下给出完整的目标代码。
 
@@ -298,7 +303,7 @@ triton-anchor 不使用 in-tree 后端，将文件简化为只保留 entry_point
 | 纯 Python 单元测试 | `PYTHONPATH=python python3 -m pytest python/triton_anchor/tests/ -v --tb=short` | 全部通过 |
 | wheel 构建 | `uv build --wheel --no-build-isolation` | 使用目标 LLVM 完成编译和链接 |
 | 安装后冒烟 | `python3 tests/test_smoke.py` | 导入、C++ 绑定、Dialect、AnchorIR、TTIR pipeline 和 AST → TTIR 全部通过 |
-| CI/等价检查 | 运行 `.github/workflows/ci.yml` 定义的检查 | `lint` 和 Python 3.9/3.10/3.11/3.12 `unit-test` 全部通过 |
+| CI/等价检查 | 运行 `.github/workflows/ci.yml` 定义的检查 | `lint` 和 Python 3.10/3.11/3.12/3.13 `unit-test` 全部通过 |
 
 测试必须在干净虚拟环境中安装本次新构建的 wheel，不能复用旧的可编辑安装。日志中记录以下版本：
 
@@ -460,13 +465,15 @@ uv build --wheel --no-build-isolation
 
 ## 附录：定制修改速查表
 
-升级时只需关注以下文件，其余所有文件均可直接从上游复制：
+升级 main 时重点关注以下文件；版本分支可能保留额外兼容补丁：
 
 | 文件 | 修改类型 | 说明 |
 |------|---------|------|
-| `python/src/main.cc` | 替换 | 删除后端宏，新增 `init_triton_anchor` |
-| `python/triton/backends/__init__.py` | 替换 | 删除 in-tree 发现，替换为 entry_points 发现 |
-| `python/triton/__init__.py` | 删一行 | 从 `__all__` 中移除 `"ops"` |
-| `lib/Conversion/TritonGPUToLLVM/CMakeLists.txt` | 删一行 | 移除 `NVGPUIR` 依赖 |
+| `triton/python/src/main.cc` | 小幅修改 | 在 nanobind 模块中初始化 `anchor` 子模块 |
+| `CMakeLists.txt` | 同步适配 | 对齐最新 Triton/LLVM/nanobind 目标并链接 Anchor passes |
+| `setup.py` / `pyproject.toml` | 同步适配 | 对齐 Python 版本、nanobind 和完整包发现 |
+| `triton/TRITON_VERSION` | 更新 | 记录上游版本、分支和精确 commit |
+| `triton/python/triton/backends/__init__.py` | 原样同步优先 | 使用上游标准 entry_points 协议 |
 | `python/triton/ops/` | 删目录 | 删除 NVIDIA 专属算子 |
-| `third_party/nvidia,amd,proton/` | 不复制 | 不需要的上游后端 |
+| `third_party/` | 不复制 | f2reduce 及厂商后端均不属于纯 TTIR 核心 |
+| `TritonGPU` / `TritonNvidiaGPU` / `TritonGPUToLLVM` | 不复制 | 全量下推到 OOT 后端 |

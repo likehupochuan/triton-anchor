@@ -26,9 +26,7 @@ import re
 import subprocess
 import tempfile
 
-from ..common.backend import path_to_cuobjdump, path_to_nvdisasm
-
-FLINE_RE = re.compile(r'\s*/\*\w{4}\*/\s*([^;]*;)\s*/\* 0x(\w{16}) \*/\s*')
+FLINE_RE = re.compile(r'\s*/\*\w{4,}\*/\s*([^;]*;)\s*/\* 0x(\w{16}) \*/\s*')
 SLINE_RE = re.compile(r'\s*/\* 0x(\w{16}) \*/\s*')
 FNAME_RE = re.compile(r'\s*Function : (\w+)\s*')
 BRA_RE = re.compile(r'(.*BRA(?:\.U)? )(0x\w+);')
@@ -77,10 +75,13 @@ def get_sass(cubin_asm, fun=None):
     return sass
 
 
+def path_to_cuobjdump():
+    from triton import knobs
+    return knobs.nvidia.cuobjdump.path
+
+
 def extract(file_path, fun):
-    cuobjdump, _ = path_to_cuobjdump()
-    nvdisasm, _ = path_to_nvdisasm()
-    os.environ["NVDISASM_PATH"] = nvdisasm
+    cuobjdump = path_to_cuobjdump()
     if fun is None:
         sass_str = subprocess.check_output([cuobjdump, "-sass", file_path])
     else:
@@ -122,6 +123,8 @@ def extract(file_path, fun):
             line_idx += 1
             asm_buffer.append(processSassLines(fline, sline, labels))
             # peek the next line
+            if line_idx >= len(sass_lines):
+                break
             line = sass_lines[line_idx].decode()
         # Print sass
         # label naming convention: LBB#i

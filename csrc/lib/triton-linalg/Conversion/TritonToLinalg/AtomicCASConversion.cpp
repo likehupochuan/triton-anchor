@@ -8,6 +8,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
@@ -62,8 +63,9 @@ public:
     auto loc = op.getLoc();
     auto elementType = op.getResult().getType();
     auto memref = getMemRef(loc, op.getPtr(), elementType, rewriter);
-    Value originTensor =
-        rewriter.create<bufferization::ToTensorOp>(loc, memref, true, true);
+    Value originTensor = rewriter.create<bufferization::ToTensorOp>(
+        loc, memref::getTensorTypeFromMemRefType(memref.getType()), memref,
+        true, true);
 
     auto zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     RankedTensorType originTensorTy =
@@ -134,7 +136,8 @@ public:
     }
 
     Value originTensor = rewriter.create<bufferization::ToTensorOp>(
-        loc, ptrInfo->memref, true, true);
+        loc, memref::getTensorTypeFromMemRefType(ptrInfo->memref.getType()),
+        ptrInfo->memref, true, true);
 
     auto init = rewriter.create<tensor::EmptyOp>(loc, resultTy.getShape(),
                                                  resultTy.getElementType());
@@ -180,8 +183,9 @@ public:
     if (failed(tracker.parse(op.getPtr(), loc, rewriter)))
       return failure();
     Value memref = getDynamicMemRef(loc, tracker.getBase(), resultTy, rewriter);
-    Value originTensor =
-        rewriter.create<bufferization::ToTensorOp>(loc, memref, true, true);
+    Value originTensor = rewriter.create<bufferization::ToTensorOp>(
+        loc, memref::getTensorTypeFromMemRefType(memref.getType()), memref,
+        true, true);
     auto init = rewriter.create<tensor::EmptyOp>(loc, resultTy.getShape(),
                                                  resultTy.getElementType());
 

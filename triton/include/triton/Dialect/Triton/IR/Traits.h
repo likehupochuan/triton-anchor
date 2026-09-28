@@ -3,9 +3,9 @@
 
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/OpDefinition.h"
+#include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Support/LogicalResult.h"
-
-#include <iostream>
+#include "triton/Dialect/Triton/IR/Types.h"
 
 namespace mlir {
 namespace OpTrait {
@@ -26,12 +26,9 @@ int constexpr maxTensorNumElements = 1048576;
 LogicalResult verifyTensorSize(Operation *op);
 LogicalResult verifyTensorLayouts(Operation *op);
 
-LogicalResult verifySameOperandsEncoding(Operation *op,
-                                         bool allowTensorPointerType = false);
-
-LogicalResult
-verifySameOperandsAndResultEncoding(Operation *op,
-                                    bool allowTensorPointerType = false);
+LogicalResult verifySameOperandsEncoding(Operation *op);
+LogicalResult verifyEquivalentTensorType(Type typeA, Type typeB);
+LogicalResult verifySameOperandsAndResultEncoding(Operation *op);
 
 LogicalResult verifySameLoadStoreOperandsShape(Operation *op);
 
@@ -99,8 +96,7 @@ class SameLoadStoreOperandsEncoding
     : public TraitBase<ConcreteType, SameLoadStoreOperandsEncoding> {
 public:
   static LogicalResult verifyTrait(Operation *op) {
-    return impl::verifySameOperandsEncoding(op,
-                                            /*allowTensorPointerType=*/true);
+    return impl::verifySameOperandsEncoding(op);
   }
 };
 
@@ -109,10 +105,14 @@ class SameLoadStoreOperandsAndResultEncoding
     : public TraitBase<ConcreteType, SameLoadStoreOperandsAndResultEncoding> {
 public:
   static LogicalResult verifyTrait(Operation *op) {
-    return impl::verifySameOperandsAndResultEncoding(
-        op, /*allowTensorPointerType=*/true);
+    return impl::verifySameOperandsAndResultEncoding(op);
   }
 };
+
+// This trait indicates that regions in the op may execute concurrently with
+// each other.
+template <typename ConcreteType>
+struct AsyncRegions : public TraitBase<ConcreteType, AsyncRegions> {};
 
 } // namespace OpTrait
 } // namespace mlir

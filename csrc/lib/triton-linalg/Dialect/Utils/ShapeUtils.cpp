@@ -44,7 +44,7 @@ bool mlir::triton::isConsecutive(llvm::ArrayRef<int64_t> array) {
 }
 
 bool mlir::triton::trailingNDimsContiguous(MemRefType type, int64_t n) {
-  if (canonicalizeStridedLayout(type).getLayout().isIdentity())
+  if (type.canonicalizeStridedLayout().getLayout().isIdentity())
     return true;
 
   auto memrefShape = type.getShape().take_back(n);
@@ -53,7 +53,7 @@ bool mlir::triton::trailingNDimsContiguous(MemRefType type, int64_t n) {
 
   int64_t offset;
   SmallVector<int64_t> stridesFull;
-  if (!succeeded(getStridesAndOffset(type, stridesFull, offset)))
+  if (!succeeded(type.getStridesAndOffset(stridesFull, offset)))
     return false;
   auto strides = ArrayRef<int64_t>(stridesFull).take_back(n);
 

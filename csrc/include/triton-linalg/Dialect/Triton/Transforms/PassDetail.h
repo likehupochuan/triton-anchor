@@ -50,8 +50,23 @@ class AuxiliaryDialect;
 } // namespace triton
 
 namespace triton {
-#define GEN_PASS_CLASSES
+#define GEN_PASS_DEF_CANONICALIZETRITON
+#define GEN_PASS_DEF_EXTRACTLIKEMOVEBACKWARDPASS
+#define GEN_PASS_DEF_POINTERSTRENGTHREDUCTIONPTR
+#define GEN_PASS_DEF_WRAPFUNCBODYWITHSINGLEBLOCK
 #include "triton-linalg/Dialect/Triton/Transforms/Passes.h.inc"
+
+template <typename DerivedT>
+using CanonicalizeTritonBase = impl::CanonicalizeTritonBase<DerivedT>;
+template <typename DerivedT>
+using ExtractLikeMoveBackwardPassBase =
+    impl::ExtractLikeMoveBackwardPassBase<DerivedT>;
+template <typename DerivedT>
+using PointerStrengthReductionPtrBase =
+    impl::PointerStrengthReductionPtrBase<DerivedT>;
+template <typename DerivedT>
+using WrapFuncBodyWithSingleBlockBase =
+    impl::WrapFuncBodyWithSingleBlockBase<DerivedT>;
 } // namespace triton
 } // namespace mlir
 

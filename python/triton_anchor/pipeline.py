@@ -2,7 +2,7 @@
 Unified TTIR Pipeline
 ======================
 
-Extracts the 7 mandatory TTIR optimization passes that are 100% shared
+Extracts the 8 mandatory TTIR normalization passes that are shared
 across all three projects (spine-triton, triton_race, fantasy-triton).
 
 This is a **core invariant** — the pass list is append-only and
@@ -23,7 +23,7 @@ def build_ttir_pipeline(pm, hw: Optional[HWCapability] = None):
     """Build the standard TTIR optimization pipeline.
 
     This is extracted from triton_race's ``_make_ttir()`` and is identical
-    to the 7 mandatory passes used by all three projects.
+    to the 8 mandatory passes used by triton-anchor 0.3.
 
     Args:
         pm: An ``mlir.PassManager`` instance.
@@ -46,10 +46,10 @@ def build_ttir_pipeline(pm, hw: Optional[HWCapability] = None):
     from triton._C.libtriton import passes
 
     # ═══════════════════════════════════════════════════════════════════
-    # Mandatory Passes (7) — shared 100% across all projects
-    # Order matters: inliner → combine → canonicalize → reorder → cse → licm → dce
+    # Mandatory Passes — target-independent TTIR normalization.
     # ═══════════════════════════════════════════════════════════════════
     passes.common.add_inliner(pm)
+    passes.ttir.add_rewrite_tensor_descriptor_to_pointer(pm)
     passes.ttir.add_combine(pm)
     passes.common.add_canonicalizer(pm)
     passes.ttir.add_reorder_broadcast(pm)
@@ -61,12 +61,6 @@ def build_ttir_pipeline(pm, hw: Optional[HWCapability] = None):
     # Conditional Passes — controlled by HWCapability
     # ═══════════════════════════════════════════════════════════════════
     if hw is not None:
-        from .hw_capability import ComputeParadigm
-
-        # GPU path needs tensor pointer rewriting (CRITICAL — must not silently skip)
-        if hw.compute_paradigm == ComputeParadigm.GPGPU:
-            _require_pass(passes.ttir, "add_rewrite_tensor_pointer", pm)
-
         # Optional loop unrolling (safe to skip if unavailable)
         if hw.enable_loop_unroll:
             _try_add_pass(passes.ttir, "add_loop_unroll", pm)
@@ -86,25 +80,6 @@ def _try_add_pass(module, pass_name, pm, **kwargs):
         fn(pm, **kwargs) if kwargs else fn(pm)
         return True
     return False
-
-
-def _require_pass(module, pass_name, pm, **kwargs):
-    """Add a critical-path pass. Raise if not available.
-
-    For passes on the critical compilation path (e.g., GPU's
-    add_rewrite_tensor_pointer, add_convert_to_ttgpuir) whose
-    absence would cause incorrect compilation results.
-    """
-    fn = getattr(module, pass_name, None)
-    if fn is None:
-        mod_name = getattr(module, "__name__", str(module))
-        raise RuntimeError(
-            f"Required pass '{pass_name}' not found in module '{mod_name}'. "
-            f"This pass is critical for the current compilation path. "
-            f"Check your Triton version and backend installation."
-        )
-    fn(pm, **kwargs) if kwargs else fn(pm)
-    return True
 
 
 def make_ttir(mod, metadata: dict, hw: Optional[HWCapability] = None):

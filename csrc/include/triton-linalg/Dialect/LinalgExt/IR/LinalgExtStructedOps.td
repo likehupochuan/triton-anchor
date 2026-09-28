@@ -75,9 +75,15 @@ def BatchConv2DNhwcFhwcOp : LinalgStructuredBase_Op<"batch_conv_2d_nhwc_fhwc",
     ArrayAttr getIndexingMaps();
     static void regionBuilder(ImplicitLocOpBuilder &b,
                               Block &block, ArrayRef<NamedAttribute> attrs);
-    static std::function<void(ImplicitLocOpBuilder &, Block &, ArrayRef<NamedAttribute>)>
+    static std::function<void(ImplicitLocOpBuilder &, Block &,
+                              ArrayRef<NamedAttribute>,
+                              function_ref<InFlightDiagnostic()>)>
       getRegionBuilder() {
-      return regionBuilder;
+      return [](ImplicitLocOpBuilder &b, Block &block,
+                ArrayRef<NamedAttribute> attrs,
+                function_ref<InFlightDiagnostic()>) {
+        BatchConv2DNhwcFhwcOp::regionBuilder(b, block, attrs);
+      };
     }
     static unsigned getNumRegionArgs();
     std::string getLibraryCallName() {
@@ -147,10 +153,15 @@ def MakeRangeOp : LinalgStructuredBase_Op<"make_range",
     ArrayAttr getIndexingMaps();
     static void regionBuilder(ImplicitLocOpBuilder &b,
                               Block &block, ArrayRef<NamedAttribute> attrs);
-    static std::function<void(ImplicitLocOpBuilder &,
-                              Block &, ArrayRef<NamedAttribute>)>
+    static std::function<void(ImplicitLocOpBuilder &, Block &,
+                              ArrayRef<NamedAttribute>,
+                              function_ref<InFlightDiagnostic()>)>
     getRegionBuilder() {
-      return regionBuilder;
+      return [](ImplicitLocOpBuilder &b, Block &block,
+                ArrayRef<NamedAttribute> attrs,
+                function_ref<InFlightDiagnostic()>) {
+        MakeRangeOp::regionBuilder(b, block, attrs);
+      };
     }
 
     Value getStart() {
@@ -263,10 +274,15 @@ def Im2ColOp : LinalgStructuredBase_Op<"im2col", [AttrSizedOperandSegments]> {
       ArrayAttr getIndexingMaps();
       static void regionBuilder(ImplicitLocOpBuilder &b,
                                 Block &block, ArrayRef<NamedAttribute> attrs);
-      static std::function<void(ImplicitLocOpBuilder &,
-                                Block &, ArrayRef<NamedAttribute>)>
+      static std::function<void(ImplicitLocOpBuilder &, Block &,
+                                ArrayRef<NamedAttribute>,
+                                function_ref<InFlightDiagnostic()>)>
       getRegionBuilder() {
-        return regionBuilder;
+        return [](ImplicitLocOpBuilder &b, Block &block,
+                  ArrayRef<NamedAttribute> attrs,
+                  function_ref<InFlightDiagnostic()>) {
+          Im2ColOp::regionBuilder(b, block, attrs);
+        };
       }
 
       // Generic methods.
@@ -348,9 +364,14 @@ class NaiveReduceBaseOp<string mnemonic, list<Trait> props>
                               Block &block, ArrayRef<NamedAttribute> attrs);
     // Implement functions necessary for DestinationStyleOpInterface.
     static std::function<void(mlir::ImplicitLocOpBuilder &, mlir::Block &,
-                              mlir::ArrayRef<mlir::NamedAttribute>)>
+                              mlir::ArrayRef<mlir::NamedAttribute>,
+                              llvm::function_ref<mlir::InFlightDiagnostic()>)>
     getRegionBuilder() {
-      return regionBuilder;
+      return [](mlir::ImplicitLocOpBuilder &b, mlir::Block &block,
+                mlir::ArrayRef<mlir::NamedAttribute> attrs,
+                llvm::function_ref<mlir::InFlightDiagnostic()>) {
+        regionBuilder(b, block, attrs);
+      };
     }
     MutableOperandRange getDpsInitsMutable() { return getInitsMutable(); }
   }];
@@ -511,7 +532,5 @@ def ReduceMinNanOp : NaiveReduceBaseOp<"reduce_min_nan", []> {
 //===----------------------------------------------------------------------===//
 // Named LinalgExt ops.
 //===----------------------------------------------------------------------===//
-
-include "triton-linalg/Dialect/LinalgExt/IR/LinalgExtNamedStructuredOps.yamlgen.td"
 
 #endif // TRITON_LINALG_DIALECT_LINALGEXT_IR_LINALGEXTSTRUCTEDOPS_TD

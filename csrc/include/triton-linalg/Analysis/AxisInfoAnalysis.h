@@ -49,18 +49,20 @@ public:
   using mlir::dataflow::SparseForwardDataFlowAnalysis<
       AxisInfoLattice>::getLatticeElement;
 
-  void visitOperation(Operation *op, ArrayRef<const AxisInfoLattice *> operands,
-                      ArrayRef<AxisInfoLattice *> results) override;
+  LogicalResult
+  visitOperation(Operation *op, ArrayRef<const AxisInfoLattice *> operands,
+                 ArrayRef<AxisInfoLattice *> results) override;
 
   void visitNonControlFlowArguments(Operation *op,
                                     const RegionSuccessor &successor,
-                                    ArrayRef<AxisInfoLattice *> argLattices,
-                                    unsigned firstIndex) override;
+                                    ValueRange nonSuccessorInputs,
+                                    ArrayRef<AxisInfoLattice *> argLattices)
+      override;
 
   void setToEntryState(AxisInfoLattice *lattice) override {
     propagateIfChanged(lattice,
                        lattice->join(AxisInfoExt::getPessimisticValueState(
-                           lattice->getPoint())));
+                           lattice->getAnchor())));
   }
 };
 

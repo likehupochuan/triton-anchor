@@ -1125,11 +1125,6 @@ def ScalarLibdeviceCallOp : LinalgExt_PureOp<"scalar_libdevice_call", [NoMemoryE
       `symbol` `=` $symbol
       `->` type($result)
     }];
-  let builders = [
-    OpBuilder<(ins "mlir::Type":$resultType, "ValueRange":$inputs,
-        "StringAttr":$symbol, CArg<"ArrayRef<NamedAttribute>",
-        "{}">:$attributes)>,
-  ];
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
 }

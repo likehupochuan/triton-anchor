@@ -46,7 +46,7 @@ uv venv /opt/venv
 source /opt/venv/bin/activate
 
 # 安装构建依赖
-uv pip install setuptools wheel pybind11
+uv pip install setuptools wheel 'cmake>=3.20,<4.0' 'ninja>=1.11.1' nanobind==2.10.2
 ```
 
 ## 3. 准备 LLVM 工具链
@@ -59,10 +59,11 @@ uv pip install setuptools wheel pybind11
 
 ### 选项 B：从源码手动编译 LLVM
 
-1. 查找 Triton 当前依赖的 LLVM 版本。检查 `triton/cmake/llvm-hash.txt` 文件来获取当前的版本哈希。例如，如果文件内容为：
-       10dc3a8e916d73291269e5e2b82dd22681489aa1
+1. 查找 Triton 当前依赖的 LLVM 版本。检查 `triton/cmake/llvm-info.json` 的
+   `llvm_hash` 字段。当前主线 vendored Triton 使用该 JSON 同时记录预编译
+   LLVM 的 commit、构建号和各平台校验和。
 
-   这意味着当前版本的 Triton 需要基于 [LLVM](https://github.com/llvm/llvm-project) 的 `10dc3a8e` 提交进行构建。
+   当前 main 需要基于 Triton LLVM fork 的 `941a04e69ee8fe4c7a162b2f1e215aa8df867534` 提交进行构建。
 
 2. 使用 `git checkout` 切换到对应的 LLVM 提交记录。如有需要，你可以对 LLVM 进行额外的源码修改。
 
@@ -86,7 +87,6 @@ uv pip install setuptools wheel pybind11
 |--------|--------|------|
 | `WORKSPACE` | `/workspace` | 工作目录，支持手动指定 |
 | `LLVM_BUILD_DIR` | `$WORKSPACE/llvm-release` | LLVM 编译产物主目录，支持手动指定 |
-| `TTGPU` | 空 | 是否启用特殊pass |
 
 你可以通过如下方式来初始化环境：
 
@@ -97,12 +97,6 @@ source envsetup.sh
 # 如果您有自定义的 LLVM 构建路径，请通过环境变量传入：
 export LLVM_BUILD_DIR=/path/to/llvm-release
 source envsetup.sh
-```
-
-如果需要启用特殊pass，需要指定该环境变量
-
-```bash
-export TTGPU=1
 ```
 
 ## 5. 安装 triton-anchor

@@ -58,6 +58,11 @@ static bool isDivisible(OpFoldResult lhs, unsigned rhs) {
 struct PrintOpTilingInterface
     : public TilingInterface::ExternalModel<PrintOpTilingInterface,
                                             triton::aux::PrintOp> {
+  using Base = TilingInterface::ExternalModel<PrintOpTilingInterface,
+                                              triton::aux::PrintOp>;
+  using Base::generateResultTileValue;
+  using Base::getTiledImplementation;
+
   SmallVector<Value> getDestinationOperands(Operation *op, OpBuilder &b) const {
     return llvm::cast<DestinationStyleOpInterface>(op).getDpsInits();
   }
@@ -136,6 +141,11 @@ struct PrintOpTilingInterface
 struct BitcastExtOpTilingInterface
     : public TilingInterface::ExternalModel<BitcastExtOpTilingInterface,
                                             triton::aux::BitcastExtOp> {
+  using Base = TilingInterface::ExternalModel<BitcastExtOpTilingInterface,
+                                              triton::aux::BitcastExtOp>;
+  using Base::generateResultTileValue;
+  using Base::getTiledImplementation;
+
   SmallVector<utils::IteratorType> getLoopIteratorTypes(Operation *op) const {
     triton::aux::BitcastExtOp bitcastExtOp =
         cast<triton::aux::BitcastExtOp>(op);

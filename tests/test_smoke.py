@@ -252,9 +252,9 @@ def test_ttir_pipeline():
     anchor.load_dialects(ctx)
 
     pm = ir.pass_manager(ctx)
-    # 不传 hw 参数，仅构建 7 个 mandatory passes
+    # 不传 hw 参数，仅构建硬件无关 mandatory passes
     build_ttir_pipeline(pm, hw=None)
-    print("  TTIR Pipeline 构建成功 (7 mandatory passes) ✓")
+    print("  TTIR Pipeline 构建成功 (target-independent mandatory passes) ✓")
 
 
 def test_adapter_discovery():
@@ -294,12 +294,14 @@ def _smoke_add_kernel(x_ptr, y_ptr, out_ptr, n, BLOCK: tl.constexpr):
 # 提供 AST 编译所需的最小 Options
 class _MinimalOptions:
     def __init__(self):
+        self.arch = "generic"
         self.num_warps = 4
         self.num_stages = 3
         self.num_ctas = 1
         self.cluster_dims = (1, 1, 1)
         self.ptx_version = None
         self.enable_fp_fusion = True
+        self.sanitize_overflow = False
         self.supported_fp8_dtypes = ()
         self.deprecated_fp8_dtypes = ()
         self.allowed_dot_input_precisions = ("ieee", "tf32", "tf32x3")
@@ -315,8 +317,14 @@ def test_ttir_generation():
     # 构建 ASTSource
     src = triton.compiler.ASTSource(
         fn=_smoke_add_kernel,
-        signature={0: "*fp32", 1: "*fp32", 2: "*fp32", 3: "i32"},
-        constants={4: 256},
+        signature={
+            "x_ptr": "*fp32",
+            "y_ptr": "*fp32",
+            "out_ptr": "*fp32",
+            "n": "i32",
+            "BLOCK": "constexpr",
+        },
+        constexprs={"BLOCK": 256},
     )
 
     # 创建 MLIR context 并加载方言
@@ -324,7 +332,15 @@ def test_ttir_generation():
     ir.load_dialects(ctx)
     anchor.load_dialects(ctx)
 
-    ttir_module = src.make_ir(options=_MinimalOptions(), codegen_fns=None, context=ctx)
+    from triton.backends.compiler import GPUTarget
+
+    ttir_module = src.make_ir(
+        target=GPUTarget("anchor", "generic", 32),
+        options=_MinimalOptions(),
+        codegen_fns={},
+        module_map={},
+        context=ctx,
+    )
     ir_text = str(ttir_module)
 
     assert "tt.func" in ir_text or "func.func" in ir_text, "TTIR 中应包含函数定义"

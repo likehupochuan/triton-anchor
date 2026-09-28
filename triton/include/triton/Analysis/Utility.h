@@ -3,9 +3,11 @@
 
 #include "mlir/Analysis/DataFlowFramework.h"
 #include "mlir/Analysis/SliceAnalysis.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/Support/LLVM.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Tools/LinearLayout.h"
 
 namespace mlir {
 
@@ -23,9 +25,26 @@ inline bool isZeroConst(Value v) {
 
 class ReduceOpHelper {
 public:
+  enum class InThreadVectorizeOpKind {
+    None,
+    AddF,
+    MulF,
+    MinNumF,
+    MaxNumF,
+    MinimumF,
+    MaximumF,
+    AddI,
+    MulI,
+    MinSI,
+    MaxSI,
+    MinUI,
+    MaxUI,
+  };
+
   explicit ReduceOpHelper(triton::ReduceOp op)
       : op(op.getOperation()), axis(op.getAxis()) {
     auto firstTy = cast<RankedTensorType>(op.getOperands()[0].getType());
+    srcTy = firstTy;
     srcShape = firstTy.getShape();
     srcEncoding = firstTy.getEncoding();
     srcElementTypes = op.getElementTypes();
@@ -40,42 +59,52 @@ public:
     }
   }
 
-  ArrayRef<int64_t> getSrcShape() { return srcShape; }
-
-  Attribute getSrcLayout() { return srcEncoding; }
-
-  triton::ReduceOp getOperation() { return op; }
-
-  bool isReductionOnLayoutFastAxis();
-
-  unsigned getThreadOffsetOnReductionAxis();
-
-  bool isWarpSynchronous();
-
-  unsigned getInterWarpSize();
-
-  unsigned getIntraWarpSize();
+  RankedTensorType getSrcTy() { return srcTy; }
 
   unsigned getInterWarpSizeWithUniqueData();
 
   unsigned getIntraWarpSizeWithUniqueData();
 
-  unsigned getThreadsReductionAxis();
-
-  SmallVector<unsigned> getScratchConfig();
-
-  SmallVector<unsigned> getOrderWithAxisAtBeginning();
-
-  unsigned getScratchSizeInBytes();
-
-  bool isSupportedLayout();
-
   bool isReduceWithinCTA();
 
-  unsigned getAxis() { return axis; }
+  bool isAssociative();
+
+  // Callback to allow backends to specify target-specific getter for scratch
+  // elements.
+  using GetNumScratchElemsFn = std::function<unsigned(
+      const triton::LinearLayout &src, const triton::LinearLayout &dst,
+      unsigned bitwidth)>;
+
+  unsigned
+  getScratchSizeInBytes(GetNumScratchElemsFn numScratchElemsGetter = nullptr);
+
+  InThreadVectorizeOpKind
+  getInThreadVectorizeOpKind(unsigned axisPack,
+                             bool supportBitwidth16Elementwise,
+                             bool supportBitwidth32Elementwise);
+
+  static triton::ColumnAction
+  moveAxisBasesToFront(const triton::LinearLayout &layout, int axis,
+                       bool isVectorized = false);
+
+  static triton::LinearLayout
+  zeroBasesAlongDimAndReorder(const triton::LinearLayout &layout, unsigned axis,
+                              mlir::StringAttr dim);
+
+  static triton::LinearLayout getInterLayout(const triton::LinearLayout &layout,
+                                             unsigned axis);
+
+  static triton::LinearLayout reducedRegLaneLayout(RankedTensorType srcTy,
+                                                   unsigned axis);
+
+  static Value createInThreadVectorizedCombineOp(OpBuilder &builder,
+                                                 Location loc,
+                                                 InThreadVectorizeOpKind kind,
+                                                 Value lhs, Value rhs);
 
 private:
   triton::ReduceOp op;
+  RankedTensorType srcTy;
   ArrayRef<int64_t> srcShape;
   Attribute srcEncoding;
   SmallVector<Type> srcElementTypes;
@@ -84,21 +113,7 @@ private:
 
 class ScanLoweringHelper {
 public:
-  explicit ScanLoweringHelper(triton::ScanOp op) : scanOp(op) {
-    auto firstTy = cast<RankedTensorType>(op.getOperands()[0].getType());
-    srcShape = firstTy.getShape();
-    srcEncoding = firstTy.getEncoding();
-    srcElementTypes = op.getElementTypes();
-
-    for (const auto &t : op.getInputTypes()) {
-      if (t.getShape() != srcShape) {
-        op.emitError() << "shape mismatch";
-      }
-      if (t.getEncoding() != srcEncoding) {
-        op.emitError() << "encoding mismatch";
-      }
-    }
-  }
+  explicit ScanLoweringHelper(triton::ScanOp op);
   // Return true if the lowering of the scan op is supported.
   bool isSupported();
   // Return the number of elements per thread along axis dim.
@@ -109,12 +124,8 @@ public:
   unsigned getNonAxisNumThreadsPerWarp();
   // Return the flat numbers of threads computing independent scan results.
   unsigned getNonAxisNumThreadsPerCTA();
-  // Return the number of warps per CTA along axis dim.
-  unsigned getAxisNumWarps();
   // Return the number of warps per CTA along axis dim with unique data.
   unsigned getAxisNumWarpsWithUniqueData();
-  // Return the number of threads per warp along axis dim.
-  unsigned getAxisNumThreadsPerWarp();
   // Return the number of threads per warp along axis dim with unique data.
   unsigned getAxisNumThreadsPerWarpWithUniqueData();
   // Return the number of blocks along axis dim.
@@ -137,19 +148,78 @@ public:
   Location getLoc() { return scanOp.getLoc(); }
   unsigned getAxis() { return scanOp.getAxis(); }
   bool getReverse() { return scanOp.getReverse(); }
-  triton::gpu::BlockedEncodingAttr getEncoding();
+  triton::gpu::LinearEncodingAttr getEncoding() { return srcEncoding; }
   llvm::ArrayRef<int64_t> getShape() { return srcShape; }
   unsigned getNumOperands() { return scanOp.getNumOperands(); }
   SmallVector<Type> getElementTypes() { return srcElementTypes; }
-  Attribute getSrcLayout() { return srcEncoding; }
+  SmallVector<unsigned> getOrder() { return order; }
   Region &getCombineOp();
 
 private:
   triton::ScanOp scanOp;
-  Attribute srcEncoding;
+  triton::gpu::LinearEncodingAttr srcEncoding;
+  Attribute legacyEncoding;
   llvm::ArrayRef<int64_t> srcShape;
   SmallVector<Type> srcElementTypes;
+  SmallVector<unsigned> order;
 };
+
+// Helper class for lowering `tt.gather` operations. This class shares lowering
+// logic between shared memory allocation and LLVM codegen.
+class GatherLoweringHelper {
+public:
+  GatherLoweringHelper(triton::GatherOp gatherOp);
+
+  // Get the shared memory scratch size required by this op.
+  unsigned getScratchSizeInBytes();
+  // Determine if the gather can be performed completely within a warp.
+  bool isWarpLocal();
+
+private:
+  triton::GatherOp gatherOp;
+  RankedTensorType srcTy;
+  RankedTensorType dstTy;
+};
+
+// This struct represents the factorization of a warp-local layout conversion
+// into three components: a register-only permutation, a lane-only permutation,
+// and a set of swaps between lane and register basis vectors. Algebraically, it
+// represents the factorization P = P_mixed \circ P_lane \circ P_reg. It is used
+// to aid in the implementation of the layout conversion using warp-shuffles.
+//
+// `pReg` and `pLane` are square layouts each with only one input and output
+// dimension. `mixedTranspositions` holds pairs of integers (i, j)
+// corresponding to the transposition (r_i l_j) of the i-th register basis
+// vector with the j-th lane basis vector along with 16-bit selectors for byte
+// permute instructions (where each of the four nybbles is in the range [0, 7]).
+// `nPack` gives the number of basis vectors that can be used for register
+// packing while ensuring packed elements arrive at the same destination lane.
+struct DecomposedWarpConversion {
+  struct TranspositionInfo {
+    std::pair<int, int> transposition;
+    uint16_t topPreSel = 0x3210;
+    uint16_t botPreSel = 0x7654;
+    uint16_t topPostSel = 0x3210;
+    uint16_t botPostSel = 0x7654;
+  };
+
+  triton::LinearLayout pReg, pLane;
+  SmallVector<TranspositionInfo> mixedTranspositions;
+  int nPack;
+};
+
+// Produces a decomposition of a permutation describing a warp-local layout
+// conversion as described in `DecomposedWarpConversion` above.
+//
+// This function handles cases where the numbers of register and lane basis
+// vectors differ between the two layouts. This is done by padding the smaller
+// dimension(s) with zero vectors, ensuring that the layout conversion can be
+// represented as a permutation. The layouts must not contain broadcasted
+// register bases.
+DecomposedWarpConversion
+getWarpLayoutConvertDecomposition(const triton::LinearLayout &srcLayout,
+                                  const triton::LinearLayout &dstLayout,
+                                  int bitwidth);
 
 // Decomposes a reshape into simpler pieces.
 //
@@ -176,190 +246,64 @@ private:
 SmallVector<std::pair<SmallVector<int64_t>, SmallVector<int64_t>>>
 getReshapeDecomposition(ArrayRef<int64_t> srcShape, ArrayRef<int64_t> dstShape);
 
-bool maybeSharedAllocationOp(Operation *op);
-
-bool supportMFMA(triton::DotOp op);
+// Returns the number of elements in the scratch space needed.
+// If shape is empty, it means no shared memory is needed.
+unsigned getNumScratchElements(ArrayRef<unsigned> shape);
 
 bool supportWMMA(triton::DotOp op);
 
 bool supportMMA(triton::DotOp op, int version);
 
+bool supportMMA(triton::DotOpInterface op, int version);
+
 bool supportMMA(Value value, int version);
 
-bool isSingleValue(Value value);
+// Conversion from `srcTy` to `dstTy` only involves reordering of registers.
+// There is no need for data exchange across threads, warps, or blocks.
+bool cvtReordersRegisters(RankedTensorType srcTy, RankedTensorType dstTy);
 
-bool isMfmaToDotShortcut(RankedTensorType &srcTy, RankedTensorType &dstTy);
+// The conversion involves data exchange across threads within a warp, or is
+// explicitly forced to use warp shuffles.
+bool cvtNeedsWarpShuffle(triton::gpu::ConvertLayoutOp op);
 
-bool isMmaToDotShortcut(RankedTensorType srcTy, RankedTensorType dstTy);
-
-bool isMmaToMmaShortcut(RankedTensorType srcTy, RankedTensorType dstTy);
-
-// Return true if the src and dst layout match.
-bool matchMmaV3AndDotOperandLayout(RankedTensorType srcTy,
-                                   RankedTensorType dstTy);
+// The conversion requires data exchange through shared memory.
+bool cvtNeedsSharedMemory(triton::gpu::ConvertLayoutOp op);
 
 // TODO: Move utility functions that belong to ConvertLayoutOp to class
 // ConvertLayoutOpHelper in the future
 bool shouldUseDistSmem(Attribute srcLayout, Attribute dstLayout);
 
-/// Multi-root DAG topological sort.
-/// Performs a topological sort of the Operation in the `toSort` SetVector.
-/// Returns a topologically sorted SetVector.
-/// It is faster than mlir::topologicalSort because it prunes nodes that have
-/// been visited before.
-SetVector<Operation *>
-multiRootTopologicalSort(const SetVector<Operation *> &toSort);
-
-/// This uses the toplogicalSort above
-SetVector<Operation *>
-multiRootGetSlice(Operation *op, TransitiveFilter backwardFilter = nullptr,
-                  TransitiveFilter forwardFilter = nullptr);
-
 /// Create a basic DataFlowSolver with constant and dead code analysis included.
 std::unique_ptr<DataFlowSolver> createDataFlowSolver();
 
-/// This class represents a call graph for a given ModuleOp and holds
-/// data of type T associated with each FunctionOpInterface.
-template <typename T> class CallGraph {
-public:
-  using FuncDataMapT = DenseMap<FunctionOpInterface, T>;
+bool isCvtDimSync(const triton::LinearLayout &srcLayout,
+                  const triton::LinearLayout &dstLayout, StringAttr dim);
 
-  /// Constructor that builds the call graph for the given moduleOp.
-  explicit CallGraph(ModuleOp moduleOp) : moduleOp(moduleOp) { build(); }
+namespace triton {
 
-  /// Walks the call graph and applies the provided update functions
-  /// to the edges and nodes.
-  template <WalkOrder UpdateEdgeOrder = WalkOrder::PreOrder,
-            WalkOrder UpdateNodeOrder = WalkOrder::PreOrder,
-            typename UpdateEdgeFn, typename UpdateNodeFn>
-  void walk(UpdateEdgeFn updateEdgeFn, UpdateNodeFn updateNodeFn) {
-    DenseSet<FunctionOpInterface> visited;
-    for (auto root : roots) {
-      doWalk<UpdateEdgeOrder, UpdateNodeOrder>(root, visited, updateEdgeFn,
-                                               updateNodeFn);
-    }
-  }
-
-  /// Retrieves the data associated with a function
-  T *getFuncData(FunctionOpInterface funcOp) {
-    if (funcMap.count(funcOp)) {
-      return &funcMap[funcOp];
-    }
-    return nullptr;
-  }
-
-  /// Getters
-  ModuleOp getModuleOp() const { return moduleOp; }
-  SmallVector<FunctionOpInterface> getRoots() const { return roots; }
-  size_t getNumFunctions() const { return funcMap.size(); }
-
-  /// Returns true if the given function is a root.
-  bool isRoot(FunctionOpInterface funcOp) const {
-    return llvm::is_contained(roots, funcOp);
-  }
-
-  /// Maps the data and the graph nodes associated with a funcOp to a
-  /// targetFuncOp.
-  template <typename FROM, typename TO>
-  void mapFuncOp(FROM funcOp, TO targetFuncOp) {
-    // Iterate over graph and replace
-    for (auto &kv : graph) {
-      for (auto &edge : kv.second) {
-        if (edge.second == funcOp) {
-          edge.second = targetFuncOp;
-        }
-      }
-    }
-    graph[targetFuncOp] = graph[funcOp];
-    // Replace in roots
-    for (auto it = roots.begin(); it != roots.end(); ++it) {
-      if (*it == funcOp) {
-        *it = targetFuncOp;
-        break;
-      }
-    }
-    // Replace in funcMap
-    funcMap[targetFuncOp] = funcMap[funcOp];
-  }
-
-  /// Maps the graph edges associated with a callOp to a targetCallOp.
-  template <typename FROM, typename TO>
-  void mapCallOp(FROM callOp, TO targetCallOp) {
-    // Iterate over graph and replace
-    for (auto &kv : graph) {
-      for (auto &edge : kv.second) {
-        if (edge.first == callOp) {
-          edge.first = targetCallOp;
-        }
-      }
-    }
-  }
-
-private:
-  void build() {
-    SymbolTableCollection symbolTable;
-    DenseSet<FunctionOpInterface> visited;
-    // Build graph
-    moduleOp.walk([&](Operation *op) {
-      auto caller = op->getParentOfType<FunctionOpInterface>();
-      if (auto callOp = dyn_cast<CallOpInterface>(op)) {
-        auto *callee = callOp.resolveCallable(&symbolTable);
-        auto funcOp = dyn_cast_or_null<FunctionOpInterface>(callee);
-        if (funcOp) {
-          graph[caller].emplace_back(
-              std::pair<CallOpInterface, FunctionOpInterface>(callOp, funcOp));
-          visited.insert(funcOp);
-        }
-      }
-    });
-    // Find roots
-    moduleOp.walk([&](FunctionOpInterface funcOp) {
-      if (!visited.count(funcOp)) {
-        roots.push_back(funcOp);
-      }
-    });
-  }
-
-  template <WalkOrder UpdateEdgeOrder = WalkOrder::PreOrder,
-            WalkOrder UpdateNodeOrder = WalkOrder::PreOrder,
-            typename UpdateEdgeFn, typename UpdateNodeFn>
-  void doWalk(FunctionOpInterface funcOp,
-              DenseSet<FunctionOpInterface> &visited, UpdateEdgeFn updateEdgeFn,
-              UpdateNodeFn updateNodeFn) {
-    if (visited.count(funcOp)) {
-      llvm::report_fatal_error("Cycle detected in call graph");
-    }
-    if constexpr (UpdateNodeOrder == WalkOrder::PreOrder) {
-      updateNodeFn(funcOp);
-    }
-    for (auto [callOp, callee] : graph[funcOp]) {
-      if constexpr (UpdateEdgeOrder == WalkOrder::PreOrder) {
-        updateEdgeFn(callOp, callee);
-      }
-      doWalk<UpdateEdgeOrder, UpdateNodeOrder>(callee, visited, updateEdgeFn,
-                                               updateNodeFn);
-      if constexpr (UpdateEdgeOrder == WalkOrder::PostOrder) {
-        updateEdgeFn(callOp, callee);
-      }
-    }
-    if constexpr (UpdateNodeOrder == WalkOrder::PostOrder) {
-      updateNodeFn(funcOp);
-    }
-    visited.erase(funcOp);
-  }
-
-protected:
-  ModuleOp moduleOp;
-  DenseMap<FunctionOpInterface,
-           SmallVector<std::pair<CallOpInterface, FunctionOpInterface>>>
-      graph;
-  FuncDataMapT funcMap;
-  SmallVector<FunctionOpInterface> roots;
+struct BarrierStages {
+  // Stages are independent: for example, a release atomic with scratch has
+  // both a leading ordering barrier and a scratch rendezvous.
+  bool beforeMemoryEffects = false;
+  bool afterMemoryEffects = false;
+  bool betweenMemoryEffects = false;
 };
-// Create a basic DataFlowSolver with constant and dead code analysis included.
-std::unique_ptr<DataFlowSolver> createDataFlowSolver();
 
-triton::MakeTensorPtrOp getMakeTensorPtrOp(Value v);
+// Classify the barriers required by an atomic at a chosen scope. A result
+// broadcast barrier at that scope supplies the post-atomic rendezvous itself.
+BarrierStages getAtomicBarrierStages(MemSemantic semantic,
+                                     bool hasResultBarrier);
+
+// Whether distributing an atomic result requires communication between CTAs.
+bool atomicResultHasCTABroadcast(Operation *op);
+
+} // namespace triton
+
+namespace triton::nvidia_gpu {
+
+bool needsClusterBarrier(Operation *op);
+
+} // namespace triton::nvidia_gpu
 
 } // namespace mlir
 

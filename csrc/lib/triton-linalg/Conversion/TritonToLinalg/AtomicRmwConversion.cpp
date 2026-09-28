@@ -10,6 +10,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
@@ -105,8 +106,9 @@ public:
     auto loc = op.getLoc();
     auto elementType = op.getResult().getType();
     auto memref = getMemRef(loc, op.getPtr(), elementType, rewriter);
-    Value originTensor =
-        rewriter.create<bufferization::ToTensorOp>(loc, memref, true, true);
+    Value originTensor = rewriter.create<bufferization::ToTensorOp>(
+        loc, memref::getTensorTypeFromMemRefType(memref.getType()), memref,
+        true, true);
 
     auto zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     RankedTensorType originTensorTy =
@@ -202,7 +204,8 @@ public:
     }
 
     Value originalTensor = rewriter.create<bufferization::ToTensorOp>(
-        loc, ptrInfo->memref, true, true);
+        loc, memref::getTensorTypeFromMemRefType(ptrInfo->memref.getType()),
+        ptrInfo->memref, true, true);
 
     // Create atomic_rmw here.
     // Init atomic output.
@@ -276,8 +279,9 @@ public:
     if (failed(tracker.parse(op.getPtr(), loc, rewriter)))
       return failure();
     Value memref = getDynamicMemRef(loc, tracker.getBase(), resultTy, rewriter);
-    Value originTensor =
-        rewriter.create<bufferization::ToTensorOp>(loc, memref, true, true);
+    Value originTensor = rewriter.create<bufferization::ToTensorOp>(
+        loc, memref::getTensorTypeFromMemRefType(memref.getType()), memref,
+        true, true);
     // Get value.
     Value valueTensor =
         triton::flattenValueToMatchGatherScatter(rewriter, op.getVal(), true);

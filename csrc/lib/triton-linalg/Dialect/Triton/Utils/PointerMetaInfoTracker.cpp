@@ -36,6 +36,9 @@ class Operation;
 using namespace mlir;
 using namespace mlir::triton;
 
+#if 0
+// Legacy Triton 3.0 block-pointer tracking. Triton 3.8 represents these as
+// tensor descriptors and rewrites them before the Linalg conversion pipeline.
 template <>
 LogicalResult TensorPointerMetaInfoTracker::parseOp<triton::MakeTensorPtrOp>(
     triton::MakeTensorPtrOp op, Location loc,
@@ -87,6 +90,7 @@ TensorPointerMetaInfoTracker::parse(Value operand, Location loc,
           [&](auto op) { return parseOp(op, loc, rewriter); })
       .Default([](Operation *) { return failure(); });
 }
+#endif
 
 ///////////////////////// PointerMetaInfoTracker /////////////////////////
 

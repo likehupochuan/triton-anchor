@@ -6,12 +6,12 @@ A compilation frontend that converts Triton TTIR to hardware-aware Linalg IR,
 serving as the bridge between Triton core and out-of-tree hardware backends.
 
 Architecture:
-  Layer 1  — TTIR Pipeline       (core invariant: 7 mandatory passes)
+  Layer 1  — TTIR Pipeline       (core invariant: 8 mandatory passes)
   Layer 2  — Linalg Adapters     (triton-shared / triton-linalg / hybrid)
   Layer 2.5 — AnchorIR Spec      (core invariant: dual-track dialect whitelist)
 """
 
-__version__ = "0.1.3"
+__version__ = "0.3.0"
 
 from .hw_capability import (
     HWCapability as HWCapability,

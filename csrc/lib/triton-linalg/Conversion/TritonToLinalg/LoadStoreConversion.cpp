@@ -75,9 +75,6 @@ public:
   LogicalResult
   matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    if (triton::isTensorPointerType(op.getPtr().getType()))
-      return failure();
-
     RankedTensorType resultTy =
         dyn_cast<RankedTensorType>(op.getResult().getType());
     if (!resultTy)
@@ -95,7 +92,8 @@ public:
     }
 
     Value sliceTensor = rewriter.create<bufferization::ToTensorOp>(
-        loc, ptrInfo->memref, true, true);
+        loc, memref::getTensorTypeFromMemRefType(ptrInfo->memref.getType()),
+        ptrInfo->memref, true, true);
     auto tensorType = cast<RankedTensorType>(sliceTensor.getType());
     Value emptyTensor = rewriter.create<tensor::EmptyOp>(
         loc, tensorType.getShape(), tensorType.getElementType(),
@@ -139,8 +137,6 @@ public:
   LogicalResult
   matchAndRewrite(triton::StoreOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    if (triton::isTensorPointerType(op.getPtr().getType()))
-      return failure();
 
     RankedTensorType valueTy =
         dyn_cast<RankedTensorType>(op.getValue().getType());
@@ -271,8 +267,6 @@ public:
   LogicalResult
   matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    if (triton::isTensorPointerType(op.getPtr().getType()))
-      return failure();
     auto resultTy = dyn_cast<RankedTensorType>(op.getResult().getType());
     if (!resultTy)
       return failure();
@@ -282,8 +276,9 @@ public:
     if (failed(tracker.parse(op.getPtr(), loc, rewriter)))
       return failure();
     Value memref = getDynamicMemRef(loc, tracker.getBase(), resultTy, rewriter);
-    Value originTensor =
-        rewriter.create<bufferization::ToTensorOp>(loc, memref, true, true);
+    Value originTensor = rewriter.create<bufferization::ToTensorOp>(
+        loc, memref::getTensorTypeFromMemRefType(memref.getType()), memref,
+        true, true);
 
     // Get window.
     auto window = op.getOther();
@@ -339,8 +334,6 @@ public:
   LogicalResult
   matchAndRewrite(triton::StoreOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    if (triton::isTensorPointerType(op.getPtr().getType()))
-      return failure();
 
     auto valueTy = dyn_cast<RankedTensorType>(op.getValue().getType());
     if (!valueTy)
@@ -353,8 +346,9 @@ public:
       return failure();
 
     Value memref = getDynamicMemRef(loc, tracker.getBase(), valueTy, rewriter);
-    Value originTensor =
-        rewriter.create<bufferization::ToTensorOp>(loc, memref, true, true);
+    Value originTensor = rewriter.create<bufferization::ToTensorOp>(
+        loc, memref::getTensorTypeFromMemRefType(memref.getType()), memref,
+        true, true);
     // Get scatter init.
     Value scatterInit = rewriter.create<tensor::EmptyOp>(
         op.getLoc(), getDim(rewriter, loc, originTensor, 0),
@@ -415,6 +409,12 @@ private:
 };
 
 //////////////////////////// TensorPtr ///////////////////////////////////////
+#if 0
+// Triton 3.8 represents block pointers as tensor descriptors and lowers them
+// with RewriteTensorDescriptorToPointer before this conversion pipeline. Keep
+// the legacy 3.0 conversion here for branch backports, but do not compile it on
+// main because MakeTensorPtrOp/AdvanceOp and boundary-check attributes no longer
+// exist in TTIR.
 /// According to
 /// https://github.com/triton-lang/triton/blob/main/include/triton/Dialect/TritonGPU/IR/TritonGPUAttrDefs.td#L241
 /// order[i] represent for the i-th fast changing dim, here we want the
@@ -460,7 +460,8 @@ public:
                   getCacheModeAttr(op.getContext(), op.getCache()));
 
     Value sliceTensor = rewriter.create<bufferization::ToTensorOp>(
-        loc, originalMemRef, true, true);
+        loc, memref::getTensorTypeFromMemRefType(originalMemRef.getType()),
+        originalMemRef, true, true);
     auto tensorType = cast<RankedTensorType>(sliceTensor.getType());
     Value emptyTensor = rewriter.create<tensor::EmptyOp>(
         loc, tensorType.getShape(), tensorType.getElementType(),
@@ -560,6 +561,7 @@ public:
     return success();
   }
 };
+#endif
 } // namespace
 
 void triton::populateTritonLoadStoreToLinalgPatterns(
@@ -574,7 +576,4 @@ void triton::populateTritonLoadStoreToLinalgPatterns(
   patterns
       .add<TritonScatteredLoadOpConversion, TritonScatteredStoreOpConversion>(
           converter, context, solver, 0);
-  patterns
-      .add<TritonTensorPtrLoadOpConversion, TritonTensorPtrStoreOpConversion>(
-          converter, context);
 }

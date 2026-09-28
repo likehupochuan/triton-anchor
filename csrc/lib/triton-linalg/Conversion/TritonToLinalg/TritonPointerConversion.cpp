@@ -346,7 +346,7 @@ Value TritonPtrConversionBase::transformInputWithTransposeAndDimInfo(
   RankedTensorType resultType =
       tensor::ExtractSliceOp::inferCanonicalRankReducedResultType(
           desiredResultRank, cast<RankedTensorType>(ret.getType()),
-          transposedOffsets, newSizes, strides);
+          newSizes);
   ret = rewriter
             .create<tensor::ExtractSliceOp>(
                 loc, resultType, ret, transposedOffsets, newSizes, strides)

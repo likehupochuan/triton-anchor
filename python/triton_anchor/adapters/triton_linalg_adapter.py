@@ -32,7 +32,7 @@ class TritonLinalgAdapter(ILinalgPybindAdapter):
     """In-process adapter using triton-linalg (AxisInfo pointer analysis).
 
     This adapter directly calls the MLIR passes from triton-linalg via
-    pybind11 bindings, making it the fastest conversion path.
+    native bindings, making it the fastest conversion path.
 
     Note: The "triton-linalg" name is the Adapter registry name. The
     actual passes wrapped here are triton_race's self-developed 11-pass
@@ -44,17 +44,15 @@ class TritonLinalgAdapter(ILinalgPybindAdapter):
       2. wrap_func_body_with_single_block  — normalize function body
       3. inliner                           — inline called functions
       4. canonicalizer                     — standard canonicalization
-      5. canonicalize_triton               — Triton-specific canonicalization
-      6. pointer_strength_reduction        — pointer analysis (AxisInfo)
-      7. canonicalizer                     — re-canonicalize after pointer analysis
-      8. triton_to_linalg                  — core Triton→Linalg conversion
-      9. extract_like_move_backward        — optimization on extract ops
-      10. canonicalizer                    — post-conversion canonicalization
-      11. arith_to_linalg                  — arithmetic op lowering
-      12. math_to_linalg                   — math op lowering
-      13. cse                              — common sub-expression elimination
-      14. licm                             — loop-invariant code motion
-      15. wrap_func_body_with_single_block — final normalization
+      5. canonicalizer                     — normalize Triton 3.8 TTIR
+      6. triton_to_linalg                  — core Triton→Linalg conversion
+      7. extract_like_move_backward        — optimization on extract ops
+      8. canonicalizer                     — post-conversion canonicalization
+      9. arith_to_linalg                   — arithmetic op lowering
+      10. math_to_linalg                   — math op lowering
+      11. cse                              — common sub-expression elimination
+      12. licm                             — loop-invariant code motion
+      13. wrap_func_body_with_single_block — final normalization
     """
 
     def name(self) -> str:
@@ -132,8 +130,8 @@ class TritonLinalgAdapter(ILinalgPybindAdapter):
 
         common.add_inliner(pm)
         common.add_canonicalizer(pm)
-        tl.add_canonicalize_triton(pm)
-        tl.add_pointer_strength_reduction(pm)
+        # Triton 3.8 removed MakeTensorPtrOp/AdvanceOp. Tensor descriptors are
+        # normalized by the common TTIR pipeline before this adapter runs.
         common.add_canonicalizer(pm)
         tl.add_triton_to_linalg(pm)
         tl.add_extract_like_move_backward(pm)
@@ -158,8 +156,6 @@ class TritonLinalgAdapter(ILinalgPybindAdapter):
             "wrap_func_body_with_single_block",
             "inliner",
             "canonicalizer",
-            "canonicalize_triton",
-            "pointer_strength_reduction",
             "triton_to_linalg",
             "extract_like_move_backward",
             "arith_to_linalg",

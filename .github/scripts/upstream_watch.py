@@ -43,7 +43,7 @@ COMMON_RULES = (
         "本地裁剪入口 -> 必须重放 ops 导出修改",
     ),
     ImpactRule(
-        "cmake/llvm-hash.txt",
+        "cmake/llvm-info.json",
         "高",
         "LLVM 基线变化 -> 可能导致 C++/MLIR API 不兼容",
     ),
@@ -55,7 +55,7 @@ COMMON_RULES = (
     ImpactRule(
         "lib/Dialect/Triton/",
         "高",
-        "TTIR 方言和 Pass 实现 -> 影响语义、7-pass pipeline 和所有后端",
+        "TTIR 方言和 Pass 实现 -> 影响语义、8-pass pipeline 和所有后端",
     ),
     ImpactRule(
         "include/triton/Analysis/",
@@ -80,17 +80,17 @@ COMMON_RULES = (
     ImpactRule(
         "python/src/ir.cc",
         "高",
-        "Pybind IR 核心接口 -> 影响 AST 到 TTIR 生成",
+        "原生绑定 IR 核心接口 -> 影响 AST 到 TTIR 生成",
     ),
     ImpactRule(
         "python/src/passes.cc",
         "中",
-        "Pybind Pass 接口 -> 需同步 anchor_passes.cc",
+        "原生绑定 Pass 接口 -> 需同步 anchor_passes.cc",
     ),
     ImpactRule(
         "python/src/passes.h",
         "中",
-        "Pybind Pass 声明 -> 需核对 passes.cc 和 anchor 绑定",
+        "原生绑定 Pass 声明 -> 需核对 passes.cc 和 anchor 绑定",
     ),
     ImpactRule(
         "include/triton/Dialect/TritonNvidiaGPU/",
@@ -130,7 +130,7 @@ COMMON_RULES = (
     ImpactRule(
         "python/src/",
         "中",
-        "C++ Pybind 绑定 -> 直接影响 libtriton.so 构建和 API",
+        "C++ 原生绑定 -> 直接影响 libtriton.so 构建和 API",
     ),
     ImpactRule(
         "include/triton/Tools/",
