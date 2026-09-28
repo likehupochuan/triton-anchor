@@ -231,7 +231,7 @@
       failure_stage:(row.first_failed_stage === '全部通过' ? '' : row.first_failed_stage) || row.timeout_reason || '', duration_ms:row.duration_seconds * 1000,
       log_url:full?.artifacts.find(a => row.log_file && a.path.endsWith(row.log_file) && a.url)?.url || ''}));
     const latestBackends = new Map();
-    const backendRuns = releaseRuns.filter(run => run.event_kind === 'push');
+    const backendRuns = releaseRuns.filter(run => ['push', 'manual'].includes(run.event_kind));
     for (const run of backendRuns) {
       const backend = backendProfile(run.environment);
       if (run.checks.some(c => c.id.startsWith('backend_') && ['passed','failed','error','cancelled'].includes(c.status)) && !latestBackends.has(backend)) latestBackends.set(backend,run);
