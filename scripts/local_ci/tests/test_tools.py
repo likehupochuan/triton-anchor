@@ -31,15 +31,25 @@ def context():
     }
 
 
-def test_tools_plan_and_build_stage_independence():
+def test_tools_plan_build_dependencies_without_implicit_install():
     for tool in ("frontend_build", "backend_build"):
         spec = runner.plan(tool, context(), {"jobs": 1, "build_mode": "incremental"})
-        assert spec["dependencies"] == ["environment"]
+        expected = ["environment"] if tool == "frontend_build" else ["environment", "frontend_install"]
+        assert spec["dependencies"] == expected
         assert all(c["env"]["MAX_JOBS"] == "1" for c in spec["commands"])
         assert not any("install_wheel" in c["argv"] for c in spec["commands"])
     ctx = context()
     ctx["profile"]["backend_enabled"] = False
     assert runner.plan("backend_build", ctx)["status"] == "not_applicable"
+
+
+@pytest.mark.parametrize("requires_frontend", [None, False, True])
+def test_backend_build_always_depends_on_frontend_wheel_install(requires_frontend):
+    ctx = context()
+    if requires_frontend is not None:
+        ctx["profile"]["tools"]["backend_build_requires_frontend"] = requires_frontend
+    assert runner.plan("frontend_install", ctx)["dependencies"] == ["frontend_build"]
+    assert runner.plan("backend_build", ctx)["dependencies"] == ["environment", "frontend_install"]
 
 
 def test_profile_setup_preserves_arguments_and_selected_python():

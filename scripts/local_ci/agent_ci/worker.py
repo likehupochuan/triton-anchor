@@ -28,6 +28,7 @@ from agent_ci.policy import changed_files, minimum_checks
 from agent_ci.protocol import ID, SHA, ContractError, atomic_json, is_legacy_task, validate_task, validate_result
 from agent_ci.relay import GitRelay
 from agent_ci.state import Journal
+from agent_ci.recovery import diagnose_report, completed_tools, retry_observation, recovery_prompt, write_handoff
 from prepare.control_update import (
     REQUEST_SCHEMA,
     control_request_plan,
@@ -260,31 +261,24 @@ class Worker:
     @staticmethod
     def complete_report(path, policy):
         """An actual failed check is final even if the CLI's own shutdown failed."""
-        try:
-            report = json.loads(path.read_text())
-            if not isinstance(report, dict) or report.get("status") not in {"pass", "fail", "infra_error", "cancelled"}:
-                return None
-            checks, reviews = report.get("checks"), report.get("reviews")
-            if not isinstance(checks, list) or not isinstance(reviews, list):
-                return None
-            from agent_ci.delivery import _records, required_parameters_match
-            checked = _records(checks, "tool_id")
-            reviewed = _records(reviews, "kind")
-            if report["status"] == "fail" or any(x["status"] == "fail" for x in checked + reviewed):
-                return report
-            if report["status"] in {"infra_error", "cancelled"}:
-                return report
-            selected = {x["tool_id"]: x for x in checked}
-            parameters_match = all(required_parameters_match(
-                selected.get(tool_id, {}), expected,
-            ) for tool_id, expected in policy.get("required_parameters", {}).items())
-            if (set(policy.get("required_checks", [])) <= set(selected)
-                    and set(policy.get("required_reviews", [])) <= {x["kind"] for x in reviewed}
-                    and parameters_match):
-                return report
-        except (OSError, ValueError, TypeError, KeyError):
-            pass
-        return None
+        return diagnose_report(path, policy)["report"]
+
+    def previous_runs(self, task_id):
+        """Follow only this frozen task's bounded execution lineage."""
+        state = self.journal.record(task_id)
+        previous = state.get("previous_run_id")
+        seen, runs = {state["run_id"]}, []
+        limit = state.get("budget", {}).get("execution_attempts_used", 0)
+        while previous and previous not in seen and len(runs) < limit:
+            seen.add(previous)
+            try:
+                directory = self.journal.run_dir(task_id, previous)
+                state = self.journal.record(task_id, previous)
+            except (OSError, ValueError):
+                break  # Historical evidence may already have expired.
+            runs.append((directory, state))
+            previous = state.get("previous_run_id")
+        return runs
 
     def seal_checkpoint(self, row):
         task_id, run_id = row["task_id"], row["run_id"]
@@ -503,7 +497,9 @@ class Worker:
             self.journal.update(task_id, last_progress_at=time.time())
             current = self.journal.record(task_id)
             no_progress = current.get("resume_no_progress_attempts", 0)
+            observation = current.get("retry_observation", {})
             new_session = current.get("next_session_mode") == "new"
+            previous_runs = self.previous_runs(task_id)
             while not active.cancelled.is_set():
                 try:
                     if hasattr(self.driver, "check_credentials"):
@@ -515,7 +511,12 @@ class Worker:
                     break
                 budget = self.journal.claim(task_id, "codex_attempts_used", self.config.get("codex_attempts", 10), timeout=self.config.get("codex_timeout_seconds", 21600))
                 deadline = min(budget["codex_deadline_at"], budget.get("recovery_deadline_at") or float("inf"))
-                kwargs = dict(cancelled=active.cancelled, deadline=time.monotonic() + max(0, deadline-time.time()), recovery="Inspect saved results before retrying; preserve genuine test failures." if budget["codex_attempts_used"] > 1 else "")
+                if budget["codex_attempts_used"] > 1:
+                    write_handoff(run_dir, task, environment, observation, previous_runs, self.driver.redact,
+                                  rebuilt=bool(current.get("previous_run_id")))
+                kwargs = dict(cancelled=active.cancelled, deadline=time.monotonic() + max(0, deadline-time.time()), recovery=recovery_prompt(observation) if budget["codex_attempts_used"] > 1 else "")
+                if budget["codex_attempts_used"] > 1:
+                    kwargs["recovery"] += "\n先读 /task/artifacts/recovery-context.json；核对当前环境、已有证据和遗留进程，再继续未完成工作。"
                 if new_session:
                     kwargs["session_mode"] = "new"
                     new_session = False
@@ -533,7 +534,8 @@ class Worker:
                     self.journal.event(task_id, "codex_error", {"error": str(exc)})
                 self.journal.update(task_id, next_session_mode="resume_if_available")
                 self.journal.event(task_id, "codex_exit", outcome)
-                report = self.complete_report(run_dir / "artifacts/agent-result.json", policy)
+                diagnosis = diagnose_report(run_dir / "artifacts/agent-result.json", policy)
+                report = diagnosis["report"]
                 if report is not None:
                     recovered = budget["codex_attempts_used"] > 1 or budget["execution_attempts_used"] > 1
                     self.recovery(task_id, "recovered" if recovered else "normal", action="continue_sealing")
@@ -543,14 +545,18 @@ class Worker:
                 if active.cancelled.is_set():
                     break
                 code = outcome.get("failure_code") or "result_missing"
+                observation, progressed = retry_observation(
+                    diagnosis, completed_tools(run_dir / "artifacts", environment), observation,
+                )
+                self.journal.update(task_id, retry_observation=observation)
                 if code == "authentication":
                     self.journal.update(task_id, credentials_fingerprint=getattr(self.driver, "credentials_fingerprint", lambda: "")())
                     wait_code = code
                     self.recovery(task_id, "waiting_dependency", code, "wait_credentials")
                     break
                 if code not in {"rate_limit", "authentication"}:
-                    no_progress = no_progress + 1 if outcome.get("session_reused") and not outcome.get("progressed") else 0
-                if code == "session_invalid" or no_progress >= self.config.get("codex_resume_no_progress_attempts", 2):
+                    no_progress = no_progress + 1 if outcome.get("session_reused") and not progressed else 0
+                if code not in {"rate_limit", "authentication"} and (code == "session_invalid" or no_progress >= self.config.get("codex_resume_no_progress_attempts", 2)):
                     if budget.get("session_switches", 0) < self.config.get("codex_session_switches", 1):
                         self.journal.claim(task_id, "session_switches", self.config.get("codex_session_switches", 1))
                         new_session = True

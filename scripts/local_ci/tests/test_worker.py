@@ -781,6 +781,100 @@ def test_no_progress_resume_switches_session_once_without_new_budget(recovery_wo
     assert budget["codex_attempts_used"] == 4 and budget["session_switches"] == 1
 
 
+def test_repeated_invalid_report_switches_despite_cli_activity(recovery_worker):
+    f = recovery_worker
+    def repeating(executor, **kwargs):
+        f.calls.append(kwargs)
+        atomic_json(executor.run_dir / "artifacts/agent-result.json", {
+            "status": "pass", "summary": f"Still working {len(f.calls)}",
+        })
+        if len(f.calls) == 4:
+            f.write_report(executor)
+        return {"exit_code": 0, "session_reused": len(f.calls) > 1,
+                "progressed": True, "activity_observed": True}
+    f.worker.driver.run = repeating
+    f.worker.scan()
+    assert len(f.calls) == 4 and f.calls[-1]["session_mode"] == "new"
+    assert "checks" in f.calls[1]["recovery"] and "reviews" in f.calls[1]["recovery"]
+    budget = f.worker.journal.task(f.task["task_id"])["budget"]
+    assert budget["codex_attempts_used"] == 4 and budget["session_switches"] == 1
+
+
+def test_report_correction_finishes_without_session_switch(recovery_worker):
+    f = recovery_worker
+    def correcting(executor, **kwargs):
+        f.calls.append(kwargs)
+        if len(f.calls) == 1:
+            atomic_json(executor.run_dir / "artifacts/agent-result.json", {"status": "pass"})
+        else:
+            assert "checks" in kwargs["recovery"]
+            f.write_report(executor, "pass")
+        return {"exit_code": 0, "session_reused": len(f.calls) > 1}
+    f.worker.driver.run = correcting
+    f.worker.scan()
+    assert len(f.calls) == 2
+    assert f.worker.journal.task(f.task["task_id"])["budget"]["session_switches"] == 0
+
+
+def test_auth_rebuild_hands_off_evidence_without_restoring_installs(recovery_worker):
+    f = recovery_worker
+    first_run = []
+    def recovering(executor, **kwargs):
+        f.calls.append(kwargs)
+        if len(f.calls) == 1:
+            first_run.append(executor.run_dir)
+            (executor.run_dir / "artifacts/recovery-notes.md").write_text("Dependency fixed; frontend install still required")
+            return {"exit_code": 1, "failure_code": "authentication"}
+        assert executor.run_dir != first_run[0]
+        handoff = json.loads((executor.run_dir / "artifacts/recovery-context.json").read_text())
+        assert handoff["environment_rebuilt"] is True
+        previous = handoff["previous_runs"][0]
+        assert previous["run_id"] == first_run[0].name and previous["installation_valid"] is False
+        assert "frontend install still required" in (executor.run_dir / "artifacts" / previous["files"][0]).read_text()
+        assert not (executor.run_dir / "artifacts/agent-result.json").exists()
+        f.write_report(executor)
+        return {"exit_code": 0}
+    f.worker.driver.run = recovering
+    f.worker.scan()
+    deadline = f.worker.journal.task(f.task["task_id"])["budget"]["codex_deadline_at"]
+    f.credentials[0] = "changed"
+    f.worker.scan()
+    row = f.worker.journal.task(f.task["task_id"])
+    assert len(f.calls) == 2 and row["phase"] == "published"
+    assert row["budget"]["codex_deadline_at"] == deadline
+
+
+def test_restart_lineage_survives_reload_and_missing_history(recovery_worker):
+    f = recovery_worker
+    journal = f.worker.journal
+    first = journal.register(f.task)
+    journal.claim(f.task["task_id"], "execution_attempts_used", 3)
+    second = journal.restart(f.task["task_id"])
+    journal.claim(f.task["task_id"], "execution_attempts_used", 3)
+    journal.restart(f.task["task_id"])
+    journal.claim(f.task["task_id"], "execution_attempts_used", 3)
+    f.worker.journal = Journal(f.worker.state_dir)
+    previous = f.worker.previous_runs(f.task["task_id"])
+    assert [path.name for path, _ in previous] == [second["run_id"], first["run_id"]]
+    (previous[1][0] / "task.json").unlink()
+    assert len(f.worker.previous_runs(f.task["task_id"])) == 1
+
+
+def test_rate_limit_does_not_spend_pending_no_progress_switch(recovery_worker, monkeypatch):
+    f = recovery_worker
+    f.worker.config["codex_resume_no_progress_attempts"] = 1
+    def throttled(executor, **kwargs):
+        f.calls.append(kwargs)
+        if len(f.calls) == 3:
+            f.write_report(executor)
+        return {"exit_code": 1, "failure_code": "rate_limit", "session_reused": True}
+    f.worker.driver.run = throttled
+    monkeypatch.setattr("agent_ci.worker.threading.Event.wait", lambda *a, **k: False)
+    f.worker.scan()
+    assert len(f.calls) == 3 and all("session_mode" not in call for call in f.calls)
+    assert f.worker.journal.task(f.task["task_id"])["budget"]["session_switches"] == 0
+
+
 def test_upload_backoff_keeps_immutable_result_until_success(recovery_worker, monkeypatch):
     f = recovery_worker
     row = f.worker.journal.register(f.task)

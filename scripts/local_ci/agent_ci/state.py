@@ -104,6 +104,7 @@ class Journal:
                 "task_id": task["task_id"],
                 "head_sha": task["head_sha"],
                 "run_id": run_id,
+                "previous_run_id": (previous or {}).get("run_id"),
                 "phase": "preparing",
                 "updated": time.time(),
                 "detail": {},

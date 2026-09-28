@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Reusable local build and test commands, callable from a shell or Python.
 
-Build, install, tests and smoke are independent stages. Dependencies describe
-preparation; callers choose the order and may use their own equivalent commands.
+Build, install, tests and smoke are separately callable stages. Callers must
+satisfy dependencies first and may use their own equivalent commands.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ DEPENDENCIES = {
     "frontend_install": ["frontend_build"],
     "frontend_tests": ["frontend_install"],
     "frontend_smoke": ["frontend_install"],
-    "backend_build": ["environment"],
+    "backend_build": ["environment", "frontend_install"],
     "backend_install": ["backend_build", "frontend_install"],
     "backend_tests": ["frontend_install", "backend_install"],
     "backend_smoke": ["frontend_install", "backend_install"],
@@ -62,12 +62,7 @@ MINIMUM_FRONTEND = (
 
 
 def dependencies(tool_id: str, config: dict[str, Any] | None = None) -> list[str]:
-    selected = list(DEPENDENCIES[tool_id])
-    if tool_id == "backend_build" and (config or {}).get(
-        "backend_build_requires_frontend"
-    ):
-        selected.append("frontend_install")
-    return selected
+    return list(DEPENDENCIES[tool_id])
 
 
 def parameter_names(tool_id: str) -> set[str]:

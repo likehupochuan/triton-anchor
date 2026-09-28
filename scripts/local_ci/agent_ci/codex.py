@@ -289,6 +289,8 @@ class CodexDriver:
             }.get(self.health["codex_status"], "cli_failed" if process.returncode else ""),
             "session_reused": bool(session_id),
             "session_id": json.loads(saved.read_text()).get("session_id") if saved.exists() else None,
-            "progressed": self.health.get("last_progress_at") is not None,
+            # CLI activity is not evidence of task progress. The Worker compares
+            # report diagnostics and completed tool results after this exit.
+            "activity_observed": self.health.get("last_progress_at") is not None,
             "last_progress_at": self.health.get("last_progress_at"),
         }

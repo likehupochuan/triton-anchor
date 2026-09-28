@@ -10,13 +10,19 @@
 | frontend_build | 前端构建依赖 | 构建 frontend wheel |
 | frontend_install | frontend wheel | 无依赖更新地安装 wheel，验证实际 import 来源 |
 | frontend_tests / frontend_smoke | 已安装 frontend | 选测 / 前端 smoke，可独立调用 |
-| backend_build | 后端构建依赖 | 独立构建 backend wheel |
+| backend_build | 后端构建依赖、已安装并验证导入的 frontend wheel | 构建 backend wheel |
 | backend_install | backend wheel、frontend | 安装 wheel 并验证后端发现 |
 | backend_tests / backend_smoke | 已安装 frontend、backend | 后端选测 / 真实 JIT |
 | flaggems | 可用后端与预置 FlagGems | 按影响或全量清单逐算子测试 |
 | compile_time / pass_profile / ir_serialization | 可用后端 | 正确性及有效测量检查，再与同条件基线比较 |
 
 准备条件用于安排工作，工具不会自动递归执行构建、安装或其他阶段。
+目前仅 Triton 3.0 环境支持后端构建与测试；其他版本的后端相关工具返回 `not_applicable`，
+只执行适用的前端验证。后端能力以各 variant 的可信 context 为准。
+启用后端时，同一 variant 必须按 `frontend_build → frontend_install → backend_build → backend_install → backend_tests/backend_smoke`
+的阶段依赖执行：前端 wheel 生成、安装及导入验证成功后，才能开始后端构建。
+前端构建/安装与后端构建/测试不能并行；前置阶段失败或仍在运行时不得启动后续阶段。
+该依赖也适用于原生命令，base 与 candidate 分别满足各自的前置条件。
 路径分类生成的工具与参数是建议，Codex 根据实际 diff 选择，也可直接对源码运行定向检查。
 `frontend_tests` / `frontend_smoke` 本身需要已安装 frontend；不需要安装包的独立源码测试
 使用原生命令执行。`change_validation` 是结果中的影响、选测理由与证据汇总，不是工具。
