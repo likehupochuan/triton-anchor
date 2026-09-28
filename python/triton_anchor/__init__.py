@@ -13,6 +13,7 @@ Architecture:
 
 __version__ = "0.2.0"
 
+# Re-export the frontend API from the package root.
 from .hw_capability import (
     HWCapability as HWCapability,
     ComputeParadigm as ComputeParadigm,
